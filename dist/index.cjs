@@ -1,0 +1,34 @@
+const _mod_qwqn37 = require('./core/rezo.cjs');
+exports.Rezo = _mod_qwqn37.Rezo;
+exports.createRezoInstance = _mod_qwqn37.createRezoInstance;
+exports.createDefaultInstance = _mod_qwqn37.createDefaultInstance;;
+const _mod_fm4g1z = require('./errors/rezo-error.cjs');
+exports.RezoError = _mod_fm4g1z.RezoError;
+exports.RezoErrorCode = _mod_fm4g1z.RezoErrorCode;;
+const _mod_gmgjw3 = require('./utils/headers.cjs');
+exports.RezoHeaders = _mod_gmgjw3.RezoHeaders;;
+const _mod_54z64o = require('./utils/form-data.cjs');
+exports.RezoFormData = _mod_54z64o.RezoFormData;;
+const _mod_7igqvz = require('./utils/cookies.cjs');
+exports.RezoCookieJar = _mod_7igqvz.RezoCookieJar;;
+const _mod_evfvvi = require('./core/hooks.cjs');
+exports.createDefaultHooks = _mod_evfvvi.createDefaultHooks;
+exports.mergeHooks = _mod_evfvvi.mergeHooks;;
+const { RezoError } = require('./errors/rezo-error.cjs');
+const isRezoError = exports.isRezoError = RezoError.isRezoError;
+const Cancel = exports.Cancel = RezoError;
+const CancelToken = exports.CancelToken = AbortController;
+const isCancel = exports.isCancel = (error) => {
+  return error instanceof RezoError && error.code === "ECONNABORTED";
+};
+const all = exports.all = Promise.all.bind(Promise);
+const spread = exports.spread = (callback) => (array) => callback(...array);
+const packageJson = require("../package.json");
+const VERSION = exports.VERSION = packageJson.version;
+const { executeRequest } = require('./adapters/http.cjs');
+const { setGlobalAdapter, createRezoInstance } = require('./core/rezo.cjs');
+setGlobalAdapter(executeRequest);
+const rezo = createRezoInstance(executeRequest);
+
+exports.default = rezo;
+module.exports = Object.assign(rezo, exports);

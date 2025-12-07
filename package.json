@@ -1,0 +1,172 @@
+{
+  "name": "rezo",
+  "version": "1.0.1",
+  "description": "Lightning-fast, enterprise-grade HTTP client for modern JavaScript. Full HTTP/2 support, intelligent cookie management, multiple adapters (HTTP, Fetch, cURL, XHR), streaming, proxy support (HTTP/HTTPS/SOCKS), and cross-environment compatibility.",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "sideEffects": false,
+  "author": "Olajide Mathew Ogundare <git@yuniq.solutions>",
+  "company": "Yuniq Solutions Tech",
+  "license": "MIT",
+  "keywords": [
+    "http",
+    "http2",
+    "https",
+    "http-client",
+    "request",
+    "response",
+    "fetch",
+    "curl",
+    "xhr",
+    "typescript",
+    "cookies",
+    "cookie-jar",
+    "web-scraping",
+    "crawler",
+    "scraper",
+    "nodejs",
+    "node",
+    "browser",
+    "bun",
+    "deno",
+    "edge-runtime",
+    "cloudflare-workers",
+    "react-native",
+    "streaming",
+    "proxy",
+    "socks",
+    "socks5",
+    "download",
+    "upload",
+    "progress",
+    "interceptors",
+    "hooks",
+    "adapters",
+    "retry",
+    "timeout",
+    "enterprise",
+    "production-ready"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yuniqsolutions/rezo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yuniqsolutions/rezo/issues"
+  },
+  "homepage": "https://github.com/yuniqsolutions/rezo#readme",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "form-data": "^4.0.4",
+    "tough-cookie": "^5.1.2",
+    "http-proxy-agent": "^7.0.2",
+    "https-proxy-agent": "^7.0.6",
+    "socks-proxy-agent": "^8.0.5",
+    "p-queue": "^8.1.0",
+    "linkedom": "^0.18.11",
+    "agent-base": "^7.1.4"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./crawler": {
+      "types": "./dist/crawler.d.ts",
+      "import": "./dist/entries/crawler.js",
+      "require": "./dist/entries/crawler.cjs"
+    },
+    "./dom": {
+      "types": "./dist/dom/index.d.ts",
+      "import": "./dist/dom/index.js",
+      "require": "./dist/dom/index.cjs"
+    },
+    "./platform/node": {
+      "types": "./dist/platform/node.d.ts",
+      "import": "./dist/platform/node.js",
+      "require": "./dist/platform/node.cjs"
+    },
+    "./platform/browser": {
+      "types": "./dist/platform/browser.d.ts",
+      "import": "./dist/platform/browser.js",
+      "require": "./dist/platform/browser.cjs"
+    },
+    "./platform/bun": {
+      "types": "./dist/platform/bun.d.ts",
+      "import": "./dist/platform/bun.js",
+      "require": "./dist/platform/bun.cjs"
+    },
+    "./platform/deno": {
+      "types": "./dist/platform/deno.d.ts",
+      "import": "./dist/platform/deno.js",
+      "require": "./dist/platform/deno.cjs"
+    },
+    "./platform/worker": {
+      "types": "./dist/platform/worker.d.ts",
+      "import": "./dist/platform/worker.js",
+      "require": "./dist/platform/worker.cjs"
+    },
+    "./platform/react-native": {
+      "types": "./dist/platform/react-native.d.ts",
+      "import": "./dist/platform/react-native.js",
+      "require": "./dist/platform/react-native.cjs"
+    },
+    "./adapters/http": {
+      "types": "./dist/adapters/entries/http.d.ts",
+      "import": "./dist/adapters/entries/http.js",
+      "require": "./dist/adapters/entries/http.cjs"
+    },
+    "./adapters/http2": {
+      "types": "./dist/adapters/entries/http2.d.ts",
+      "import": "./dist/adapters/entries/http2.js",
+      "require": "./dist/adapters/entries/http2.cjs"
+    },
+    "./adapters/fetch": {
+      "types": "./dist/adapters/entries/fetch.d.ts",
+      "import": "./dist/adapters/entries/fetch.js",
+      "require": "./dist/adapters/entries/fetch.cjs"
+    },
+    "./adapters/curl": {
+      "types": "./dist/adapters/entries/curl.d.ts",
+      "import": "./dist/adapters/entries/curl.js",
+      "require": "./dist/adapters/entries/curl.cjs"
+    },
+    "./adapters/xhr": {
+      "types": "./dist/adapters/entries/xhr.d.ts",
+      "import": "./dist/adapters/entries/xhr.js",
+      "require": "./dist/adapters/entries/xhr.cjs"
+    },
+    "./adapters/react-native": {
+      "types": "./dist/adapters/entries/react-native.d.ts",
+      "import": "./dist/adapters/entries/react-native.js",
+      "require": "./dist/adapters/entries/react-native.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "browser": {
+    "./dist/platform/node.js": "./dist/platform/browser.js",
+    "./dist/platform/node.cjs": "./dist/platform/browser.cjs",
+    "./dist/adapters/http.js": "./dist/adapters/fetch.js",
+    "./dist/adapters/http.cjs": "./dist/adapters/fetch.cjs"
+  },
+  "react-native": {
+    "./dist/platform/node.js": "./dist/platform/react-native.js",
+    "./dist/platform/node.cjs": "./dist/platform/react-native.cjs",
+    "./dist/adapters/http.js": "./dist/adapters/react-native.js"
+  },
+  "files": [
+    "dist/**/*",
+    "assets/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

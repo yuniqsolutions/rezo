@@ -1,0 +1,161 @@
+import NodeFormData from "form-data";
+import { Readable } from "node:stream";
+
+export class RezoFormData extends NodeFormData {
+  constructor(options) {
+    super(options);
+  }
+  async getFieldEntries() {
+    return new Promise((resolve, reject) => {
+      const entries = [];
+      const fields = this._fields || [];
+      for (const field of fields) {
+        if (field && field.name && field.value !== undefined) {
+          entries.push([field.name, field.value]);
+        }
+      }
+      resolve(entries);
+    });
+  }
+  async toNativeFormData() {
+    if (typeof globalThis !== "undefined" && typeof globalThis.FormData !== "undefined" || typeof global !== "undefined" && typeof global.FormData !== "undefined" || typeof window !== "undefined" && typeof window.FormData !== "undefined") {
+      const formData = new FormData;
+      const entries = await this.getFieldEntries();
+      for (const [key, value] of entries) {
+        if (value instanceof Readable) {
+          const chunks = [];
+          for await (const chunk of value) {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          }
+          const buffer = Buffer.concat(chunks);
+          const blob = new Blob([buffer]);
+          formData.append(key, blob);
+        } else {
+          formData.append(key, value);
+        }
+      }
+      return formData;
+    }
+    return null;
+  }
+  static async fromNativeFormData(formData, options) {
+    const rezoFormData = new RezoFormData(options);
+    for (const [key, value] of Array.from(formData.entries())) {
+      if (typeof File !== "undefined" && value instanceof File) {
+        const file = value;
+        const arrayBuffer = await file.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        rezoFormData.append(key, buffer, {
+          filename: file.name,
+          contentType: file.type || "application/octet-stream"
+        });
+      } else if (typeof Blob !== "undefined" && value instanceof Blob) {
+        const blob = value;
+        const arrayBuffer = await blob.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        rezoFormData.append(key, buffer, {
+          contentType: blob.type || "application/octet-stream"
+        });
+      } else {
+        rezoFormData.append(key, value);
+      }
+    }
+    return rezoFormData;
+  }
+  getContentType() {
+    return `multipart/form-data; boundary=${this.getBoundary()}`;
+  }
+  toBuffer() {
+    return Buffer.from(this.toString());
+  }
+  static fromObject(obj, options) {
+    const formData = new RezoFormData(options);
+    for (const [key, value] of Object.entries(obj)) {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          formData.append(key, item);
+        }
+      } else {
+        formData.append(key, value);
+      }
+    }
+    return formData;
+  }
+  async toUrlQueryString(convertBinaryToBase64 = false) {
+    const params = new URLSearchParams;
+    let hasOmittedData = false;
+    try {
+      const entries = await this.getFieldEntries();
+      for (const [name, value] of entries) {
+        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+          params.append(name, String(value));
+        } else if (value instanceof Buffer) {
+          if (convertBinaryToBase64) {
+            params.append(name, value.toString("base64"));
+          } else {
+            hasOmittedData = true;
+          }
+        } else if (value instanceof Readable || typeof File !== "undefined" && value instanceof File || typeof Blob !== "undefined" && value instanceof Blob) {
+          if (convertBinaryToBase64 && value instanceof File) {
+            hasOmittedData = true;
+          } else {
+            hasOmittedData = true;
+          }
+        } else if (typeof value === "object" && value && "value" in value) {
+          if (typeof value.value === "string" || typeof value.value === "number" || typeof value.value === "boolean") {
+            params.append(name, String(value.value));
+          } else {
+            hasOmittedData = true;
+          }
+        } else {
+          hasOmittedData = true;
+        }
+      }
+    } catch (error) {
+      console.warn("RezoFormData.toUrlQueryString(): Error reading form data entries:", error);
+    }
+    if (hasOmittedData && !convertBinaryToBase64) {
+      console.warn("RezoFormData.toUrlQueryString(): Binary data, files, and blobs have been omitted. Use convertBinaryToBase64=true to include binary data as base64 strings.");
+    }
+    return params.toString();
+  }
+  async toURLSearchParams(convertBinaryToBase64 = false) {
+    const params = new URLSearchParams;
+    let hasOmittedData = false;
+    try {
+      const entries = await this.getFieldEntries();
+      for (const [name, value] of entries) {
+        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+          params.append(name, String(value));
+        } else if (value instanceof Buffer) {
+          if (convertBinaryToBase64) {
+            params.append(name, value.toString("base64"));
+          } else {
+            hasOmittedData = true;
+          }
+        } else if (value instanceof Readable || typeof File !== "undefined" && value instanceof File || typeof Blob !== "undefined" && value instanceof Blob) {
+          if (convertBinaryToBase64 && value instanceof File) {
+            hasOmittedData = true;
+          } else {
+            hasOmittedData = true;
+          }
+        } else if (typeof value === "object" && value && "value" in value) {
+          if (typeof value.value === "string" || typeof value.value === "number" || typeof value.value === "boolean") {
+            params.append(name, String(value.value));
+          } else {
+            hasOmittedData = true;
+          }
+        } else {
+          hasOmittedData = true;
+        }
+      }
+    } catch (error) {
+      console.warn("RezoFormData.toURLSearchParams(): Error reading form data entries:", error);
+    }
+    if (hasOmittedData && !convertBinaryToBase64) {
+      console.warn("RezoFormData.toURLSearchParams(): Binary data, files, and blobs have been omitted. Use convertBinaryToBase64=true to include binary data as base64 strings.");
+    }
+    return params;
+  }
+}
+export default RezoFormData;
