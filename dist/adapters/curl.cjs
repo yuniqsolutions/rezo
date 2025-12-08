@@ -6,8 +6,8 @@ const { spawn, execSync } = require("node:child_process");
 const { Readable } = require("node:stream");
 const { EventEmitter } = require("node:events");
 const { RezoError } = require('../errors/rezo-error.cjs');
-const { buildSmartError } = require('../responses/buildError.cjs');
-const { Cookie } = require('../utils/cookies.cjs');
+const { buildSmartError, builErrorFromResponse } = require('../responses/buildError.cjs');
+const { RezoCookieJar, Cookie } = require('../utils/cookies.cjs');
 const RezoFormData = require('../utils/form-data.cjs');
 const { existsSync } = require("node:fs");
 const { getDefaultConfig, prepareHTTPOptions } = require('../utils/http-config.cjs');
@@ -16,6 +16,24 @@ const { StreamResponse } = require('../responses/stream.cjs');
 const { DownloadResponse } = require('../responses/download.cjs');
 const { UploadResponse } = require('../responses/upload.cjs');
 const { RezoPerformance } = require('../utils/tools.cjs');
+function mergeRequestAndResponseCookies(requestCookies, responseCookies) {
+  if (!requestCookies || requestCookies.length === 0) {
+    return responseCookies;
+  }
+  if (responseCookies.length === 0) {
+    return requestCookies;
+  }
+  const cookieMap = new Map;
+  for (const cookie of requestCookies) {
+    const key = `${cookie.key}|${cookie.domain || ""}`;
+    cookieMap.set(key, cookie);
+  }
+  for (const cookie of responseCookies) {
+    const key = `${cookie.key}|${cookie.domain || ""}`;
+    cookieMap.set(key, cookie);
+  }
+  return Array.from(cookieMap.values());
+}
 
 class CurlCapabilities {
   static instance;
@@ -261,12 +279,808 @@ class CurlCommandBuilder {
     this.buildDownloadOptions(config, originalRequest, createdTempFiles);
     this.buildHeaders(config);
     this.buildRedirectOptions(config, originalRequest);
-    this.buildRequestBody(config, createdTempFiles);
+    this.buildRequestBody(config, originalRequest, createdTempFiles);
     if (originalRequest.onUploadProgress || originalRequest.onDownloadProgress) {
       this.addArg("--progress-bar");
     }
+    this.applyCurlOptions(originalRequest.curl);
     this.addArg("-w", this.buildWriteOutFormat());
     return { args: this.args, tempFiles: createdTempFiles, cookieJar };
+  }
+  applyCurlOptions(curlOpts) {
+    if (!curlOpts) {
+      return;
+    }
+    if (curlOpts.connectTimeout !== undefined) {
+      this.replaceArg("--connect-timeout", curlOpts.connectTimeout.toString());
+    }
+    if (curlOpts.maxTime !== undefined) {
+      this.replaceArg("--max-time", curlOpts.maxTime.toString());
+    }
+    if (curlOpts.expect100Timeout !== undefined) {
+      this.addArg("--expect100-timeout", curlOpts.expect100Timeout.toString());
+    }
+    if (curlOpts.keepaliveTime !== undefined) {
+      this.addArg("--keepalive-time", curlOpts.keepaliveTime.toString());
+    }
+    if (curlOpts.noKeepalive === true) {
+      this.addArg("--no-keepalive");
+    }
+    if (curlOpts.tcpFastOpen === true) {
+      this.addArg("--tcp-fastopen");
+    }
+    if (curlOpts.tcpNodelay === true) {
+      this.addArg("--tcp-nodelay");
+    }
+    if (curlOpts.limitRate) {
+      this.addArg("--limit-rate", curlOpts.limitRate);
+    }
+    if (curlOpts.speedLimit) {
+      this.addArg("--speed-limit", curlOpts.speedLimit.limit.toString());
+      if (curlOpts.speedLimit.time !== undefined) {
+        this.addArg("--speed-time", curlOpts.speedLimit.time.toString());
+      }
+    }
+    if (curlOpts.retry) {
+      if (curlOpts.retry.attempts !== undefined) {
+        this.addArg("--retry", curlOpts.retry.attempts.toString());
+      }
+      if (curlOpts.retry.delay !== undefined) {
+        this.addArg("--retry-delay", curlOpts.retry.delay.toString());
+      }
+      if (curlOpts.retry.maxTime !== undefined) {
+        this.addArg("--retry-max-time", curlOpts.retry.maxTime.toString());
+      }
+      if (curlOpts.retry.allErrors === true) {
+        this.addArg("--retry-all-errors");
+      }
+      if (curlOpts.retry.connRefused === true) {
+        this.addArg("--retry-connrefused");
+      }
+    }
+    if (curlOpts.interface) {
+      this.addArg("--interface", curlOpts.interface);
+    }
+    if (curlOpts.localAddress) {
+      this.addArg("--local-address", curlOpts.localAddress);
+    }
+    if (curlOpts.localPort !== undefined) {
+      if (typeof curlOpts.localPort === "number") {
+        this.addArg("--local-port", curlOpts.localPort.toString());
+      } else {
+        const portRange = curlOpts.localPort.end ? `${curlOpts.localPort.start}-${curlOpts.localPort.end}` : curlOpts.localPort.start.toString();
+        this.addArg("--local-port", portRange);
+      }
+    }
+    if (curlOpts.ipVersion) {
+      switch (curlOpts.ipVersion) {
+        case "v4":
+          this.addArg("--ipv4");
+          break;
+        case "v6":
+          this.addArg("--ipv6");
+          break;
+      }
+    }
+    if (curlOpts.resolve) {
+      for (const entry of curlOpts.resolve) {
+        if (typeof entry === "string") {
+          this.addArg("--resolve", entry);
+        } else {
+          const resolveEntry = entry;
+          this.addArg("--resolve", `${resolveEntry.host}:${resolveEntry.port}:${resolveEntry.address}`);
+        }
+      }
+    }
+    if (curlOpts.connectTo) {
+      for (const entry of curlOpts.connectTo) {
+        if (typeof entry === "string") {
+          this.addArg("--connect-to", entry);
+        } else {
+          const connectEntry = entry;
+          this.addArg("--connect-to", `${connectEntry.host}:${connectEntry.port}:${connectEntry.connectHost}:${connectEntry.connectPort}`);
+        }
+      }
+    }
+    if (curlOpts.noProxy) {
+      const noProxyValue = Array.isArray(curlOpts.noProxy) ? curlOpts.noProxy.join(",") : curlOpts.noProxy;
+      this.addArg("--noproxy", noProxyValue);
+    }
+    if (curlOpts.unixSocket) {
+      this.addArg("--unix-socket", curlOpts.unixSocket);
+    }
+    if (curlOpts.abstractUnixSocket) {
+      this.addArg("--abstract-unix-socket", curlOpts.abstractUnixSocket);
+    }
+    if (curlOpts.happyEyeballsTimeout !== undefined) {
+      this.addArg("--happy-eyeballs-timeout-ms", curlOpts.happyEyeballsTimeout.toString());
+    }
+    if (curlOpts.httpVersion) {
+      this.removeArg("--http1.1");
+      this.removeArg("--http2");
+      switch (curlOpts.httpVersion) {
+        case "1.0":
+          this.addArg("--http1.0");
+          break;
+        case "1.1":
+          this.addArg("--http1.1");
+          break;
+        case "2":
+          this.addArg("--http2");
+          break;
+        case "2-prior-knowledge":
+          this.addArg("--http2-prior-knowledge");
+          break;
+        case "3":
+          this.addArg("--http3");
+          break;
+        case "3-only":
+          this.addArg("--http3-only");
+          break;
+      }
+    }
+    if (curlOpts.pathAsIs === true) {
+      this.addArg("--path-as-is");
+    }
+    if (curlOpts.requestTarget) {
+      this.addArg("--request-target", curlOpts.requestTarget);
+    }
+    if (curlOpts.globOff === true) {
+      this.addArg("--globoff");
+    }
+    if (curlOpts.sslVersion) {
+      this.applySslVersion(curlOpts.sslVersion);
+    }
+    if (curlOpts.tlsMin) {
+      this.addArg("--tls-min", curlOpts.tlsMin.replace("tlsv", ""));
+    }
+    if (curlOpts.tlsMax) {
+      this.addArg("--tls-max", curlOpts.tlsMax.replace("tlsv", ""));
+    }
+    if (curlOpts.tls13Ciphers) {
+      this.addArg("--tls13-ciphers", curlOpts.tls13Ciphers);
+    }
+    if (curlOpts.ciphers) {
+      this.addArg("--ciphers", curlOpts.ciphers);
+    }
+    if (curlOpts.pinnedPubKey) {
+      const keys = Array.isArray(curlOpts.pinnedPubKey) ? curlOpts.pinnedPubKey.join(";") : curlOpts.pinnedPubKey;
+      this.addArg("--pinnedpubkey", keys);
+    }
+    if (curlOpts.certStatus === true) {
+      this.addArg("--cert-status");
+    }
+    if (curlOpts.crlfile) {
+      this.addArg("--crlfile", curlOpts.crlfile);
+    }
+    if (curlOpts.alpn) {
+      const protocols = Array.isArray(curlOpts.alpn) ? curlOpts.alpn.join(",") : curlOpts.alpn;
+      this.addArg("--alpn", protocols);
+    }
+    if (curlOpts.noAlpn === true) {
+      this.addArg("--no-alpn");
+    }
+    if (curlOpts.sessionId === false) {
+      this.addArg("--no-sessionid");
+    }
+    if (curlOpts.engine) {
+      this.addArg("--engine", curlOpts.engine);
+    }
+    if (curlOpts.capath) {
+      this.addArg("--capath", curlOpts.capath);
+    }
+    if (curlOpts.certType) {
+      this.addArg("--cert-type", curlOpts.certType);
+    }
+    if (curlOpts.keyType) {
+      this.addArg("--key-type", curlOpts.keyType);
+    }
+    if (curlOpts.proxyHeaders) {
+      for (const [key, value] of Object.entries(curlOpts.proxyHeaders)) {
+        this.addArg("--proxy-header", `${key}: ${value}`);
+      }
+    }
+    if (curlOpts.proxyTls) {
+      if (curlOpts.proxyTls.version) {
+        this.applyProxySslVersion(curlOpts.proxyTls.version);
+      }
+      if (curlOpts.proxyTls.cert) {
+        this.addArg("--proxy-cert", curlOpts.proxyTls.cert);
+      }
+      if (curlOpts.proxyTls.key) {
+        this.addArg("--proxy-key", curlOpts.proxyTls.key);
+      }
+      if (curlOpts.proxyTls.cacert) {
+        this.addArg("--proxy-cacert", curlOpts.proxyTls.cacert);
+      }
+      if (curlOpts.proxyTls.insecure === true) {
+        this.addArg("--proxy-insecure");
+      }
+    }
+    if (curlOpts.dns) {
+      if (curlOpts.dns.servers) {
+        this.addArg("--dns-servers", curlOpts.dns.servers);
+      }
+      if (curlOpts.dns.dohUrl) {
+        this.addArg("--doh-url", curlOpts.dns.dohUrl);
+      }
+      if (curlOpts.dns.dohInsecure === true) {
+        this.addArg("--doh-insecure");
+      }
+      if (curlOpts.dns.interface) {
+        this.addArg("--dns-interface", curlOpts.dns.interface);
+      }
+      if (curlOpts.dns.ipv4Addr) {
+        this.addArg("--dns-ipv4-addr", curlOpts.dns.ipv4Addr);
+      }
+      if (curlOpts.dns.ipv6Addr) {
+        this.addArg("--dns-ipv6-addr", curlOpts.dns.ipv6Addr);
+      }
+    }
+    if (curlOpts.hsts?.file) {
+      this.addArg("--hsts", curlOpts.hsts.file);
+    }
+    if (curlOpts.altSvc) {
+      this.addArg("--alt-svc", curlOpts.altSvc);
+    }
+    if (curlOpts.noAltSvc === true) {
+      this.addArg("--no-alt-svc");
+    }
+    if (curlOpts.locationTrusted === true) {
+      this.addArg("--location-trusted");
+    }
+    if (curlOpts.junkSessionCookies === true) {
+      this.addArg("--junk-session-cookies");
+    }
+    if (curlOpts.fail === true) {
+      this.addArg("--fail");
+    }
+    if (curlOpts.verbose === true) {
+      this.removeArg("-s");
+      this.addArg("-v");
+    }
+    if (curlOpts.trace) {
+      this.addArg("--trace", curlOpts.trace);
+    }
+    if (curlOpts.traceTime === true) {
+      this.addArg("--trace-time");
+    }
+    if (curlOpts.raw === true) {
+      this.addArg("--raw");
+    }
+    if (curlOpts.noCompressed === true) {
+      this.removeArg("--compressed");
+    }
+    if (curlOpts.bufferSize) {
+      this.addArg("--buffer-size", curlOpts.bufferSize);
+    }
+    if (curlOpts.maxFilesize !== undefined) {
+      this.addArg("--max-filesize", curlOpts.maxFilesize.toString());
+    }
+    if (curlOpts.netrc !== undefined) {
+      if (curlOpts.netrc === true) {
+        this.addArg("--netrc");
+      } else if (curlOpts.netrc === "optional") {
+        this.addArg("--netrc-optional");
+      } else if (typeof curlOpts.netrc === "string") {
+        this.addArg("--netrc-file", curlOpts.netrc);
+      }
+    }
+    if (curlOpts.netns) {
+      this.addArg("--netns", curlOpts.netns);
+    }
+    if (curlOpts.delegation) {
+      this.addArg("--delegation", curlOpts.delegation);
+    }
+    if (curlOpts.serviceName) {
+      this.addArg("--service-name", curlOpts.serviceName);
+    }
+    if (curlOpts.negotiate === true) {
+      this.addArg("--negotiate");
+    }
+    if (curlOpts.saslIr === true) {
+      this.addArg("--sasl-ir");
+    }
+    if (curlOpts.compressedSsh === true) {
+      this.addArg("--compressed-ssh");
+    }
+    if (curlOpts.parallel) {
+      if (curlOpts.parallel.enabled) {
+        this.addArg("--parallel");
+        if (curlOpts.parallel.max !== undefined) {
+          this.addArg("--parallel-max", curlOpts.parallel.max.toString());
+        }
+        if (curlOpts.parallel.immediate === true) {
+          this.addArg("--parallel-immediate");
+        }
+      }
+    }
+    if (curlOpts.tls) {
+      this.applyTlsOptions(curlOpts.tls);
+    }
+    if (curlOpts.proxyTls) {
+      this.applyProxyTlsOptions(curlOpts.proxyTls);
+    }
+    if (curlOpts.preProxy) {
+      this.addArg("--preproxy", curlOpts.preProxy);
+    }
+    if (curlOpts.socks5Gssapi === true) {
+      this.addArg("--socks5-gssapi");
+    }
+    if (curlOpts.socks5GssapiService) {
+      this.addArg("--socks5-gssapi-service", curlOpts.socks5GssapiService);
+    }
+    if (curlOpts.proxyHttp10 === true) {
+      this.addArg("--proxy1.0");
+    }
+    if (curlOpts.proxyDigest === true) {
+      this.addArg("--proxy-digest");
+    }
+    if (curlOpts.proxyBasic === true) {
+      this.addArg("--proxy-basic");
+    }
+    if (curlOpts.proxyNtlm === true) {
+      this.addArg("--proxy-ntlm");
+    }
+    if (curlOpts.proxyNegotiate === true) {
+      this.addArg("--proxy-negotiate");
+    }
+    if (curlOpts.proxyAnyAuth === true) {
+      this.addArg("--proxy-anyauth");
+    }
+    if (curlOpts.proxyServiceName) {
+      this.addArg("--proxy-service-name", curlOpts.proxyServiceName);
+    }
+    if (curlOpts.proxyTunnel === true) {
+      this.addArg("--proxytunnel");
+    }
+    if (curlOpts.haproxyProtocol === true) {
+      this.addArg("--haproxy-protocol");
+    }
+    if (curlOpts.haproxyClientIp) {
+      this.addArg("--haproxy-clientip", curlOpts.haproxyClientIp);
+    }
+    if (curlOpts.ftp) {
+      this.applyFtpOptions(curlOpts.ftp);
+    }
+    if (curlOpts.disableEprt === true) {
+      this.addArg("--disable-eprt");
+    }
+    if (curlOpts.disableEpsv === true) {
+      this.addArg("--disable-epsv");
+    }
+    if (curlOpts.quote) {
+      const quotes = Array.isArray(curlOpts.quote) ? curlOpts.quote : [curlOpts.quote];
+      for (const q of quotes) {
+        this.addArg("--quote", q);
+      }
+    }
+    if (curlOpts.prequote) {
+      const quotes = Array.isArray(curlOpts.prequote) ? curlOpts.prequote : [curlOpts.prequote];
+      for (const q of quotes) {
+        this.addArg("--prequote", q);
+      }
+    }
+    if (curlOpts.postquote) {
+      const quotes = Array.isArray(curlOpts.postquote) ? curlOpts.postquote : [curlOpts.postquote];
+      for (const q of quotes) {
+        this.addArg("--postquote", q);
+      }
+    }
+    if (curlOpts.continueAt !== undefined) {
+      const val = curlOpts.continueAt === "-" ? "-" : curlOpts.continueAt.toString();
+      this.addArg("--continue-at", val);
+    }
+    if (curlOpts.crlf === true) {
+      this.addArg("--crlf");
+    }
+    if (curlOpts.range) {
+      this.addArg("--range", curlOpts.range);
+    }
+    if (curlOpts.ssh) {
+      this.applySshOptions(curlOpts.ssh);
+    }
+    if (curlOpts.smtp) {
+      this.applySmtpOptions(curlOpts.smtp);
+    }
+    if (curlOpts.ntlmWb === true) {
+      this.addArg("--ntlm-wb");
+    }
+    if (curlOpts.saslAuthzid) {
+      this.addArg("--sasl-authzid", curlOpts.saslAuthzid);
+    }
+    if (curlOpts.awsSigv4) {
+      if (typeof curlOpts.awsSigv4 === "string") {
+        this.addArg("--aws-sigv4", curlOpts.awsSigv4);
+      } else {
+        this.addArg("--aws-sigv4", `${curlOpts.awsSigv4.provider}:${curlOpts.awsSigv4.region}:${curlOpts.awsSigv4.service}`);
+      }
+    }
+    if (curlOpts.oauth2Bearer) {
+      this.addArg("--oauth2-bearer", curlOpts.oauth2Bearer);
+    }
+    if (curlOpts.loginOptions) {
+      this.addArg("--login-options", curlOpts.loginOptions);
+    }
+    if (curlOpts.kerberos) {
+      this.addArg("--krb", curlOpts.kerberos);
+    }
+    if (curlOpts.xoauth2Bearer) {
+      this.addArg("--xoauth2-bearer", curlOpts.xoauth2Bearer);
+    }
+    if (curlOpts.digest === true) {
+      this.addArg("--digest");
+    }
+    if (curlOpts.basic === true) {
+      this.addArg("--basic");
+    }
+    if (curlOpts.anyAuth === true) {
+      this.addArg("--anyauth");
+    }
+    if (curlOpts.http09 === true) {
+      this.addArg("--http0.9");
+    }
+    if (curlOpts.noBuffer === true) {
+      this.addArg("--no-buffer");
+    }
+    if (curlOpts.disallowUsernameInUrl === true) {
+      this.addArg("--disallow-username-in-url");
+    }
+    if (curlOpts.referer) {
+      this.addArg("--referer", curlOpts.referer);
+    }
+    if (curlOpts.autoReferer === true) {
+      this.addArg("--referer", ";auto");
+    }
+    if (curlOpts.maxRedirs !== undefined) {
+      this.replaceArg("--max-redirs", curlOpts.maxRedirs.toString());
+    }
+    if (curlOpts.failEarly === true) {
+      this.addArg("--fail-early");
+    }
+    if (curlOpts.failWithBody === true) {
+      this.addArg("--fail-with-body");
+    }
+    if (curlOpts.insecure === true) {
+      this.addArg("--insecure");
+    }
+    if (curlOpts.traceAscii) {
+      this.addArg("--trace-ascii", curlOpts.traceAscii);
+    }
+    if (curlOpts.traceIds === true) {
+      this.addArg("--trace-ids");
+    }
+    if (curlOpts.traceConfig) {
+      this.addArg("--trace-config", curlOpts.traceConfig);
+    }
+    if (curlOpts.styledOutput === true) {
+      this.addArg("--styled-output");
+    }
+    if (curlOpts.dumpHeader) {
+      this.addArg("--dump-header", curlOpts.dumpHeader);
+    }
+    if (curlOpts.progressMeter) {
+      if (curlOpts.progressMeter === "bar") {
+        this.addArg("--progress-bar");
+      } else if (curlOpts.progressMeter === "none") {
+        this.addArg("--no-progress-meter");
+      }
+    }
+    if (curlOpts.tftpBlksize !== undefined) {
+      this.addArg("--tftp-blksize", curlOpts.tftpBlksize.toString());
+    }
+    if (curlOpts.tftpNoOptions === true) {
+      this.addArg("--tftp-no-options");
+    }
+    if (curlOpts.timeCond) {
+      const val = curlOpts.timeCond instanceof Date ? curlOpts.timeCond.toISOString() : curlOpts.timeCond;
+      this.addArg("--time-cond", val);
+    }
+    if (curlOpts.createDirs === true) {
+      this.addArg("--create-dirs");
+    }
+    if (curlOpts.createRemoteDirs === true) {
+      this.addArg("--ftp-create-dirs");
+    }
+    if (curlOpts.compressed === true) {
+      this.addArg("--compressed");
+    }
+    if (curlOpts.remoteTime === true) {
+      this.addArg("--remote-time");
+    }
+    if (curlOpts.outputDir) {
+      this.addArg("--output-dir", curlOpts.outputDir);
+    }
+    if (curlOpts.xattr === true) {
+      this.addArg("--xattr");
+    }
+  }
+  applyTlsOptions(tls) {
+    if (tls.version) {
+      this.applySslVersion(tls.version);
+    }
+    if (tls.min) {
+      this.addArg("--tls-min", tls.min.replace("tlsv", ""));
+    }
+    if (tls.max) {
+      this.addArg("--tls-max", tls.max.replace("tlsv", ""));
+    }
+    if (tls.tls13Ciphers) {
+      this.addArg("--tls13-ciphers", tls.tls13Ciphers);
+    }
+    if (tls.ciphers) {
+      this.addArg("--ciphers", tls.ciphers);
+    }
+    if (tls.pinnedPubKey) {
+      const keys = Array.isArray(tls.pinnedPubKey) ? tls.pinnedPubKey.join(";") : tls.pinnedPubKey;
+      this.addArg("--pinnedpubkey", keys);
+    }
+    if (tls.certStatus === true) {
+      this.addArg("--cert-status");
+    }
+    if (tls.crlfile) {
+      this.addArg("--crlfile", tls.crlfile);
+    }
+    if (tls.cert) {
+      this.addArg("--cert", tls.cert);
+    }
+    if (tls.certType) {
+      this.addArg("--cert-type", tls.certType);
+    }
+    if (tls.key) {
+      this.addArg("--key", tls.key);
+    }
+    if (tls.keyType) {
+      this.addArg("--key-type", tls.keyType);
+    }
+    if (tls.keyPassword) {
+      this.addArg("--pass", tls.keyPassword);
+    }
+    if (tls.cacert) {
+      this.addArg("--cacert", tls.cacert);
+    }
+    if (tls.capath) {
+      this.addArg("--capath", tls.capath);
+    }
+    if (tls.insecure === true) {
+      this.addArg("--insecure");
+    }
+    if (tls.caNative === true) {
+      this.addArg("--ca-native");
+    }
+    if (tls.noSessionId === true) {
+      this.addArg("--no-sessionid");
+    }
+    if (tls.engine) {
+      this.addArg("--engine", tls.engine);
+    }
+    if (tls.randomFile) {
+      this.addArg("--random-file", tls.randomFile);
+    }
+    if (tls.allowBeast === true) {
+      this.addArg("--ssl-allow-beast");
+    }
+    if (tls.noRevoke === true) {
+      this.addArg("--ssl-no-revoke");
+    }
+    if (tls.revokeBestEffort === true) {
+      this.addArg("--ssl-revoke-best-effort");
+    }
+    if (tls.autoClientCert === true) {
+      this.addArg("--ssl-auto-client-cert");
+    }
+    if (tls.forceSsl === true) {
+      this.addArg("--ssl");
+    }
+    if (tls.sslRequired === true) {
+      this.addArg("--ssl-reqd");
+    }
+    if (tls.alpn) {
+      const protocols = Array.isArray(tls.alpn) ? tls.alpn.join(",") : tls.alpn;
+      this.addArg("--alpn", protocols);
+    }
+    if (tls.noAlpn === true) {
+      this.addArg("--no-alpn");
+    }
+    if (tls.noNpn === true) {
+      this.addArg("--no-npn");
+    }
+    if (tls.falseStart === true) {
+      this.addArg("--false-start");
+    }
+    if (tls.curves) {
+      this.addArg("--curves", tls.curves);
+    }
+  }
+  applyProxyTlsOptions(proxyTls) {
+    if (proxyTls.version) {
+      this.applyProxySslVersion(proxyTls.version);
+    }
+    if (proxyTls.cert) {
+      this.addArg("--proxy-cert", proxyTls.cert);
+    }
+    if (proxyTls.key) {
+      this.addArg("--proxy-key", proxyTls.key);
+    }
+    if (proxyTls.cacert) {
+      this.addArg("--proxy-cacert", proxyTls.cacert);
+    }
+    if (proxyTls.capath) {
+      this.addArg("--proxy-capath", proxyTls.capath);
+    }
+    if (proxyTls.insecure === true) {
+      this.addArg("--proxy-insecure");
+    }
+    if (proxyTls.certType) {
+      this.addArg("--proxy-cert-type", proxyTls.certType);
+    }
+    if (proxyTls.keyType) {
+      this.addArg("--proxy-key-type", proxyTls.keyType);
+    }
+    if (proxyTls.keyPassword) {
+      this.addArg("--proxy-pass", proxyTls.keyPassword);
+    }
+    if (proxyTls.ciphers) {
+      this.addArg("--proxy-ciphers", proxyTls.ciphers);
+    }
+    if (proxyTls.tls13Ciphers) {
+      this.addArg("--proxy-tls13-ciphers", proxyTls.tls13Ciphers);
+    }
+    if (proxyTls.pinnedPubKey) {
+      const keys = Array.isArray(proxyTls.pinnedPubKey) ? proxyTls.pinnedPubKey.join(";") : proxyTls.pinnedPubKey;
+      this.addArg("--proxy-pinnedpubkey", keys);
+    }
+    if (proxyTls.crlfile) {
+      this.addArg("--proxy-crlfile", proxyTls.crlfile);
+    }
+    if (proxyTls.allowBeast === true) {
+      this.addArg("--proxy-ssl-allow-beast");
+    }
+    if (proxyTls.autoClientCert === true) {
+      this.addArg("--proxy-ssl-auto-client-cert");
+    }
+  }
+  applyFtpOptions(ftp) {
+    if (ftp.account) {
+      this.addArg("--ftp-account", ftp.account);
+    }
+    if (ftp.alternativeToUser) {
+      this.addArg("--ftp-alternative-to-user", ftp.alternativeToUser);
+    }
+    if (ftp.createDirs === true) {
+      this.addArg("--ftp-create-dirs");
+    }
+    if (ftp.method) {
+      this.addArg("--ftp-method", ftp.method);
+    }
+    if (ftp.pasv === true) {
+      this.addArg("--ftp-pasv");
+    }
+    if (ftp.port) {
+      this.addArg("--ftp-port", ftp.port);
+    }
+    if (ftp.pret === true) {
+      this.addArg("--ftp-pret");
+    }
+    if (ftp.skipPasvIp === true) {
+      this.addArg("--ftp-skip-pasv-ip");
+    }
+    if (ftp.sslCccMode) {
+      this.addArg("--ftp-ssl-ccc-mode", ftp.sslCccMode);
+    }
+    if (ftp.sslControl === true) {
+      this.addArg("--ftp-ssl-control");
+    }
+    if (ftp.activeMode === true) {
+      this.addArg("--ftp-port", "-");
+    }
+    if (ftp.append === true) {
+      this.addArg("--append");
+    }
+    if (ftp.ascii === true) {
+      this.addArg("--use-ascii");
+    }
+  }
+  applySshOptions(ssh) {
+    if (ssh.privateKey) {
+      this.addArg("--key", ssh.privateKey);
+    }
+    if (ssh.privateKeyPassword) {
+      this.addArg("--pass", ssh.privateKeyPassword);
+    }
+    if (ssh.publicKey) {
+      this.addArg("--pubkey", ssh.publicKey);
+    }
+    if (ssh.hostPubSha256) {
+      this.addArg("--hostpubsha256", ssh.hostPubSha256);
+    }
+    if (ssh.hostPubMd5) {
+      this.addArg("--hostpubmd5", ssh.hostPubMd5);
+    }
+    if (ssh.knownHosts) {
+      this.addArg("--known-hosts", ssh.knownHosts);
+    }
+    if (ssh.compression === true) {
+      this.addArg("--compressed-ssh");
+    }
+  }
+  applySmtpOptions(smtp) {
+    if (smtp.mailFrom) {
+      this.addArg("--mail-from", smtp.mailFrom);
+    }
+    if (smtp.mailRcpt) {
+      const recipients = Array.isArray(smtp.mailRcpt) ? smtp.mailRcpt : [smtp.mailRcpt];
+      for (const rcpt of recipients) {
+        this.addArg("--mail-rcpt", rcpt);
+      }
+    }
+    if (smtp.mailRcptAllowFails === true) {
+      this.addArg("--mail-rcpt-allowfails");
+    }
+    if (smtp.mailAuth) {
+      this.addArg("--mail-auth", smtp.mailAuth);
+    }
+  }
+  applySslVersion(version) {
+    switch (version) {
+      case "sslv2":
+        this.addArg("--sslv2");
+        break;
+      case "sslv3":
+        this.addArg("--sslv3");
+        break;
+      case "tlsv1":
+        this.addArg("--tlsv1");
+        break;
+      case "tlsv1.0":
+        this.addArg("--tlsv1.0");
+        break;
+      case "tlsv1.1":
+        this.addArg("--tlsv1.1");
+        break;
+      case "tlsv1.2":
+        this.addArg("--tlsv1.2");
+        break;
+      case "tlsv1.3":
+        this.addArg("--tlsv1.3");
+        break;
+    }
+  }
+  applyProxySslVersion(version) {
+    switch (version) {
+      case "tlsv1":
+        this.addArg("--proxy-tlsv1");
+        break;
+      case "tlsv1.0":
+        this.addArg("--proxy-tlsv1.0");
+        break;
+      case "tlsv1.1":
+        this.addArg("--proxy-tlsv1.1");
+        break;
+      case "tlsv1.2":
+        this.addArg("--proxy-tlsv1.2");
+        break;
+      case "tlsv1.3":
+        this.addArg("--proxy-tlsv1.3");
+        break;
+    }
+  }
+  replaceArg(arg, value) {
+    const index = this.args.indexOf(arg);
+    if (index !== -1 && index + 1 < this.args.length) {
+      this.args[index + 1] = this.escapeShellArg(value);
+    } else {
+      this.addArg(arg, value);
+    }
+  }
+  removeArg(arg) {
+    const index = this.args.indexOf(arg);
+    if (index !== -1) {
+      this.args.splice(index, 1);
+      if (index < this.args.length && !this.args[index]?.startsWith("-")) {
+        this.args.splice(index, 1);
+      }
+    }
   }
   addArg(arg, value) {
     this.args.push(arg);
@@ -494,11 +1308,11 @@ class CurlCommandBuilder {
       this.addArg("--max-redirs", "0");
     }
   }
-  buildRequestBody(config, tempFiles) {
-    if (!config.data) {
+  buildRequestBody(config, originalRequest, tempFiles) {
+    const data = originalRequest.body ?? config.data;
+    if (!data) {
       return;
     }
-    const data = config.data;
     if (typeof data === "string") {
       this.addArg("-d", data);
     } else if (Buffer.isBuffer(data)) {
@@ -508,7 +1322,6 @@ class CurlCommandBuilder {
       this.addArg("--data-binary", `@${dataFile}`);
     } else if (data instanceof RezoFormData) {
       const formData = data;
-      const knownLength = formData.getLengthSync?.() || 0;
       const formDataFile = this.tempFiles.createTempFile("formdata", ".txt");
       const formBuffer = formData.getBuffer?.();
       if (formBuffer) {
@@ -519,6 +1332,7 @@ class CurlCommandBuilder {
         if (boundary) {
           this.addArg("-H", `Content-Type: multipart/form-data; boundary=${boundary}`);
         }
+        this.addArg("-H", `Content-Length: ${formBuffer.length}`);
       }
     } else if (data instanceof Readable) {
       this.addArg("-d", "@-");
@@ -528,7 +1342,8 @@ class CurlCommandBuilder {
   }
   buildWriteOutFormat() {
     return [
-      "\\n---CURL_STATS_START---",
+      `
+---CURL_STATS_START---`,
       "http_code:%{http_code}",
       "time_namelookup:%{time_namelookup}",
       "time_connect:%{time_connect}",
@@ -548,7 +1363,8 @@ class CurlCommandBuilder {
       "ssl_verify_result:%{ssl_verify_result}",
       "content_type:%{content_type}",
       "---CURL_STATS_END---"
-    ].join("\\n");
+    ].join(`
+`);
   }
 }
 
@@ -585,7 +1401,24 @@ class CurlResponseParser {
     const statusText = this.getStatusText(status);
     const headers = this.parseHeaders(headerSection);
     const rezoHeaders = new RezoHeaders(headers);
-    const cookies = this.parseCookies(headers);
+    const responseCookies = this.parseCookies(headers);
+    const mergedCookieArray = mergeRequestAndResponseCookies(config.requestCookies, responseCookies.array);
+    let cookies;
+    if (mergedCookieArray.length > 0) {
+      const mergedJar = new RezoCookieJar(mergedCookieArray, config.url || "");
+      cookies = mergedJar.cookies();
+    } else {
+      cookies = {
+        array: [],
+        serialized: [],
+        netscape: `# Netscape HTTP Cookie File
+# This file was generated by Rezo HTTP client
+# Based on uniqhtt cookie implementation
+`,
+        string: "",
+        setCookiesString: []
+      };
+    }
     let data;
     const contentType = stats["content_type"] || rezoHeaders.get("content-type") || "";
     const responseType = config.responseType || originalRequest.responseType || "auto";
@@ -612,6 +1445,25 @@ class CurlResponseParser {
       durationMs: totalMs
     };
     config.timing = timing;
+    config.status = status;
+    config.statusText = statusText;
+    const isSecure = config.url?.startsWith("https") || false;
+    config.adapterUsed = "curl";
+    config.isSecure = isSecure;
+    config.finalUrl = stats["redirect_url"] || config.url || "";
+    if (!config.network) {
+      config.network = {};
+    }
+    config.network.protocol = isSecure ? "https" : "http";
+    config.network.httpVersion = headerSection.match(/HTTP\/([\d.]+)/)?.[1] || "1.1";
+    if (!config.transfer) {
+      config.transfer = { requestSize: 0, responseSize: 0, headerSize: 0, bodySize: 0 };
+    }
+    config.transfer.requestSize = parseInt(stats["size_upload"]) || 0;
+    config.transfer.responseSize = parseInt(stats["size_download"]) || responseBody.length;
+    config.transfer.bodySize = responseBody.length;
+    config.transfer.headerSize = headerSection.length;
+    config.responseCookies = cookies;
     const urls = [config.url];
     if (stats["redirect_url"]) {
       urls.push(stats["redirect_url"]);
@@ -711,7 +1563,7 @@ class CurlExecutor {
   }
   buildFinalUrl(config) {
     let url = config.url;
-    if (config.baseURL) {
+    if (config.baseURL && !url.startsWith("http://") && !url.startsWith("https://")) {
       url = config.baseURL.replace(/\/$/, "") + "/" + url.replace(/^\//, "");
     }
     if (config.params && Object.keys(config.params).length > 0) {
@@ -800,6 +1652,13 @@ class CurlExecutor {
       curl.on("close", (code) => {
         try {
           if (code !== 0 && code !== null) {
+            if (code === 22 && stdout) {
+              try {
+                const response = CurlResponseParser.parse(stdout, stderr, config, originalRequest);
+                resolve(response);
+                return;
+              } catch {}
+            }
             const errorCode = this.mapCurlErrorCode(code);
             const errorMessage = this.buildDetailedErrorMessage(code, stderr, config);
             const rezoError = new RezoError(errorMessage, config, errorCode);
@@ -974,11 +1833,27 @@ async function executeRequest(options, defaultOptions, jar) {
   if (!options.responseType) {
     options.responseType = "auto";
   }
-  const d_options = await getDefaultConfig(defaultOptions);
+  const d_options = await getDefaultConfig(defaultOptions, defaultOptions._proxyManager);
   const configResult = prepareHTTPOptions(options, jar, { defaultOptions: d_options });
   const config = configResult.config;
   const originalRequest = configResult.fetchOptions;
+  const { proxyManager } = configResult;
   const perform = new RezoPerformance;
+  let selectedProxy = null;
+  if (proxyManager) {
+    const requestUrl = typeof originalRequest.url === "string" ? originalRequest.url : originalRequest.url?.toString() || "";
+    selectedProxy = proxyManager.next(requestUrl);
+    if (selectedProxy) {
+      originalRequest.proxy = {
+        protocol: selectedProxy.protocol,
+        host: selectedProxy.host,
+        port: selectedProxy.port,
+        auth: selectedProxy.auth
+      };
+    } else if (proxyManager.config.failWithoutProxy) {
+      throw new RezoError("No proxy available: All proxies exhausted or URL did not match whitelist/blacklist", config, "UNQ_NO_PROXY_AVAILABLE", originalRequest);
+    }
+  }
   const isStream = options._isStream;
   const isDownload = options._isDownload || !!options.fileName || !!options.saveTo;
   const isUpload = options._isUpload;
@@ -999,28 +1874,62 @@ async function executeRequest(options, defaultOptions, jar) {
   if (eventEmitter) {
     eventEmitter.emit("initiated");
   }
+  if (proxyManager && selectedProxy) {
+    if (streamResponse) {
+      streamResponse.on("finish", () => {
+        proxyManager.reportSuccess(selectedProxy);
+      });
+      streamResponse.on("error", (err) => {
+        proxyManager.reportFailure(selectedProxy, err);
+      });
+    } else if (downloadResponse) {
+      downloadResponse.on("finish", () => {
+        proxyManager.reportSuccess(selectedProxy);
+      });
+      downloadResponse.on("error", (err) => {
+        proxyManager.reportFailure(selectedProxy, err);
+      });
+    } else if (uploadResponse) {
+      uploadResponse.on("finish", () => {
+        proxyManager.reportSuccess(selectedProxy);
+      });
+      uploadResponse.on("error", (err) => {
+        proxyManager.reportFailure(selectedProxy, err);
+      });
+    }
+  }
   const executor = new CurlExecutor;
   try {
     const result = await executor.execute(config, originalRequest, streamResponse, downloadResponse, uploadResponse);
     if (!streamResponse && !downloadResponse && !uploadResponse) {
       const response = result;
-      if (config.retry && response.status >= 400) {
-        const maxRetries = config.retry.maxRetries || 0;
-        const statusCodes = config.retry.statusCodes || [408, 429, 500, 502, 503, 504];
-        if (config.retryAttempts < maxRetries && statusCodes.includes(response.status)) {
-          const retryDelay = config.retry.retryDelay || 0;
-          const incrementDelay = config.retry.incrementDelay || false;
-          const delay = incrementDelay ? retryDelay * (config.retryAttempts + 1) : retryDelay;
-          if (delay > 0) {
-            await new Promise((resolve) => setTimeout(resolve, delay));
+      if (proxyManager && selectedProxy) {
+        proxyManager.reportSuccess(selectedProxy);
+      }
+      if (response.status >= 400) {
+        const httpError = builErrorFromResponse(`Request failed with status code ${response.status}`, response, config, originalRequest);
+        if (config.retry) {
+          const maxRetries = config.retry.maxRetries || 0;
+          const statusCodes = config.retry.statusCodes || [408, 429, 500, 502, 503, 504];
+          if (config.retryAttempts < maxRetries && statusCodes.includes(response.status)) {
+            const retryDelay = config.retry.retryDelay || 0;
+            const incrementDelay = config.retry.incrementDelay || false;
+            const delay = incrementDelay ? retryDelay * (config.retryAttempts + 1) : retryDelay;
+            if (delay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, delay));
+            }
+            config.retryAttempts++;
+            return executeRequest(options, defaultOptions, jar);
           }
-          config.retryAttempts++;
-          return executeRequest(options, defaultOptions, jar);
         }
+        throw httpError;
       }
     }
     return result;
   } catch (error) {
+    if (proxyManager && selectedProxy) {
+      proxyManager.reportFailure(selectedProxy, error);
+    }
     if (error instanceof RezoError) {
       throw error;
     }

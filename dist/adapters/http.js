@@ -96,10 +96,26 @@ export async function executeRequest(options, defaultOptions, jar) {
   if (!options.responseType) {
     options.responseType = "auto";
   }
-  const d_options = await getDefaultConfig(defaultOptions);
+  const d_options = await getDefaultConfig(defaultOptions, defaultOptions._proxyManager);
   const config = prepareHTTPOptions(options, jar, { defaultOptions: d_options });
   let mainConfig = config.config;
+  const { proxyManager } = config;
   const perform = new RezoPerformance;
+  let selectedProxy = null;
+  if (proxyManager) {
+    const requestUrl = typeof config.fetchOptions.url === "string" ? config.fetchOptions.url : config.fetchOptions.url?.toString() || "";
+    selectedProxy = proxyManager.next(requestUrl);
+    if (selectedProxy) {
+      config.fetchOptions.proxy = {
+        protocol: selectedProxy.protocol,
+        host: selectedProxy.host,
+        port: selectedProxy.port,
+        auth: selectedProxy.auth
+      };
+    } else if (proxyManager.config.failWithoutProxy) {
+      throw new RezoError("No proxy available: All proxies exhausted or URL did not match whitelist/blacklist", mainConfig, "UNQ_NO_PROXY_AVAILABLE", config.fetchOptions);
+    }
+  }
   const cacheOption = options.cache;
   const method = (options.method || "GET").toUpperCase();
   const requestUrl = typeof config.fetchOptions.url === "string" ? config.fetchOptions.url : config.fetchOptions.url?.toString() || "";
@@ -153,29 +169,63 @@ export async function executeRequest(options, defaultOptions, jar) {
     const url = typeof config.fetchOptions.url === "string" ? config.fetchOptions.url : config.fetchOptions.url.toString();
     uploadResponse = new UploadResponse(url, fileName);
   }
-  const res = executeHttp1Request(config.fetchOptions, mainConfig, config.options, perform, d_options.fs, streamResponse, downloadResponse, uploadResponse);
-  if (streamResponse) {
-    return streamResponse;
-  } else if (downloadResponse) {
-    return downloadResponse;
-  } else if (uploadResponse) {
-    return uploadResponse;
+  if (proxyManager && selectedProxy) {
+    if (streamResponse) {
+      streamResponse.on("finish", () => {
+        proxyManager.reportSuccess(selectedProxy);
+      });
+      streamResponse.on("error", (err) => {
+        proxyManager.reportFailure(selectedProxy, err);
+      });
+    } else if (downloadResponse) {
+      downloadResponse.on("finish", () => {
+        proxyManager.reportSuccess(selectedProxy);
+      });
+      downloadResponse.on("error", (err) => {
+        proxyManager.reportFailure(selectedProxy, err);
+      });
+    } else if (uploadResponse) {
+      uploadResponse.on("finish", () => {
+        proxyManager.reportSuccess(selectedProxy);
+      });
+      uploadResponse.on("error", (err) => {
+        proxyManager.reportFailure(selectedProxy, err);
+      });
+    }
   }
-  const response = await res;
-  if (cache && !isStream && !isDownload && !isUpload) {
-    if (response.status === 304 && cachedEntry) {
-      const responseHeaders = response.headers instanceof RezoHeaders ? Object.fromEntries(response.headers.entries()) : response.headers;
-      const updatedCached = cache.updateRevalidated(method, requestUrl, responseHeaders, requestHeaders);
-      if (updatedCached) {
-        return buildCachedRezoResponse(updatedCached, mainConfig);
+  try {
+    const res = executeHttp1Request(config.fetchOptions, mainConfig, config.options, perform, d_options.fs, streamResponse, downloadResponse, uploadResponse);
+    if (streamResponse) {
+      return streamResponse;
+    } else if (downloadResponse) {
+      return downloadResponse;
+    } else if (uploadResponse) {
+      return uploadResponse;
+    }
+    const response = await res;
+    if (proxyManager && selectedProxy) {
+      proxyManager.reportSuccess(selectedProxy);
+    }
+    if (cache && !isStream && !isDownload && !isUpload) {
+      if (response.status === 304 && cachedEntry) {
+        const responseHeaders = response.headers instanceof RezoHeaders ? Object.fromEntries(response.headers.entries()) : response.headers;
+        const updatedCached = cache.updateRevalidated(method, requestUrl, responseHeaders, requestHeaders);
+        if (updatedCached) {
+          return buildCachedRezoResponse(updatedCached, mainConfig);
+        }
+        return buildCachedRezoResponse(cachedEntry, mainConfig);
       }
-      return buildCachedRezoResponse(cachedEntry, mainConfig);
+      if (response.status >= 200 && response.status < 300) {
+        cache.set(method, requestUrl, response, requestHeaders);
+      }
     }
-    if (response.status >= 200 && response.status < 300) {
-      cache.set(method, requestUrl, response, requestHeaders);
+    return response;
+  } catch (error) {
+    if (proxyManager && selectedProxy) {
+      proxyManager.reportFailure(selectedProxy, error);
     }
+    throw error;
   }
-  return response;
 }
 async function executeHttp1Request(fetchOptions, config, options, perform, fs, streamResult, downloadResult, uploadResult) {
   let requestCount = 0;
@@ -351,6 +401,29 @@ Redirecting to: ${fetchOptions.fullUrl} using GET method`);
         config = __.config;
         options = __.options;
         continue;
+      }
+      if (statusOnNext === "error") {
+        const httpError = builErrorFromResponse(`Request failed with status code ${response.status}`, response, config, fetchOptions);
+        if (config.retry && statusCodes?.includes(response.status)) {
+          if (maxRetries > retries) {
+            retries++;
+            config.retryAttempts++;
+            config.errors.push({
+              attempt: config.retryAttempts,
+              error: httpError,
+              duration: perform.now()
+            });
+            perform.reset();
+            if (config.debug) {
+              console.log(`Request failed with status code ${response.status}, retrying...${retryDelay > 0 ? " in " + (incrementDelay ? retryDelay * retries : retryDelay) + "ms" : ""}`);
+            }
+            if (retryDelay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, incrementDelay ? retryDelay * retries : retryDelay));
+            }
+            continue;
+          }
+        }
+        throw httpError;
       }
       delete config.beforeRedirect;
       config.setSignal = () => {};
@@ -717,6 +790,9 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
           }
         });
         req.on("socket", (socket) => {
+          if (socket && typeof socket.unref === "function") {
+            socket.unref();
+          }
           timing.dnsStart = performance.now();
           socket.on("lookup", () => {
             if (!config.timing.dnsMs) {
@@ -768,25 +844,6 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
             }
           });
         });
-        if (body) {
-          if (body instanceof URLSearchParams || body instanceof RezoURLSearchParams) {
-            req.write(body.toString());
-          } else if (body instanceof FormData || body instanceof RezoFormData) {
-            if (body instanceof RezoFormData) {
-              req.setHeader("Content-Type", `multipart/form-data; boundary=${body.getBoundary()}`);
-              body.pipe(req);
-            } else {
-              const form = await RezoFormData.fromNativeFormData(body);
-              req.setHeader("Content-Type", `multipart/form-data; boundary=${form.getBoundary()}`);
-              form.pipe(req);
-            }
-          } else if (typeof body === "object" && !(body instanceof Buffer) && !(body instanceof Uint8Array) && !(body instanceof Readable)) {
-            req.write(JSON.stringify(body));
-          } else {
-            req.write(body);
-          }
-        }
-        req.end();
         req.on("error", (error) => {
           _stats.statusOnNext = "error";
           updateTiming(config, timing, "", 0);
@@ -798,6 +855,32 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
           resolve(e);
           return;
         });
+        let bodyPiped = false;
+        if (body) {
+          if (body instanceof URLSearchParams || body instanceof RezoURLSearchParams) {
+            req.write(body.toString());
+          } else if (body instanceof FormData || body instanceof RezoFormData) {
+            bodyPiped = true;
+            if (body instanceof RezoFormData) {
+              req.setHeader("Content-Type", `multipart/form-data; boundary=${body.getBoundary()}`);
+              body.pipe(req);
+            } else {
+              const form = await RezoFormData.fromNativeFormData(body);
+              req.setHeader("Content-Type", `multipart/form-data; boundary=${form.getBoundary()}`);
+              form.pipe(req);
+            }
+          } else if (body instanceof Readable) {
+            bodyPiped = true;
+            body.pipe(req);
+          } else if (typeof body === "object" && !(body instanceof Buffer) && !(body instanceof Uint8Array)) {
+            req.write(JSON.stringify(body));
+          } else {
+            req.write(body);
+          }
+        }
+        if (!bodyPiped) {
+          req.end();
+        }
       } catch (error) {
         _stats.statusOnNext = "error";
         updateTiming(config, timing, "", 0);
@@ -894,13 +977,16 @@ function buildHTTPOptions(fetchOptions, isSecure, url) {
     rejectUnauthorized,
     useSecureContext = true,
     auth,
-    dnsCache: dnsCacheOption
+    dnsCache: dnsCacheOption,
+    keepAlive = false,
+    keepAliveMsecs = 60000
   } = fetchOptions;
   const secureContext = isSecure && useSecureContext ? new https.Agent({
     secureContext: createSecureContext(),
     servername: url.host,
     rejectUnauthorized,
-    keepAlive: true
+    keepAlive,
+    keepAliveMsecs: keepAlive ? keepAliveMsecs : undefined
   }) : undefined;
   const customAgent = url.protocol === "https:" && httpsAgent ? httpsAgent : httpAgent ? httpAgent : undefined;
   const agent = parseProxy(proxy) || customAgent || secureContext;

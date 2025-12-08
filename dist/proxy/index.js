@@ -1,6 +1,7 @@
 import { SocksProxyAgent as RezoSocksProxy } from "socks-proxy-agent";
 import { HttpsProxyAgent as RezoHttpsSocks } from "https-proxy-agent";
 import { HttpProxyAgent as RezoHttpSocks } from "http-proxy-agent";
+export { ProxyManager } from './manager.js';
 function createOptions(uri, opts) {
   if (uri instanceof URL || typeof uri === "string") {
     return {

@@ -297,11 +297,36 @@ export function buildResponse(params) {
   const rezoHeaders = new RezoHeaders(headers);
   rezoHeaders.delete("set-cookie");
   let cookieData;
+  const mergedCookiesArray = [];
+  const cookieKeyDomainMap = new Map;
+  if (config.requestCookies && config.requestCookies.length > 0) {
+    for (const cookie of config.requestCookies) {
+      const key = `${cookie.key}|${cookie.domain || ""}`;
+      mergedCookiesArray.push(cookie);
+      cookieKeyDomainMap.set(key, mergedCookiesArray.length - 1);
+    }
+  }
+  let responseCookiesArray = [];
   if (config.responseCookies && config.responseCookies.array && config.responseCookies.array.length > 0) {
-    cookieData = config.responseCookies;
+    responseCookiesArray = config.responseCookies.array;
   } else if (cookies.length > 0) {
-    const cookieJar = new RezoCookieJar;
-    cookieData = cookieJar.setCookiesSync(cookies, url);
+    const tempJar = new RezoCookieJar;
+    const parsed = tempJar.setCookiesSync(cookies, url);
+    responseCookiesArray = parsed.array;
+  }
+  for (const cookie of responseCookiesArray) {
+    const key = `${cookie.key}|${cookie.domain || ""}`;
+    const existingIndex = cookieKeyDomainMap.get(key);
+    if (existingIndex !== undefined) {
+      mergedCookiesArray[existingIndex] = cookie;
+    } else {
+      mergedCookiesArray.push(cookie);
+      cookieKeyDomainMap.set(key, mergedCookiesArray.length - 1);
+    }
+  }
+  if (mergedCookiesArray.length > 0) {
+    const mergedJar = new RezoCookieJar(mergedCookiesArray, url);
+    cookieData = mergedJar.cookies();
   } else {
     cookieData = {
       array: [],
@@ -314,6 +339,8 @@ export function buildResponse(params) {
       setCookiesString: []
     };
   }
+  config.status = statusCode;
+  config.statusText = statusMessage;
   return {
     data: formatResponse(body, config, rezoHeaders),
     status: statusCode,

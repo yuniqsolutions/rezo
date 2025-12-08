@@ -4,14 +4,15 @@ import { URL } from "node:url";
 import { Readable } from "node:stream";
 import { RezoError } from '../errors/rezo-error.js';
 import { buildSmartError, buildDecompressionError, builErrorFromResponse, buildDownloadError } from '../responses/buildError.js';
-import { Cookie } from '../utils/cookies.js';
+import { RezoCookieJar } from '../utils/cookies.js';
 import RezoFormData from '../utils/form-data.js';
 import { getDefaultConfig, prepareHTTPOptions } from '../utils/http-config.js';
-import { RezoHeaders } from '../utils/headers.js';
+import { RezoHeaders, sanitizeHttp2Headers } from '../utils/headers.js';
 import { RezoURLSearchParams } from '../utils/data-operations.js';
 import { StreamResponse } from '../responses/stream.js';
 import { DownloadResponse } from '../responses/download.js';
 import { UploadResponse } from '../responses/upload.js';
+import { CompressionUtil } from '../utils/compression.js';
 import { isSameDomain, RezoPerformance } from '../utils/tools.js';
 import { ResponseCache } from '../cache/response-cache.js';
 let zstdDecompressSync = null;
@@ -142,6 +143,9 @@ class Http2SessionPool {
           reject(new Error(`HTTP/2 connection timeout after ${timeout}ms`));
         }
       }, timeout) : null;
+      if (timeoutId && typeof timeoutId === "object" && "unref" in timeoutId) {
+        timeoutId.unref();
+      }
       session.on("connect", () => {
         if (!settled) {
           settled = true;
@@ -166,6 +170,12 @@ class Http2SessionPool {
     if (entry) {
       entry.refCount = Math.max(0, entry.refCount - 1);
       entry.lastUsed = Date.now();
+      if (entry.refCount === 0) {
+        const socket = entry.session.socket;
+        if (socket && typeof socket.unref === "function") {
+          socket.unref();
+        }
+      }
     }
   }
   closeSession(url) {
@@ -271,48 +281,92 @@ function updateCookies(config, headers, url) {
   if (!setCookieHeaders)
     return;
   const cookieHeaderArray = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
-  if (!config.responseCookies) {
-    config.responseCookies = {
-      array: [],
-      serialized: [],
-      netscape: "",
-      string: "",
-      setCookiesString: []
-    };
+  if (cookieHeaderArray.length === 0)
+    return;
+  const jar = new RezoCookieJar;
+  jar.setCookiesSync(cookieHeaderArray, url);
+  if (config.enableCookieJar && config.cookieJar) {
+    config.cookieJar.setCookiesSync(cookieHeaderArray, url);
   }
-  for (const cookieStr of cookieHeaderArray) {
-    config.responseCookies.setCookiesString.push(cookieStr);
-    const parts = cookieStr.split(";");
-    const [nameValue] = parts;
-    const [name, ...valueParts] = nameValue.split("=");
-    const value = valueParts.join("=");
-    if (name && value !== undefined) {
-      const cookie = new Cookie({
-        key: name.trim(),
-        value: value.trim(),
-        domain: new URL(url).hostname,
-        path: "/",
-        httpOnly: cookieStr.toLowerCase().includes("httponly"),
-        secure: cookieStr.toLowerCase().includes("secure"),
-        sameSite: "lax"
-      });
-      config.responseCookies.array.push(cookie);
+  const cookies = jar.cookies();
+  cookies.setCookiesString = cookieHeaderArray;
+  if (config.useCookies) {
+    const existingArray = config.responseCookies?.array || [];
+    for (const cookie of cookies.array) {
+      const existingIndex = existingArray.findIndex((c) => c.key === cookie.key && c.domain === cookie.domain);
+      if (existingIndex >= 0) {
+        existingArray[existingIndex] = cookie;
+      } else {
+        existingArray.push(cookie);
+      }
+    }
+    const mergedJar = new RezoCookieJar(existingArray, url);
+    config.responseCookies = mergedJar.cookies();
+    config.responseCookies.setCookiesString = cookieHeaderArray;
+  } else {
+    config.responseCookies = cookies;
+  }
+}
+function mergeRequestAndResponseCookies(config, responseCookies, url) {
+  const mergedCookiesArray = [];
+  const cookieKeyDomainMap = new Map;
+  if (config.requestCookies && config.requestCookies.length > 0) {
+    for (const cookie of config.requestCookies) {
+      const key = `${cookie.key}|${cookie.domain || ""}`;
+      mergedCookiesArray.push(cookie);
+      cookieKeyDomainMap.set(key, mergedCookiesArray.length - 1);
     }
   }
-  config.responseCookies.string = config.responseCookies.array.map((c) => `${c.key}=${c.value}`).join("; ");
-  config.responseCookies.serialized = config.responseCookies.array.map((c) => c.toJSON());
-  config.responseCookies.netscape = config.responseCookies.array.map((c) => c.toNetscapeFormat()).join(`
-`);
+  for (const cookie of responseCookies.array) {
+    const key = `${cookie.key}|${cookie.domain || ""}`;
+    const existingIndex = cookieKeyDomainMap.get(key);
+    if (existingIndex !== undefined) {
+      mergedCookiesArray[existingIndex] = cookie;
+    } else {
+      mergedCookiesArray.push(cookie);
+      cookieKeyDomainMap.set(key, mergedCookiesArray.length - 1);
+    }
+  }
+  if (mergedCookiesArray.length > 0) {
+    const mergedJar = new RezoCookieJar(mergedCookiesArray, url);
+    return mergedJar.cookies();
+  }
+  return {
+    array: [],
+    serialized: [],
+    netscape: `# Netscape HTTP Cookie File
+# This file was generated by Rezo HTTP client
+# Based on uniqhtt cookie implementation
+`,
+    string: "",
+    setCookiesString: []
+  };
 }
 export async function executeRequest(options, defaultOptions, jar) {
   if (!options.responseType) {
     options.responseType = "auto";
   }
-  const d_options = await getDefaultConfig(defaultOptions);
+  const d_options = await getDefaultConfig(defaultOptions, defaultOptions._proxyManager);
   const configResult = prepareHTTPOptions(options, jar, { defaultOptions: d_options });
   let mainConfig = configResult.config;
   const fetchOptions = configResult.fetchOptions;
+  const { proxyManager } = configResult;
   const perform = new RezoPerformance;
+  let selectedProxy = null;
+  if (proxyManager) {
+    const requestUrl = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
+    selectedProxy = proxyManager.next(requestUrl);
+    if (selectedProxy) {
+      fetchOptions.proxy = {
+        protocol: selectedProxy.protocol,
+        host: selectedProxy.host,
+        port: selectedProxy.port,
+        auth: selectedProxy.auth
+      };
+    } else if (proxyManager.config.failWithoutProxy) {
+      throw new RezoError("No proxy available: All proxies exhausted or URL did not match whitelist/blacklist", mainConfig, "UNQ_NO_PROXY_AVAILABLE", fetchOptions);
+    }
+  }
   const cacheOption = options.cache;
   const method = (options.method || "GET").toUpperCase();
   const requestUrl = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
@@ -368,29 +422,63 @@ export async function executeRequest(options, defaultOptions, jar) {
     const url = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
     uploadResponse = new UploadResponse(url);
   }
-  const res = executeHttp2Request(fetchOptions, mainConfig, options, perform, fs, streamResponse, downloadResponse, uploadResponse);
-  if (streamResponse) {
-    return streamResponse;
-  } else if (downloadResponse) {
-    return downloadResponse;
-  } else if (uploadResponse) {
-    return uploadResponse;
+  if (proxyManager && selectedProxy) {
+    if (streamResponse) {
+      streamResponse.on("finish", () => {
+        proxyManager.reportSuccess(selectedProxy);
+      });
+      streamResponse.on("error", (err) => {
+        proxyManager.reportFailure(selectedProxy, err);
+      });
+    } else if (downloadResponse) {
+      downloadResponse.on("finish", () => {
+        proxyManager.reportSuccess(selectedProxy);
+      });
+      downloadResponse.on("error", (err) => {
+        proxyManager.reportFailure(selectedProxy, err);
+      });
+    } else if (uploadResponse) {
+      uploadResponse.on("finish", () => {
+        proxyManager.reportSuccess(selectedProxy);
+      });
+      uploadResponse.on("error", (err) => {
+        proxyManager.reportFailure(selectedProxy, err);
+      });
+    }
   }
-  const response = await res;
-  if (cache && !isStream && !isDownload && !isUpload) {
-    if (response.status === 304 && cachedEntry) {
-      const responseHeaders = response.headers instanceof RezoHeaders ? Object.fromEntries(response.headers.entries()) : response.headers;
-      const updatedCached = cache.updateRevalidated(method, requestUrl, responseHeaders, requestHeaders);
-      if (updatedCached) {
-        return buildCachedRezoResponse(updatedCached, mainConfig);
+  try {
+    const res = executeHttp2Request(fetchOptions, mainConfig, options, perform, fs, streamResponse, downloadResponse, uploadResponse);
+    if (streamResponse) {
+      return streamResponse;
+    } else if (downloadResponse) {
+      return downloadResponse;
+    } else if (uploadResponse) {
+      return uploadResponse;
+    }
+    const response = await res;
+    if (proxyManager && selectedProxy) {
+      proxyManager.reportSuccess(selectedProxy);
+    }
+    if (cache && !isStream && !isDownload && !isUpload) {
+      if (response.status === 304 && cachedEntry) {
+        const responseHeaders = response.headers instanceof RezoHeaders ? Object.fromEntries(response.headers.entries()) : response.headers;
+        const updatedCached = cache.updateRevalidated(method, requestUrl, responseHeaders, requestHeaders);
+        if (updatedCached) {
+          return buildCachedRezoResponse(updatedCached, mainConfig);
+        }
+        return buildCachedRezoResponse(cachedEntry, mainConfig);
       }
-      return buildCachedRezoResponse(cachedEntry, mainConfig);
+      if (response.status >= 200 && response.status < 300) {
+        cache.set(method, requestUrl, response, requestHeaders);
+      }
     }
-    if (response.status >= 200 && response.status < 300) {
-      cache.set(method, requestUrl, response, requestHeaders);
+    return response;
+  } catch (error) {
+    if (proxyManager && selectedProxy) {
+      proxyManager.reportFailure(selectedProxy, error);
     }
+    throw error;
   }
-  return response;
 }
 async function executeHttp2Request(fetchOptions, config, options, perform, fs, streamResult, downloadResult, uploadResult) {
   let requestCount = 0;
@@ -430,6 +518,8 @@ async function executeHttp2Request(fetchOptions, config, options, perform, fs, s
         if (fileName && fs && fs.existsSync(fileName)) {
           fs.unlinkSync(fileName);
         }
+        if (!config.errors)
+          config.errors = [];
         config.errors.push({
           attempt: config.retryAttempts + 1,
           error: response,
@@ -469,6 +559,29 @@ async function executeHttp2Request(fetchOptions, config, options, perform, fs, s
       }
       if (statusOnNext === "success") {
         return response;
+      }
+      if (statusOnNext === "error") {
+        const httpError = builErrorFromResponse(`Request failed with status code ${response.status}`, response, config, fetchOptions);
+        if (config.retry && statusCodes?.includes(response.status)) {
+          if (maxRetries > retries) {
+            retries++;
+            config.retryAttempts++;
+            config.errors.push({
+              attempt: config.retryAttempts,
+              error: httpError,
+              duration: perform.now()
+            });
+            perform.reset();
+            if (config.debug) {
+              console.log(`Request failed with status code ${response.status}, retrying...${retryDelay > 0 ? " in " + (incrementDelay ? retryDelay * retries : retryDelay) + "ms" : ""}`);
+            }
+            if (retryDelay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, incrementDelay ? retryDelay * retries : retryDelay));
+            }
+            continue;
+          }
+        }
+        throw httpError;
       }
       if (statusOnNext === "redirect") {
         const location = _stats.redirectUrl;
@@ -565,6 +678,13 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
       }
       if (!headers["accept-encoding"]) {
         headers["accept-encoding"] = "gzip, deflate, br";
+      }
+      if (body instanceof RezoFormData) {
+        headers["content-type"] = `multipart/form-data; boundary=${body.getBoundary()}`;
+      } else if (body instanceof FormData) {
+        const tempForm = await RezoFormData.fromNativeFormData(body);
+        headers["content-type"] = `multipart/form-data; boundary=${tempForm.getBoundary()}`;
+        fetchOptions._convertedFormData = tempForm;
       }
       const eventEmitter = streamResult || downloadResult || uploadResult;
       if (eventEmitter && requestCount === 0) {
@@ -681,6 +801,25 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
         config.timing.endTimestamp = Date.now();
         config.timing.durationMs = performance.now() - timing.startTime;
         config.timing.transferMs = timing.firstByteTime ? performance.now() - timing.firstByteTime : config.timing.durationMs;
+        if (!config.transfer) {
+          config.transfer = { requestSize: 0, responseSize: 0, headerSize: 0, bodySize: 0 };
+        }
+        if (config.transfer.requestSize === undefined) {
+          config.transfer.requestSize = 0;
+        }
+        if (config.transfer.requestSize === 0 && body) {
+          if (typeof body === "string") {
+            config.transfer.requestSize = Buffer.byteLength(body, "utf8");
+          } else if (body instanceof Buffer || body instanceof Uint8Array) {
+            config.transfer.requestSize = body.length;
+          } else if (body instanceof URLSearchParams || body instanceof RezoURLSearchParams) {
+            config.transfer.requestSize = Buffer.byteLength(body.toString(), "utf8");
+          } else if (body instanceof RezoFormData) {
+            config.transfer.requestSize = body.getLengthSync();
+          } else if (typeof body === "object") {
+            config.transfer.requestSize = Buffer.byteLength(JSON.stringify(body), "utf8");
+          }
+        }
         config.transfer.bodySize = contentLengthCounter;
         config.transfer.responseSize = contentLengthCounter;
         (sessionPool || Http2SessionPool.getInstance()).releaseSession(url);
@@ -689,7 +828,7 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
             data: "",
             status,
             statusText,
-            headers: new RezoHeaders(responseHeaders),
+            headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
             cookies: config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] },
             config,
             contentType: responseHeaders["content-type"],
@@ -702,14 +841,14 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
         }
         let responseBody = Buffer.concat(chunks);
         const contentEncoding = responseHeaders["content-encoding"];
-        if (contentEncoding && contentLengthCounter > 0) {
+        if (contentEncoding && contentLengthCounter > 0 && CompressionUtil.shouldDecompress(contentEncoding, config)) {
           try {
             const decompressed = await decompressBuffer(responseBody, contentEncoding);
             responseBody = decompressed;
           } catch (err) {
             const error = buildDecompressionError({
               statusCode: status,
-              headers: responseHeaders,
+              headers: sanitizeHttp2Headers(responseHeaders),
               contentType: responseHeaders["content-type"],
               contentLength: String(contentLengthCounter),
               cookies: config.responseCookies?.setCookiesString || [],
@@ -749,24 +888,17 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
             data = responseBody.toString("utf-8");
           }
         }
-        if (status >= 400) {
-          const error = builErrorFromResponse(`HTTP Error ${status}: ${statusText}`, {
-            status,
-            statusText,
-            headers: new RezoHeaders(responseHeaders),
-            data
-          }, config, fetchOptions);
-          _stats.statusOnNext = "error";
-          resolve(error);
-          return;
-        }
-        _stats.statusOnNext = "success";
+        config.status = status;
+        config.statusText = statusText;
+        _stats.statusOnNext = status >= 400 ? "error" : "success";
+        const responseCookies = config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] };
+        const mergedCookies = mergeRequestAndResponseCookies(config, responseCookies, url.href);
         const finalResponse = {
           data,
           status,
           statusText,
-          headers: new RezoHeaders(responseHeaders),
-          cookies: config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] },
+          headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
+          cookies: mergedCookies,
           config,
           contentType,
           contentLength: contentLengthCounter,
@@ -779,11 +911,11 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
             const downloadFinishEvent = {
               status,
               statusText,
-              headers: new RezoHeaders(responseHeaders),
+              headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
               contentType,
               contentLength: responseBody.length,
               finalUrl: url.href,
-              cookies: config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] },
+              cookies: mergedCookies,
               urls: buildUrlTree(config, url.href),
               fileName: config.fileName,
               fileSize: responseBody.length,
@@ -804,7 +936,7 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
           } catch (err) {
             const error = buildDownloadError({
               statusCode: status,
-              headers: responseHeaders,
+              headers: sanitizeHttp2Headers(responseHeaders),
               contentType,
               contentLength: String(contentLengthCounter),
               cookies: config.responseCookies?.setCookiesString || [],
@@ -824,7 +956,7 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
           const streamFinishEvent = {
             status,
             statusText,
-            headers: new RezoHeaders(responseHeaders),
+            headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
             contentType,
             contentLength: contentLengthCounter,
             finalUrl: url.href,
@@ -850,7 +982,7 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
             response: {
               status,
               statusText,
-              headers: new RezoHeaders(responseHeaders),
+              headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
               data,
               contentType,
               contentLength: contentLengthCounter
@@ -895,7 +1027,7 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
             body.pipe(req);
             return;
           } else {
-            const form = await RezoFormData.fromNativeFormData(body);
+            const form = fetchOptions._convertedFormData || await RezoFormData.fromNativeFormData(body);
             form.pipe(req);
             return;
           }

@@ -1,0 +1,25 @@
+export const CURL_OPTION_DEFAULTS = {
+  tcpFastOpen: false,
+  tcpNodelay: false,
+  noKeepalive: false,
+  pathAsIs: false,
+  globOff: false,
+  certStatus: false,
+  noAlpn: false,
+  sessionId: true,
+  locationTrusted: false,
+  junkSessionCookies: false,
+  fail: false,
+  verbose: false,
+  traceTime: false,
+  raw: false,
+  noCompressed: false,
+  noAltSvc: false,
+  negotiate: false,
+  saslIr: false,
+  compressedSsh: false,
+  insecure: false,
+  maxRedirs: 50,
+  happyEyeballsTimeout: 200
+};
+export const CURL_OPTIONS_COUNT = 120;

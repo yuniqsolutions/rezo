@@ -1,6 +1,8 @@
 const { SocksProxyAgent: RezoSocksProxy } = require("socks-proxy-agent");
 const { HttpsProxyAgent: RezoHttpsSocks } = require("https-proxy-agent");
 const { HttpProxyAgent: RezoHttpSocks } = require("http-proxy-agent");
+const _mod_c6k1hi = require('./manager.cjs');
+exports.ProxyManager = _mod_c6k1hi.ProxyManager;;
 function createOptions(uri, opts) {
   if (uri instanceof URL || typeof uri === "string") {
     return {

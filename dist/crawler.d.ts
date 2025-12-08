@@ -6,9 +6,6 @@ import { Agent as HttpsAgent } from 'node:https';
 import { Socket } from 'node:net';
 import { Readable, Writable, WritableOptions } from 'node:stream';
 import { SecureContext, TLSSocket } from 'node:tls';
-import PQueue from 'p-queue';
-import { Options as Options$1, QueueAddOptions } from 'p-queue';
-import PriorityQueue from 'p-queue/dist/priority-queue';
 import { Cookie as TouchCookie, CookieJar as TouchCookieJar, CreateCookieOptions } from 'tough-cookie';
 
 /**
@@ -540,11 +537,19 @@ declare class RezoFormData extends NodeFormData {
 	toBuffer(): Buffer;
 	/**
 	 * Create RezoFormData from object
+	 * Properly handles nested objects by JSON.stringify-ing them
 	 * @param {Record<string, any>} obj - Object to convert
 	 * @param {Options} options - Optional RezoFormData options
 	 * @returns {RezoFormData}
 	 */
 	static fromObject(obj: Record<string, any>, options?: Options): RezoFormData;
+	/**
+	 * Helper to append a value to FormData with proper type handling
+	 * @param {RezoFormData} formData - The form data to append to
+	 * @param {string} key - The field name
+	 * @param {any} value - The value to append
+	 */
+	private static appendValue;
 	/**
 	 * Convert to URL query string
 	 * Warning: File, Blob, and binary data will be omitted
@@ -1123,6 +1128,330 @@ export interface RezoDownloadResponse extends DownloadResponse {
 export interface RezoUploadResponse extends UploadResponse {
 }
 /**
+ * Rezo ProxyManager Types
+ * Type definitions for advanced proxy rotation and management
+ *
+ * @module proxy/types
+ * @author Yuniq Solutions Team
+ * @version 1.0.0
+ */
+/** Supported proxy protocols */
+export type ProxyProtocol = "socks4" | "socks5" | "http" | "https";
+/**
+ * Proxy information structure
+ * Represents a single proxy server with its connection details
+ */
+export interface ProxyInfo {
+	/** Unique identifier for the proxy (auto-generated if not provided) */
+	id?: string;
+	/** The proxy protocol to use */
+	protocol: ProxyProtocol;
+	/** Proxy server hostname or IP address */
+	host: string;
+	/** Proxy server port number */
+	port: number;
+	/** Optional authentication credentials for the proxy */
+	auth?: {
+		/** Username for proxy authentication */
+		username: string;
+		/** Password for proxy authentication */
+		password: string;
+	};
+	/** Optional label for identification/logging */
+	label?: string;
+	/** Optional metadata for custom tracking */
+	metadata?: Record<string, unknown>;
+}
+/**
+ * Proxy rotation strategies
+ * - `random`: Select a random proxy from the pool for each request
+ * - `sequential`: Use proxies in order, optionally rotating after N requests
+ * - `per-proxy-limit`: Use each proxy for a maximum number of requests, then permanently remove
+ */
+export type RotationStrategy = "random" | "sequential" | "per-proxy-limit";
+/**
+ * Rotation configuration for different strategies
+ */
+export type RotationConfig = {
+	/** Random selection from available proxies */
+	rotation: "random";
+} | {
+	/** Sequential rotation through proxy list */
+	rotation: "sequential";
+	/** Number of requests before rotating to next proxy (default: 1) */
+	requestsPerProxy?: number;
+} | {
+	/** Use each proxy for a limited number of total requests, then remove */
+	rotation: "per-proxy-limit";
+	/** Maximum requests per proxy before permanent removal */
+	limit: number;
+};
+/**
+ * Cooldown configuration for disabled proxies
+ */
+export interface ProxyCooldownConfig {
+	/** Whether to enable automatic re-enabling after cooldown */
+	enabled: boolean;
+	/** Duration in milliseconds before re-enabling a disabled proxy */
+	durationMs: number;
+}
+/**
+ * Base proxy manager configuration (without rotation)
+ * Complete configuration for proxy rotation, filtering, and failure handling
+ */
+export interface ProxyManagerBaseConfig {
+	/**
+	 * Array of proxies to manage
+	 * Accepts ProxyInfo objects or proxy URL strings (parsed via parseProxyString)
+	 * @example
+	 * proxies: [
+	 *   { protocol: 'http', host: '127.0.0.1', port: 8080 },
+	 *   'socks5://user:pass@proxy.example.com:1080',
+	 *   'http://proxy.example.com:3128'
+	 * ]
+	 */
+	proxies: (ProxyInfo | string)[];
+	/**
+	 * Whitelist patterns for URLs that should use proxy
+	 * - String: exact domain match (e.g., 'api.example.com') or subdomain match (e.g., 'example.com' matches '*.example.com')
+	 * - RegExp: regex pattern to test against full URL
+	 * If not set, all URLs use proxy
+	 */
+	whitelist?: (string | RegExp)[];
+	/**
+	 * Blacklist patterns for URLs that should NOT use proxy (go direct)
+	 * - String: exact domain match or subdomain match
+	 * - RegExp: regex pattern to test against full URL
+	 * Blacklist is checked after whitelist
+	 */
+	blacklist?: (string | RegExp)[];
+	/**
+	 * Automatically disable proxies after consecutive failures
+	 * @default false
+	 */
+	autoDisableDeadProxies?: boolean;
+	/**
+	 * Number of consecutive failures before disabling a proxy
+	 * Only applies when autoDisableDeadProxies is true
+	 * @default 3
+	 */
+	maxFailures?: number;
+	/**
+	 * Cooldown configuration for disabled proxies
+	 * If not set or enabled: false, proxies are permanently removed when disabled
+	 */
+	cooldown?: ProxyCooldownConfig;
+	/**
+	 * Whether to throw error when no proxy is available
+	 * - true (default): Throw RezoError when no proxies available
+	 * - false: Proceed with direct connection (no proxy)
+	 * @default true
+	 */
+	failWithoutProxy?: boolean;
+	/**
+	 * Whether to retry the request with next proxy on failure
+	 * @default false
+	 */
+	retryWithNextProxy?: boolean;
+	/**
+	 * Maximum retry attempts when retryWithNextProxy is enabled
+	 * @default 3
+	 */
+	maxProxyRetries?: number;
+}
+/**
+ * Full proxy manager configuration
+ * Combines base config with rotation strategy
+ */
+export type ProxyManagerConfig = ProxyManagerBaseConfig & RotationConfig;
+/**
+ * Internal proxy state tracking
+ * Used internally by ProxyManager to track usage and failures
+ */
+export interface ProxyState {
+	/** The proxy info */
+	proxy: ProxyInfo;
+	/** Number of requests made through this proxy */
+	requestCount: number;
+	/** Number of consecutive failures */
+	failureCount: number;
+	/** Total number of successful requests */
+	successCount: number;
+	/** Total number of failed requests */
+	totalFailures: number;
+	/** Whether the proxy is currently active */
+	isActive: boolean;
+	/** Reason for being disabled (if applicable) */
+	disabledReason?: "dead" | "limit-reached" | "manual";
+	/** Timestamp when proxy was disabled */
+	disabledAt?: number;
+	/** Timestamp when proxy will be re-enabled (if cooldown enabled) */
+	reenableAt?: number;
+	/** Last successful request timestamp */
+	lastSuccessAt?: number;
+	/** Last failure timestamp */
+	lastFailureAt?: number;
+	/** Last error message */
+	lastError?: string;
+}
+/**
+ * Proxy manager status snapshot
+ * Provides overview of all proxies in the manager
+ */
+export interface ProxyManagerStatus {
+	/** Active proxies available for use */
+	active: ProxyInfo[];
+	/** Disabled proxies (dead or limit reached) */
+	disabled: ProxyInfo[];
+	/** Proxies in cooldown waiting to be re-enabled */
+	cooldown: ProxyInfo[];
+	/** Total number of proxies */
+	total: number;
+	/** Current rotation strategy */
+	rotation: RotationStrategy;
+	/** Total requests made through the manager */
+	totalRequests: number;
+	/** Total successful requests */
+	totalSuccesses: number;
+	/** Total failed requests */
+	totalFailures: number;
+}
+/**
+ * Result from proxy selection
+ */
+export interface ProxySelectionResult {
+	/** Selected proxy (null if should go direct) */
+	proxy: ProxyInfo | null;
+	/** Reason for selection result */
+	reason: "selected" | "whitelist-no-match" | "blacklist-match" | "no-proxies-available" | "disabled";
+}
+/**
+ * Context for beforeProxySelect hook
+ */
+export interface BeforeProxySelectContext {
+	/** Request URL */
+	url: string;
+	/** Available active proxies */
+	proxies: ProxyInfo[];
+	/** Whether this is a retry attempt */
+	isRetry: boolean;
+	/** Retry count (0 for initial request) */
+	retryCount: number;
+}
+/**
+ * Context for afterProxySelect hook
+ */
+export interface AfterProxySelectContext {
+	/** Request URL */
+	url: string;
+	/** Selected proxy (null if going direct) */
+	proxy: ProxyInfo | null;
+	/** Selection reason */
+	reason: ProxySelectionResult["reason"];
+}
+/**
+ * Context for beforeProxyError hook
+ */
+export interface BeforeProxyErrorContext {
+	/** The proxy that failed */
+	proxy: ProxyInfo;
+	/** The error that occurred */
+	error: Error;
+	/** Request URL */
+	url: string;
+	/** Current failure count for this proxy */
+	failureCount: number;
+	/** Whether proxy will be disabled after this error */
+	willBeDisabled: boolean;
+}
+/**
+ * Context for afterProxyError hook
+ */
+export interface AfterProxyErrorContext {
+	/** The proxy that failed */
+	proxy: ProxyInfo;
+	/** The error that occurred */
+	error: Error;
+	/** Action taken after error */
+	action: "retry-next-proxy" | "disabled" | "continue";
+	/** Next proxy for retry (if action is 'retry-next-proxy') */
+	nextProxy?: ProxyInfo;
+}
+/**
+ * Context for beforeProxyDisable hook
+ * Return false to prevent disabling
+ */
+export interface BeforeProxyDisableContext {
+	/** The proxy about to be disabled */
+	proxy: ProxyInfo;
+	/** Reason for disabling */
+	reason: "dead" | "limit-reached" | "manual";
+	/** Current proxy state */
+	state: ProxyState;
+}
+/**
+ * Context for afterProxyDisable hook
+ */
+export interface AfterProxyDisableContext {
+	/** The proxy that was disabled */
+	proxy: ProxyInfo;
+	/** Reason for disabling */
+	reason: "dead" | "limit-reached" | "manual";
+	/** Whether cooldown is enabled for re-enabling */
+	hasCooldown: boolean;
+	/** Timestamp when proxy will be re-enabled (if cooldown enabled) */
+	reenableAt?: number;
+}
+/**
+ * Context for afterProxyRotate hook
+ */
+export interface AfterProxyRotateContext {
+	/** Previous proxy (null if first selection) */
+	from: ProxyInfo | null;
+	/** New proxy */
+	to: ProxyInfo;
+	/** Reason for rotation */
+	reason: "scheduled" | "failure" | "limit-reached";
+}
+/**
+ * Context for afterProxyEnable hook
+ */
+export interface AfterProxyEnableContext {
+	/** The proxy that was enabled */
+	proxy: ProxyInfo;
+	/** Reason for enabling */
+	reason: "cooldown-expired" | "manual";
+}
+/**
+ * Context for onNoProxiesAvailable hook
+ * Triggered when no proxies are available and an error would be thrown
+ */
+export interface OnNoProxiesAvailableContext {
+	/** Request URL that needed a proxy */
+	url: string;
+	/** The error that will be thrown */
+	error: Error;
+	/** All proxies (including disabled ones) */
+	allProxies: ProxyState[];
+	/** Number of active proxies (should be 0) */
+	activeCount: number;
+	/** Number of disabled proxies */
+	disabledCount: number;
+	/** Number of proxies in cooldown */
+	cooldownCount: number;
+	/** Reasons why proxies are unavailable */
+	disabledReasons: {
+		/** Proxies disabled due to failures */
+		dead: number;
+		/** Proxies disabled due to request limit */
+		limitReached: number;
+		/** Proxies manually disabled */
+		manual: number;
+	};
+	/** Timestamp when this event occurred */
+	timestamp: number;
+}
+/**
  * Context provided to beforeRequest hook
  * Contains metadata about the current request state
  */
@@ -1401,6 +1730,56 @@ export type OnTimeoutHook = (event: TimeoutEvent, config: RezoConfig) => void;
  */
 export type OnAbortHook = (event: AbortEvent, config: RezoConfig) => void;
 /**
+ * Hook called before a proxy is selected
+ * Can return a specific proxy to override selection
+ */
+export type BeforeProxySelectHook = (context: BeforeProxySelectContext) => ProxyInfo | void | Promise<ProxyInfo | void>;
+/**
+ * Hook called after a proxy is selected
+ * Use for logging, analytics
+ */
+export type AfterProxySelectHook = (context: AfterProxySelectContext) => void | Promise<void>;
+/**
+ * Hook called before a proxy error is processed
+ * Use for error inspection, custom handling
+ */
+export type BeforeProxyErrorHook = (context: BeforeProxyErrorContext) => void | Promise<void>;
+/**
+ * Hook called after a proxy error is processed
+ * Use for error logging, fallback logic
+ */
+export type AfterProxyErrorHook = (context: AfterProxyErrorContext) => void | Promise<void>;
+/**
+ * Hook called before a proxy is disabled
+ * Return false to prevent disabling
+ */
+export type BeforeProxyDisableHook = (context: BeforeProxyDisableContext) => boolean | void | Promise<boolean | void>;
+/**
+ * Hook called after a proxy is disabled
+ * Use for notifications, logging
+ */
+export type AfterProxyDisableHook = (context: AfterProxyDisableContext) => void | Promise<void>;
+/**
+ * Hook called when proxy rotation occurs
+ * Use for monitoring rotation patterns
+ */
+export type AfterProxyRotateHook = (context: AfterProxyRotateContext) => void | Promise<void>;
+/**
+ * Hook called when a proxy is re-enabled
+ * Use for notifications, logging
+ */
+export type AfterProxyEnableHook = (context: AfterProxyEnableContext) => void | Promise<void>;
+/**
+ * Hook called when no proxies are available and an error is about to be thrown
+ * Use for alerting, logging exhausted proxy pools, or triggering proxy refresh
+ * This hook is called just before the error is thrown, allowing you to:
+ * - Log the exhaustion event for monitoring
+ * - Trigger external proxy pool refresh
+ * - Send alerts to monitoring systems
+ * - Record statistics about proxy pool health
+ */
+export type OnNoProxiesAvailableHook = (context: OnNoProxiesAvailableContext) => void | Promise<void>;
+/**
  * Collection of all hook types
  * All hooks are arrays to allow multiple handlers
  */
@@ -1416,6 +1795,15 @@ export interface RezoHooks {
 	afterParse: AfterParseHook[];
 	beforeCookie: BeforeCookieHook[];
 	afterCookie: AfterCookieHook[];
+	beforeProxySelect: BeforeProxySelectHook[];
+	afterProxySelect: AfterProxySelectHook[];
+	beforeProxyError: BeforeProxyErrorHook[];
+	afterProxyError: AfterProxyErrorHook[];
+	beforeProxyDisable: BeforeProxyDisableHook[];
+	afterProxyDisable: AfterProxyDisableHook[];
+	afterProxyRotate: AfterProxyRotateHook[];
+	afterProxyEnable: AfterProxyEnableHook[];
+	onNoProxiesAvailable: OnNoProxiesAvailableHook[];
 	onSocket: OnSocketHook[];
 	onDns: OnDnsHook[];
 	onTls: OnTlsHook[];
@@ -1813,15 +2201,281 @@ declare class RezoError<T = any> extends Error {
 	getFullDetails(): string;
 }
 /**
- * Supported proxy protocols for network requests
+ * Queue configuration options
  */
-export type ProxyProtocol = "http" | "https" | "socks4" | "socks5";
+export interface QueueConfig {
+	/** Maximum concurrent tasks (default: Infinity) */
+	concurrency?: number;
+	/** Auto-start processing when tasks are added (default: true) */
+	autoStart?: boolean;
+	/** Timeout per task in milliseconds (default: none) */
+	timeout?: number;
+	/** Throw on timeout vs silently fail (default: true) */
+	throwOnTimeout?: boolean;
+	/** Interval between task starts in ms for rate limiting */
+	interval?: number;
+	/** Max tasks to start per interval (default: Infinity) */
+	intervalCap?: number;
+	/** Carry over unused interval capacity to next interval */
+	carryoverConcurrencyCount?: boolean;
+}
+/**
+ * Task options when adding to queue
+ */
+export interface TaskOptions {
+	/** Task priority (higher runs first, default: 0) */
+	priority?: number;
+	/** Task-specific timeout (overrides queue default) */
+	timeout?: number;
+	/** Unique ID for tracking/cancellation */
+	id?: string;
+	/** Signal for external cancellation */
+	signal?: AbortSignal;
+}
+/**
+ * Current queue state
+ */
+export interface QueueState {
+	/** Number of tasks currently running */
+	pending: number;
+	/** Number of tasks waiting in queue */
+	size: number;
+	/** Total tasks (pending + size) */
+	total: number;
+	/** Is queue paused */
+	isPaused: boolean;
+	/** Is queue idle (no tasks) */
+	isIdle: boolean;
+}
+/**
+ * Queue statistics
+ */
+export interface QueueStats {
+	/** Total tasks added since creation */
+	added: number;
+	/** Total tasks processed (started) */
+	processed: number;
+	/** Total successful completions */
+	completed: number;
+	/** Total failures */
+	failed: number;
+	/** Total timeouts */
+	timedOut: number;
+	/** Total cancellations */
+	cancelled: number;
+	/** Average task duration (ms) */
+	averageDuration: number;
+	/** Tasks per second (rolling average) */
+	throughput: number;
+}
+/**
+ * Queue event types
+ */
+export interface QueueEvents {
+	/** Task added to queue */
+	add: {
+		id: string;
+		priority: number;
+	};
+	/** Task started executing */
+	start: {
+		id: string;
+	};
+	/** Task completed successfully */
+	completed: {
+		id: string;
+		result: any;
+		duration: number;
+	};
+	/** Task failed with error */
+	error: {
+		id: string;
+		error: Error;
+	};
+	/** Task timed out */
+	timeout: {
+		id: string;
+	};
+	/** Task cancelled */
+	cancelled: {
+		id: string;
+	};
+	/** Queue became active (was idle, now processing) */
+	active: undefined;
+	/** Queue became idle (all tasks done) */
+	idle: undefined;
+	/** Queue was paused */
+	paused: undefined;
+	/** Queue was resumed */
+	resumed: undefined;
+	/** Next task about to run */
+	next: undefined;
+	/** Queue was emptied (no pending tasks) */
+	empty: undefined;
+}
+/**
+ * Event handler type
+ */
+export type EventHandler<T> = (data: T) => void;
+/**
+ * Task function type
+ */
+export type TaskFunction<T> = () => Promise<T>;
+declare class RezoQueue<T = any> {
+	private queue;
+	private pendingCount;
+	private isPausedFlag;
+	private intervalId?;
+	private intervalCount;
+	private intervalStart;
+	private eventHandlers;
+	private statsData;
+	private totalDuration;
+	private throughputWindow;
+	private readonly throughputWindowSize;
+	private idlePromise?;
+	private emptyPromise?;
+	readonly config: Required<QueueConfig>;
+	/**
+	 * Create a new RezoQueue
+	 * @param config - Queue configuration options
+	 */
+	constructor(config?: QueueConfig);
+	/**
+	 * Get current queue state
+	 */
+	get state(): QueueState;
+	/**
+	 * Get queue statistics
+	 */
+	get stats(): QueueStats;
+	/**
+	 * Get/set concurrency limit
+	 */
+	get concurrency(): number;
+	set concurrency(value: number);
+	/**
+	 * Number of pending (running) tasks
+	 */
+	get pending(): number;
+	/**
+	 * Number of tasks waiting in queue
+	 */
+	get size(): number;
+	/**
+	 * Check if queue is paused
+	 */
+	get isPaused(): boolean;
+	/**
+	 * Add a task to the queue
+	 * @param fn - Async function to execute
+	 * @param options - Task options
+	 * @returns Promise resolving to task result
+	 */
+	add<R = T>(fn: TaskFunction<R>, options?: TaskOptions): Promise<R>;
+	/**
+	 * Add multiple tasks to the queue
+	 * @param fns - Array of async functions
+	 * @param options - Task options (applied to all)
+	 * @returns Promise resolving to array of results
+	 */
+	addAll<R = T>(fns: TaskFunction<R>[], options?: TaskOptions): Promise<R[]>;
+	/**
+	 * Pause queue processing (running tasks continue)
+	 */
+	pause(): void;
+	/**
+	 * Resume queue processing
+	 */
+	start(): void;
+	/**
+	 * Clear all pending tasks from queue
+	 */
+	clear(): void;
+	/**
+	 * Cancel a specific task by ID
+	 * @param id - Task ID to cancel
+	 * @returns true if task was found and cancelled
+	 */
+	cancel(id: string): boolean;
+	/**
+	 * Cancel all tasks matching a predicate
+	 * @param predicate - Function to test each task
+	 * @returns Number of tasks cancelled
+	 */
+	cancelBy(predicate: (task: {
+		id: string;
+		priority: number;
+	}) => boolean): number;
+	/**
+	 * Wait for queue to become idle (no running or pending tasks)
+	 */
+	onIdle(): Promise<void>;
+	/**
+	 * Wait for queue to be empty (no pending tasks, but may have running)
+	 */
+	onEmpty(): Promise<void>;
+	/**
+	 * Wait for queue size to be less than limit
+	 * @param limit - Size threshold
+	 */
+	onSizeLessThan(limit: number): Promise<void>;
+	/**
+	 * Register an event handler
+	 * @param event - Event name
+	 * @param handler - Handler function
+	 */
+	on<E extends keyof QueueEvents>(event: E, handler: EventHandler<QueueEvents[E]>): void;
+	/**
+	 * Remove an event handler
+	 * @param event - Event name
+	 * @param handler - Handler function to remove
+	 */
+	off<E extends keyof QueueEvents>(event: E, handler: EventHandler<QueueEvents[E]>): void;
+	/**
+	 * Destroy the queue and cleanup resources
+	 */
+	destroy(): void;
+	/**
+	 * Insert task into queue maintaining priority order (highest first)
+	 */
+	private insertByPriority;
+	/**
+	 * Try to run next task if capacity available
+	 */
+	private tryRunNext;
+	/**
+	 * Execute a task
+	 */
+	private runTask;
+	/**
+	 * Record task duration for statistics
+	 */
+	private recordDuration;
+	/**
+	 * Start interval-based rate limiting
+	 */
+	private startInterval;
+	/**
+	 * Emit an event
+	 */
+	protected emit<E extends keyof QueueEvents>(event: E, data: QueueEvents[E]): void;
+	/**
+	 * Check if queue became empty
+	 */
+	private checkEmpty;
+	/**
+	 * Check if queue became idle
+	 */
+	private checkIdle;
+}
+type ProxyProtocol$1 = "http" | "https" | "socks4" | "socks5";
 /**
  * Configuration options for proxy connections
  */
 export type ProxyOptions = {
 	/** The proxy protocol to use */
-	protocol: ProxyProtocol;
+	protocol: ProxyProtocol$1;
 	/** Proxy server hostname or IP address */
 	host: string;
 	/** Proxy server port number */
@@ -1891,7 +2545,7 @@ export interface RezoRequestConfig<D = any> {
 	/**
 	 * Queue to use for request execution
 	 */
-	queue?: PQueue | null;
+	queue?: RezoQueue | null;
 	/**
 	 * Controls how the response body is parsed and returned in `response.data`.
 	 *
@@ -1974,17 +2628,78 @@ export interface RezoRequestConfig<D = any> {
 	maxRedirects?: number;
 	/** Whether to automatically decompress response data */
 	decompress?: boolean;
-	/** Whether to keep the connection alive for reuse */
+	/**
+	 * Whether to keep TCP connections alive for reuse across multiple requests.
+	 *
+	 * When enabled, the underlying TCP connection is kept open after a request completes,
+	 * allowing subsequent requests to the same host to reuse the connection. This reduces
+	 * latency by avoiding the overhead of establishing new connections (TCP handshake,
+	 * TLS negotiation for HTTPS).
+	 *
+	 * **Behavior:**
+	 * - `false` (default) - Connection closes after each request. Process exits immediately.
+	 * - `true` - Connection stays open for reuse. Idle connections close after `keepAliveMsecs`.
+	 *
+	 * **When to use `keepAlive: true`:**
+	 * - Making multiple requests to the same host in sequence
+	 * - Long-running applications (servers, bots, scrapers)
+	 * - Performance-critical applications where connection overhead matters
+	 *
+	 * **When to use `keepAlive: false` (default):**
+	 * - Single requests or scripts that should exit immediately
+	 * - CLI tools that make one-off requests
+	 * - When you need predictable process termination
+	 *
+	 * @example
+	 * ```typescript
+	 * // Default: process exits immediately after request
+	 * const { data } = await rezo.get('https://api.example.com/data');
+	 *
+	 * // Keep connection alive for 1 minute (default) for subsequent requests
+	 * const client = new Rezo({ keepAlive: true });
+	 * await client.get('https://api.example.com/users');
+	 * await client.get('https://api.example.com/posts'); // Reuses connection
+	 *
+	 * // Custom keep-alive timeout (30 seconds)
+	 * const client = new Rezo({ keepAlive: true, keepAliveMsecs: 30000 });
+	 * ```
+	 *
+	 * @default false
+	 */
 	keepAlive?: boolean;
+	/**
+	 * How long to keep idle connections alive in milliseconds.
+	 *
+	 * Only applies when `keepAlive: true`. After this duration of inactivity,
+	 * the connection is closed automatically. This prevents resource leaks
+	 * from connections that are no longer needed.
+	 *
+	 * **Note:** Even with keep-alive enabled, the Node.js process can still exit
+	 * cleanly when there's no other work to do, thanks to socket unreferencing.
+	 *
+	 * @example
+	 * ```typescript
+	 * // Keep connections alive for 30 seconds
+	 * const client = new Rezo({
+	 *   keepAlive: true,
+	 *   keepAliveMsecs: 30000
+	 * });
+	 *
+	 * // Keep connections alive for 2 minutes
+	 * const client = new Rezo({
+	 *   keepAlive: true,
+	 *   keepAliveMsecs: 120000
+	 * });
+	 * ```
+	 *
+	 * @default 60000 (1 minute)
+	 */
+	keepAliveMsecs?: number;
 	withoutBodyOnRedirect?: boolean;
 	autoSetReferer?: boolean;
 	autoSetOrigin?: boolean;
 	treat302As303?: boolean;
 	startNewRequest?: boolean;
-	/** Whether to use HTTP/2 protocol */
-	http2?: boolean;
-	/** Whether to use cURL adapter */
-	curl?: boolean;
 	/**
 	 * DNS cache configuration for faster repeated requests.
 	 *
@@ -2088,6 +2803,12 @@ export interface RezoRequestConfig<D = any> {
 	withCredentials?: boolean;
 	/** Proxy configuration (URL string or detailed options) */
 	proxy?: string | ProxyOptions;
+	/**
+	 * Whether to use ProxyManager for this request
+	 * Set to false to bypass ProxyManager even when one is configured
+	 * @default true (uses ProxyManager if configured)
+	 */
+	useProxyManager?: boolean;
 	/** Whether to enable automatic cookie handling */
 	useCookies?: boolean;
 	/** Custom cookie jar for managing cookies */
@@ -2109,8 +2830,6 @@ export interface RezoRequestConfig<D = any> {
 	transformRequest?: Array<(data: any, headers: RezoHeaders) => any>;
 	/** Array of functions to transform response data */
 	transformResponse?: Array<(data: any) => any>;
-	/** Adapter to use for the request (name or custom function) */
-	adapter?: string | ((config: RezoRequestConfig) => Promise<any>);
 	/** AbortSignal to cancel the request */
 	signal?: AbortSignal;
 	/** File path to save the response to (for downloads) */
@@ -2319,7 +3038,198 @@ declare class ResponseCache {
 	get isPersistent(): boolean;
 	getConfig(): ResponseCacheConfig;
 }
-export type queueOptions = Options$1<PriorityQueue, QueueAddOptions>;
+type BeforeProxySelectHook$1 = (context: BeforeProxySelectContext) => ProxyInfo | void | Promise<ProxyInfo | void>;
+type AfterProxySelectHook$1 = (context: AfterProxySelectContext) => void | Promise<void>;
+type BeforeProxyErrorHook$1 = (context: BeforeProxyErrorContext) => void | Promise<void>;
+type AfterProxyErrorHook$1 = (context: AfterProxyErrorContext) => void | Promise<void>;
+type BeforeProxyDisableHook$1 = (context: BeforeProxyDisableContext) => boolean | void | Promise<boolean | void>;
+type AfterProxyDisableHook$1 = (context: AfterProxyDisableContext) => void | Promise<void>;
+type AfterProxyRotateHook$1 = (context: AfterProxyRotateContext) => void | Promise<void>;
+type AfterProxyEnableHook$1 = (context: AfterProxyEnableContext) => void | Promise<void>;
+type OnNoProxiesAvailableHook$1 = (context: OnNoProxiesAvailableContext) => void | Promise<void>;
+/**
+ * Proxy hooks collection for ProxyManager events
+ */
+export interface ProxyHooks {
+	beforeProxySelect: BeforeProxySelectHook$1[];
+	afterProxySelect: AfterProxySelectHook$1[];
+	beforeProxyError: BeforeProxyErrorHook$1[];
+	afterProxyError: AfterProxyErrorHook$1[];
+	beforeProxyDisable: BeforeProxyDisableHook$1[];
+	afterProxyDisable: AfterProxyDisableHook$1[];
+	afterProxyRotate: AfterProxyRotateHook$1[];
+	afterProxyEnable: AfterProxyEnableHook$1[];
+	/** Hook triggered when no proxies are available */
+	onNoProxiesAvailable: OnNoProxiesAvailableHook$1[];
+}
+declare class ProxyManager {
+	/** Configuration for the proxy manager */
+	readonly config: ProxyManagerConfig;
+	/** Internal proxy states map (proxyId -> state) */
+	private states;
+	/** Current index for sequential rotation */
+	private currentIndex;
+	/** Request counter for current proxy (sequential rotation) */
+	private currentProxyRequests;
+	/** Last selected proxy (for rotation tracking) */
+	private lastSelectedProxy;
+	/** Cooldown timers map (proxyId -> timerId) */
+	private cooldownTimers;
+	/** Total requests through manager */
+	private _totalRequests;
+	/** Total successful requests */
+	private _totalSuccesses;
+	/** Total failed requests */
+	private _totalFailures;
+	/** Proxy hooks */
+	hooks: ProxyHooks;
+	/**
+	 * Create a new ProxyManager instance
+	 * @param config - Proxy manager configuration
+	 */
+	constructor(config: ProxyManagerConfig);
+	/**
+	 * Create initial state for a proxy
+	 */
+	private createInitialState;
+	/**
+	 * Check if a URL should use proxy based on whitelist/blacklist
+	 * @param url - The request URL to check
+	 * @returns true if URL should use proxy, false if should go direct
+	 */
+	shouldProxy(url: string): boolean;
+	/**
+	 * Match a URL against a pattern
+	 */
+	private matchPattern;
+	/**
+	 * Get active proxies (not disabled)
+	 */
+	getActive(): ProxyInfo[];
+	/**
+	 * Get disabled proxies
+	 */
+	getDisabled(): ProxyInfo[];
+	/**
+	 * Get proxies in cooldown
+	 */
+	getCooldown(): ProxyInfo[];
+	/**
+	 * Process expired cooldowns and re-enable proxies
+	 */
+	private processExpiredCooldowns;
+	/**
+	 * Get next proxy based on rotation strategy
+	 * @param url - The request URL (for whitelist/blacklist checking)
+	 * @returns Selected proxy or null if should go direct
+	 */
+	next(url: string): ProxyInfo | null;
+	/**
+	 * Get detailed selection result with reason
+	 * @param url - The request URL
+	 * @returns Selection result with proxy and reason
+	 */
+	select(url: string): ProxySelectionResult;
+	/**
+	 * Select proxy based on rotation strategy
+	 */
+	private selectProxy;
+	/**
+	 * Report a successful request through a proxy
+	 * @param proxy - The proxy that succeeded
+	 */
+	reportSuccess(proxy: ProxyInfo): void;
+	/**
+	 * Report a failed request through a proxy
+	 * @param proxy - The proxy that failed
+	 * @param error - The error that occurred
+	 * @param url - Optional URL for hook context
+	 */
+	reportFailure(proxy: ProxyInfo, error: Error, url?: string): void;
+	/**
+	 * Disable a proxy from the pool
+	 * @param proxy - The proxy to disable
+	 * @param reason - Reason for disabling
+	 */
+	disableProxy(proxy: ProxyInfo, reason?: "dead" | "limit-reached" | "manual"): void;
+	/**
+	 * Enable a previously disabled proxy
+	 * @param proxy - The proxy to enable
+	 * @param reason - Reason for enabling
+	 */
+	enableProxy(proxy: ProxyInfo, reason?: "cooldown-expired" | "manual"): void;
+	/**
+	 * Add proxies to the pool
+	 * @param proxies - Proxies to add
+	 */
+	add(proxies: ProxyInfo | ProxyInfo[]): void;
+	/**
+	 * Remove proxies from the pool
+	 * @param proxies - Proxies to remove
+	 */
+	remove(proxies: ProxyInfo | ProxyInfo[]): void;
+	/**
+	 * Reset all proxies - re-enable all and reset counters
+	 */
+	reset(): void;
+	/**
+	 * Get current status of all proxies
+	 */
+	getStatus(): ProxyManagerStatus;
+	/**
+	 * Get state for a specific proxy
+	 * @param proxy - The proxy to get state for
+	 */
+	getProxyState(proxy: ProxyInfo): ProxyState | undefined;
+	/**
+	 * Check if any proxies are available
+	 */
+	hasAvailableProxies(): boolean;
+	/**
+	 * Destroy the manager and cleanup timers
+	 */
+	destroy(): void;
+	private runBeforeProxySelectHooksSync;
+	private runAfterProxySelectHooksSync;
+	private runBeforeProxyErrorHooksSync;
+	private runAfterProxyErrorHooksSync;
+	private runAfterProxyRotateHooks;
+	private runAfterProxyDisableHooks;
+	private runAfterProxyEnableHooks;
+	/**
+	 * Run onNoProxiesAvailable hooks synchronously
+	 * Called when no proxies are available and an error is about to be thrown
+	 */
+	private runOnNoProxiesAvailableHooksSync;
+	/**
+	 * Run onNoProxiesAvailable hooks asynchronously
+	 * Called when no proxies are available and an error is about to be thrown
+	 */
+	runOnNoProxiesAvailableHooks(context: OnNoProxiesAvailableContext): Promise<void>;
+	/**
+	 * Notify that no proxies are available and trigger hooks
+	 * This method is called when proxy selection fails due to pool exhaustion
+	 *
+	 * @param url - The request URL that needed a proxy
+	 * @param error - The error that will be thrown
+	 * @returns The context object with detailed information about the proxy pool state
+	 *
+	 * @example
+	 * ```typescript
+	 * manager.hooks.onNoProxiesAvailable.push((context) => {
+	 *     console.error(`No proxies available for ${context.url}`);
+	 *     console.log(`Dead: ${context.disabledReasons.dead}, Limit: ${context.disabledReasons.limitReached}`);
+	 *     // Trigger external alert or proxy refresh
+	 *     alertSystem.notify('Proxy pool exhausted', context);
+	 * });
+	 *
+	 * // Called internally or by adapters when no proxies are available
+	 * const context = manager.notifyNoProxiesAvailable('https://api.example.com', new Error('No proxies'));
+	 * ```
+	 */
+	notifyNoProxiesAvailable(url: string, error: Error): OnNoProxiesAvailableContext;
+}
+export type queueOptions = QueueConfig;
 export interface CacheConfig {
 	/** Response cache configuration */
 	response?: boolean | ResponseCacheConfig;
@@ -2378,10 +3288,6 @@ export interface RezoDefaultOptions {
 	keepAlive?: boolean;
 	/** Whether to detect and prevent redirect cycles */
 	enableRedirectCycleDetection?: boolean;
-	/** Whether to use HTTP/2 protocol */
-	http2?: boolean;
-	/** Whether to use cURL adapter */
-	curl?: boolean;
 	/** Whether to send cookies and authorization headers with cross-origin requests */
 	withCredentials?: boolean;
 	/** Proxy configuration (URL string or detailed options) */
@@ -2420,8 +3326,6 @@ export interface RezoDefaultOptions {
 	transformRequest?: RezoHttpRequest["transformRequest"];
 	/** Array of functions to transform response data */
 	transformResponse?: RezoHttpRequest["transformResponse"];
-	/** Adapter to use for the request (name or custom function) */
-	adapter?: RezoHttpRequest["adapter"];
 	/** Browser simulation configuration for user agent spoofing */
 	browser?: RezoHttpRequest["browser"];
 	/** Enable debug logging for the request */
@@ -2445,6 +3349,35 @@ export interface RezoDefaultOptions {
 	 * DNS cache defaults: 1 min TTL, 1000 entries
 	 */
 	cache?: CacheOption;
+	/**
+	 * Proxy manager for advanced proxy rotation and pool management
+	 * - Provide a `ProxyManager` instance for full control
+	 * - Or provide `ProxyManagerConfig` to auto-create internally
+	 *
+	 * Note: ProxyManager overrides `proxy` option when set.
+	 * Use `useProxyManager: false` per-request to bypass.
+	 *
+	 * @example
+	 * ```typescript
+	 * // With config (auto-creates ProxyManager)
+	 * const client = new Rezo({
+	 *   proxyManager: {
+	 *     rotation: 'random',
+	 *     proxies: [
+	 *       { protocol: 'socks5', host: '127.0.0.1', port: 1080 },
+	 *       { protocol: 'http', host: 'proxy.example.com', port: 8080 }
+	 *     ],
+	 *     whitelist: ['api.example.com'],
+	 *     autoDisableDeadProxies: true
+	 *   }
+	 * });
+	 *
+	 * // With ProxyManager instance
+	 * const pm = new ProxyManager({ rotation: 'sequential', proxies: [...] });
+	 * const client = new Rezo({ proxyManager: pm });
+	 * ```
+	 */
+	proxyManager?: ProxyManager | ProxyManagerConfig;
 }
 export interface httpAdapterOverloads {
 	request<T = any>(options: RezoRequestOptions): Promise<RezoResponse<T>>;
@@ -3292,7 +4225,7 @@ export interface httpAdapterPutOverloads {
  */
 export type AdapterFunction<T = any> = (options: RezoRequestConfig, defaultOptions: RezoDefaultOptions, jar: RezoCookieJar) => Promise<RezoResponse<T> | RezoStreamResponse | RezoDownloadResponse | RezoUploadResponse>;
 declare class Rezo {
-	protected queue: PQueue | null;
+	protected queue: RezoQueue | null;
 	protected isQueueEnabled: boolean;
 	defaults: RezoDefaultOptions;
 	hooks: RezoHooks;
@@ -3305,7 +4238,14 @@ declare class Rezo {
 	readonly dnsCache?: DNSCache;
 	/** The adapter function used for HTTP requests */
 	private readonly adapter;
+	/** Proxy manager for advanced proxy rotation and pool management */
+	private readonly _proxyManager;
 	constructor(config?: RezoDefaultOptions, adapter?: AdapterFunction);
+	/**
+	 * Get the ProxyManager instance (if configured)
+	 * @returns ProxyManager instance or null
+	 */
+	get proxyManager(): ProxyManager | null;
 	/**
 	 * Clear all caches (response and DNS)
 	 */
@@ -3352,6 +4292,7 @@ declare class Rezo {
 	private __create;
 	/** Get the cookie jar for this instance */
 	get cookieJar(): RezoCookieJar;
+	set cookieJar(jar: RezoCookieJar);
 	/**
 	 * Save cookies to file (if cookieFile is configured).
 	 * Can also specify a different path to save to.
@@ -3410,6 +4351,158 @@ declare class Rezo {
 	 * ```
 	 */
 	upload(url: string | URL, data: Buffer | FormData | RezoFormData | string | Record<string, any>, options?: RezoHttpRequest): RezoUploadResponse;
+	/**
+	 * Set cookies in the cookie jar from various input formats.
+	 *
+	 * This method accepts multiple input formats for maximum flexibility:
+	 * - **Netscape cookie file content** (string): Full cookie file content in Netscape format
+	 * - **Set-Cookie header array** (string[]): Array of Set-Cookie header values
+	 * - **Serialized cookie objects** (SerializedCookie[]): Array of plain objects with cookie properties
+	 * - **Cookie instances** (Cookie[]): Array of Cookie class instances
+	 *
+	 * @param cookies - Cookies to set in one of the supported formats
+	 * @param url - Optional URL context for the cookies (used for domain/path inference)
+	 * @param startNew - If true, clears all existing cookies before setting new ones (default: false)
+	 *
+	 * @example
+	 * ```typescript
+	 * // From Netscape cookie file content
+	 * const netscapeContent = `# Netscape HTTP Cookie File
+	 * .example.com\tTRUE\t/\tFALSE\t0\tsession\tabc123`;
+	 * rezo.setCookies(netscapeContent);
+	 *
+	 * // From Set-Cookie header array
+	 * rezo.setCookies([
+	 *   'session=abc123; Domain=example.com; Path=/; HttpOnly',
+	 *   'user=john; Domain=example.com; Path=/; Max-Age=3600'
+	 * ], 'https://example.com');
+	 *
+	 * // From serialized cookie objects
+	 * rezo.setCookies([
+	 *   { key: 'session', value: 'abc123', domain: 'example.com', path: '/' },
+	 *   { key: 'user', value: 'john', domain: 'example.com', path: '/', maxAge: 3600 }
+	 * ]);
+	 *
+	 * // From Cookie instances
+	 * import { Cookie } from 'rezo';
+	 * const cookie = new Cookie({ key: 'token', value: 'xyz789', domain: 'api.example.com' });
+	 * rezo.setCookies([cookie]);
+	 *
+	 * // Replace all cookies (startNew = true)
+	 * rezo.setCookies([{ key: 'new', value: 'cookie' }], undefined, true);
+	 * ```
+	 *
+	 * @see {@link getCookies} - Retrieve cookies from the jar
+	 * @see {@link RezoCookieJar} - The underlying cookie jar class
+	 */
+	setCookies(stringCookies: string): void;
+	setCookies(stringCookies: string, url: string, startNew?: boolean): void;
+	setCookies(serializedStringCookiesCookies: string, url: string | undefined, startNew: boolean): void;
+	setCookies(serializedCookies: SerializedCookie[]): void;
+	setCookies(serializedCookies: SerializedCookie[], url: string, startNew?: boolean): void;
+	setCookies(serializedCookies: SerializedCookie[], url: string | undefined, startNew: boolean): void;
+	setCookies(cookies: Cookie[]): void;
+	setCookies(cookies: Cookie[], url: string, startNew?: boolean): void;
+	setCookies(cookies: Cookie[], url: string | undefined, startNew: boolean): void;
+	setCookies(setCookieArray: string[]): void;
+	setCookies(setCookieArray: string[], url: string, startNew?: boolean): void;
+	setCookies(setCookieArray: string[], url: string | undefined, startNew: boolean): void;
+	/**
+	 * Get all cookies from the cookie jar in multiple convenient formats.
+	 *
+	 * Returns a `Cookies` object containing all stored cookies in various formats
+	 * for different use cases. This provides flexible access to cookies for
+	 * HTTP headers, file storage, serialization, or programmatic manipulation.
+	 *
+	 * The returned `Cookies` object contains:
+	 * - **array**: `Cookie[]` - Array of Cookie class instances for programmatic access
+	 * - **serialized**: `SerializedCookie[]` - Plain objects for JSON serialization/storage
+	 * - **netscape**: `string` - Netscape cookie file format for file-based storage
+	 * - **string**: `string` - Cookie header format (`key=value; key2=value2`) for HTTP requests
+	 * - **setCookiesString**: `string[]` - Array of Set-Cookie header strings
+	 *
+	 * @returns A Cookies object with cookies in multiple formats
+	 *
+	 * @example
+	 * ```typescript
+	 * const cookies = rezo.getCookies();
+	 *
+	 * // Access as Cookie instances for programmatic use
+	 * for (const cookie of cookies.array) {
+	 *   console.log(`${cookie.key}=${cookie.value} (expires: ${cookie.expires})`);
+	 * }
+	 *
+	 * // Get cookie header string for manual HTTP requests
+	 * console.log(cookies.string); // "session=abc123; user=john"
+	 *
+	 * // Save to Netscape cookie file
+	 * fs.writeFileSync('cookies.txt', cookies.netscape);
+	 *
+	 * // Serialize to JSON for storage
+	 * const json = JSON.stringify(cookies.serialized);
+	 * localStorage.setItem('cookies', json);
+	 *
+	 * // Get Set-Cookie headers (useful for proxying responses)
+	 * for (const setCookie of cookies.setCookiesString) {
+	 *   console.log(setCookie); // "session=abc123; Domain=example.com; Path=/; HttpOnly"
+	 * }
+	 *
+	 * // Check cookie count
+	 * console.log(`Total cookies: ${cookies.array.length}`);
+	 *
+	 * // Find specific cookie
+	 * const sessionCookie = cookies.array.find(c => c.key === 'session');
+	 * ```
+	 *
+	 * @see {@link setCookies} - Set cookies in the jar
+	 * @see {@link clearCookies} - Remove all cookies from the jar
+	 * @see {@link cookieJar} - Access the underlying RezoCookieJar for more methods
+	 */
+	getCookies(): Cookies;
+	/**
+	 * Remove all cookies from the cookie jar.
+	 *
+	 * This method synchronously clears the entire cookie store, removing all
+	 * cookies regardless of domain, path, or expiration. Useful for:
+	 * - Logging out users and clearing session state
+	 * - Resetting the client to a clean state between test runs
+	 * - Implementing "clear cookies" functionality in applications
+	 * - Starting fresh before authenticating with different credentials
+	 *
+	 * This operation is immediate and cannot be undone. If you need to preserve
+	 * certain cookies, use {@link getCookies} to save them before clearing,
+	 * then restore specific ones with {@link setCookies}.
+	 *
+	 * @example
+	 * ```typescript
+	 * // Simple logout - clear all cookies
+	 * rezo.clearCookies();
+	 *
+	 * // Save cookies before clearing (if needed)
+	 * const savedCookies = rezo.getCookies();
+	 * rezo.clearCookies();
+	 * // Later, restore specific cookies if needed
+	 * const importantCookies = savedCookies.array.filter(c => c.key === 'preferences');
+	 * rezo.setCookies(importantCookies);
+	 *
+	 * // Clear and re-authenticate
+	 * rezo.clearCookies();
+	 * await rezo.post('https://api.example.com/login', {
+	 *   username: 'newuser',
+	 *   password: 'newpass'
+	 * });
+	 *
+	 * // Use in test teardown
+	 * afterEach(() => {
+	 *   rezo.clearCookies(); // Clean state for next test
+	 * });
+	 * ```
+	 *
+	 * @see {@link getCookies} - Get all cookies before clearing
+	 * @see {@link setCookies} - Restore or set new cookies after clearing
+	 * @see {@link cookieJar} - Access the underlying RezoCookieJar for more control
+	 */
+	clearCookies(): void;
 }
 /**
  * Rezo HTTP Client - Core Types
@@ -5518,7 +6611,7 @@ export declare class CrawlerOptions {
 	/**
 	 * Internal method to process and add rate limiter configurations
 	 * @param options - Limiter configuration object with enable flag and queue options
-	 * @description Validates and stores rate limiter configurations, creating PQueue instances
+	 * @description Validates and stores rate limiter configurations, creating RezoQueue instances
 	 * for each valid configuration. Supports domain-specific or global rate limiting.
 	 * @private
 	 */
@@ -5682,7 +6775,7 @@ export declare class CrawlerOptions {
 	 * ```
 	 */
 	getAdapter(url: string, type: "proxies", useGlobal?: boolean, random?: boolean): IProxy | null;
-	getAdapter(url: string, type: "limiters", useGlobal?: boolean, random?: boolean): PQueue | null;
+	getAdapter(url: string, type: "limiters", useGlobal?: boolean, random?: boolean): RezoQueue | null;
 	getAdapter(url: string, type: "oxylabs", useGlobal?: boolean, random?: boolean): Oxylabs | null;
 	getAdapter(url: string, type: "decodo", useGlobal?: boolean, random?: boolean): Decodo | null;
 	getAdapter(url: string, type: "headers", useGlobal?: boolean, random?: boolean): OutgoingHttpHeaders | null;

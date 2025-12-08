@@ -63,6 +63,8 @@ Rezo is a production-ready HTTP client library engineered for Node.js 22+ and un
 - [Advanced Usage](#advanced-usage)
   - [Cookie Management](#cookie-management)
   - [Proxy Configuration](#proxy-configuration)
+  - [Proxy Manager](#proxy-manager)
+  - [Request Queue](#request-queue)
   - [Streaming](#streaming)
   - [File Downloads](#file-downloads)
   - [File Uploads](#file-uploads)
@@ -216,7 +218,7 @@ const client = rezo.create({ baseURL: 'https://api.example.com' });
 |---------|-------------|
 | **Retry Logic** | Configurable retry with exponential backoff |
 | **Timeout Control** | Connection, request, and total timeout options |
-| **Rate Limiting** | Request queue with priority and concurrency control |
+| **Rate Limiting** | Built-in request queue with priority, concurrency, and domain-based rate limiting |
 | **Hooks System** | Lifecycle hooks for request/response interception |
 | **Error Handling** | Structured errors with actionable suggestions |
 | **Performance Metrics** | Detailed timing data for monitoring |
@@ -305,25 +307,270 @@ const response = await rezo.get('https://api.example.com/data');
 
 ### cURL Adapter
 
-Advanced adapter wrapping the cURL command-line tool for maximum compatibility and debugging.
+Advanced adapter wrapping the cURL command-line tool with **120+ configuration options** for maximum compatibility, debugging, and fine-grained control.
 
 ```typescript
 import rezo from 'rezo/adapters/curl';
 
 const response = await rezo.get('https://api.example.com/data', {
   curl: {
-    verbose: true,
-    insecure: false
+    connectTimeout: 10,
+    limitRate: '500K',
+    retry: { attempts: 3, allErrors: true },
+    verbose: true
   }
 });
 ```
 
 **Features:**
-- 200+ cURL options available
-- Advanced authentication (Basic, Digest, NTLM, Negotiate)
-- Connection pooling
-- Detailed timing information
-- Perfect for debugging and testing
+- 120+ cURL command-line options via `curl` property
+- HTTP/1.0, 1.1, 2.0, 3.0 protocol support
+- Advanced authentication (Basic, Digest, NTLM, Negotiate, AWS SigV4, OAuth2)
+- Comprehensive TLS/SSL configuration
+- FTP, SSH, SMTP, and TFTP protocol support
+- Connection pooling and reuse
+- Detailed timing and debugging information
+- Proxy authentication and chaining
+
+**Important**: The `curl` property is **only available** when importing from `rezo/adapters/curl`. It does not appear in the base `RezoRequestConfig` type.
+
+#### cURL Options Categories
+
+The cURL adapter provides options across the following categories:
+
+| Category | Example Options | Description |
+|----------|----------------|-------------|
+| **Connection** | `connectTimeout`, `maxTime`, `tcpFastOpen`, `tcpNodelay` | Connection timing and TCP settings |
+| **Rate Limiting** | `limitRate`, `speedLimit`, `maxFilesize` | Bandwidth and transfer limits |
+| **Retry** | `retry.attempts`, `retry.delay`, `retry.allErrors` | Automatic retry configuration |
+| **Network** | `interface`, `localPort`, `ipVersion`, `resolve` | Network interface and routing |
+| **HTTP** | `httpVersion`, `pathAsIs`, `maxRedirs`, `referer` | HTTP protocol settings |
+| **TLS/SSL** | `tls.min`, `tls.ciphers`, `tls.cert`, `insecure` | Comprehensive TLS configuration |
+| **Proxy** | `proxyHeaders`, `proxyTls`, `proxyTunnel` | Proxy-specific settings |
+| **DNS** | `dns.servers`, `dns.dohUrl`, `dns.dohInsecure` | DNS resolution and DoH |
+| **Authentication** | `negotiate`, `awsSigv4`, `oauth2Bearer`, `kerberos` | Advanced auth methods |
+| **FTP** | `ftp.pasv`, `ftp.createDirs`, `ftp.method` | FTP protocol options |
+| **SSH** | `ssh.privateKey`, `ssh.knownHosts`, `ssh.compression` | SSH/SCP/SFTP settings |
+| **SMTP** | `smtp.mailFrom`, `smtp.mailRcpt` | Email sending configuration |
+| **Debug** | `verbose`, `trace`, `traceTime`, `dumpHeader` | Debugging and tracing |
+
+#### cURL Options Examples
+
+##### Connection & Timeout
+
+```typescript
+import rezo from 'rezo/adapters/curl';
+
+await rezo.get('https://api.example.com/data', {
+  curl: {
+    connectTimeout: 10,        // 10 seconds for TCP connection
+    maxTime: 300,              // 5 minutes max for entire request
+    keepaliveTime: 60,         // Send keepalive after 60s idle
+    tcpFastOpen: true,         // Enable TCP Fast Open
+    tcpNodelay: true,          // Disable Nagle algorithm
+    happyEyeballsTimeout: 200  // IPv6/IPv4 fallback timeout
+  }
+});
+```
+
+##### Rate Limiting & Bandwidth
+
+```typescript
+import rezo from 'rezo/adapters/curl';
+
+await rezo.get('https://example.com/large-file.zip', {
+  curl: {
+    limitRate: '1M',                        // Limit to 1 MB/s
+    speedLimit: { limit: 1000, time: 30 },  // Abort if <1KB/s for 30s
+    maxFilesize: 100 * 1024 * 1024          // Max 100MB response
+  }
+});
+```
+
+##### Retry Configuration
+
+```typescript
+import rezo from 'rezo/adapters/curl';
+
+await rezo.get('https://unreliable-api.com/data', {
+  curl: {
+    retry: {
+      attempts: 5,        // Retry up to 5 times
+      delay: 2,           // 2 seconds between retries
+      maxTime: 60,        // Max 60 seconds total for retries
+      allErrors: true,    // Retry on all errors (not just transient)
+      connRefused: true   // Retry on connection refused
+    }
+  }
+});
+```
+
+##### Custom DNS Resolution
+
+```typescript
+import rezo from 'rezo/adapters/curl';
+
+await rezo.get('https://api.example.com/data', {
+  curl: {
+    resolve: [
+      { host: 'api.example.com', port: 443, address: '10.0.0.1' }
+    ],
+    dns: {
+      servers: '8.8.8.8,8.8.4.4',
+      dohUrl: 'https://dns.google/dns-query'
+    }
+  }
+});
+```
+
+##### Comprehensive TLS Configuration
+
+```typescript
+import rezo from 'rezo/adapters/curl';
+
+await rezo.get('https://secure.example.com/api', {
+  curl: {
+    tls: {
+      min: 'tlsv1.2',                                    // Minimum TLS 1.2
+      tls13Ciphers: 'TLS_AES_256_GCM_SHA384',           // TLS 1.3 ciphers
+      ciphers: 'ECDHE-RSA-AES256-GCM-SHA384',           // TLS 1.2 ciphers
+      certStatus: true,                                  // OCSP stapling
+      pinnedPubKey: 'sha256//base64hash=',              // Certificate pinning
+      cert: '/path/to/client.crt',                      // Client certificate
+      key: '/path/to/client.key',                       // Client key
+      cacert: '/path/to/ca-bundle.crt'                  // CA certificate
+    }
+  }
+});
+```
+
+##### Advanced Authentication
+
+```typescript
+import rezo from 'rezo/adapters/curl';
+
+// AWS Signature Version 4
+await rezo.get('https://s3.amazonaws.com/bucket/object', {
+  curl: {
+    awsSigv4: {
+      provider: 'aws:amz',
+      region: 'us-east-1',
+      service: 's3'
+    }
+  }
+});
+
+// Kerberos/SPNEGO
+await rezo.get('https://internal.company.com/api', {
+  curl: {
+    negotiate: true,
+    delegation: 'policy'
+  }
+});
+
+// OAuth 2.0 Bearer Token
+await rezo.get('https://api.example.com/protected', {
+  curl: {
+    oauth2Bearer: 'your-access-token'
+  }
+});
+```
+
+##### FTP Operations
+
+```typescript
+import rezo from 'rezo/adapters/curl';
+
+await rezo.get('ftp://ftp.example.com/file.txt', {
+  curl: {
+    ftp: {
+      pasv: true,
+      createDirs: true,
+      method: 'singlecwd',
+      sslControl: true
+    }
+  }
+});
+```
+
+##### SSH/SFTP Configuration
+
+```typescript
+import rezo from 'rezo/adapters/curl';
+
+await rezo.get('sftp://server.example.com/path/file.txt', {
+  curl: {
+    ssh: {
+      privateKey: '/home/user/.ssh/id_rsa',
+      publicKey: '/home/user/.ssh/id_rsa.pub',
+      knownHosts: '/home/user/.ssh/known_hosts',
+      compression: true
+    }
+  }
+});
+```
+
+##### Debugging & Tracing
+
+```typescript
+import rezo from 'rezo/adapters/curl';
+
+await rezo.get('https://api.example.com/debug', {
+  curl: {
+    verbose: true,                  // Show detailed output
+    trace: '/tmp/curl-trace.log',   // Write full trace to file
+    traceTime: true,                // Include timestamps
+    dumpHeader: '/tmp/headers.txt'  // Dump headers to file
+  }
+});
+```
+
+#### CurlRequestConfig Type
+
+When using the cURL adapter, the request configuration type extends the base with cURL-specific options:
+
+```typescript
+import rezo, { CurlRequestConfig } from 'rezo/adapters/curl';
+
+const config: CurlRequestConfig = {
+  url: 'https://api.example.com/data',
+  method: 'GET',
+  headers: { 'Accept': 'application/json' },
+  curl: {
+    connectTimeout: 10,
+    retry: { attempts: 3 }
+  }
+};
+
+const response = await rezo.request(config);
+```
+
+#### Available cURL Option Types
+
+The cURL adapter exports all option types for TypeScript users:
+
+```typescript
+import type {
+  CurlOptions,
+  CurlRequestConfig,
+  CurlTlsOptions,
+  CurlFtpOptions,
+  CurlSshOptions,
+  CurlSmtpOptions,
+  CurlDnsOptions,
+  CurlRetryOptions,
+  CurlProxyTlsOptions,
+  CurlResolveEntry,
+  CurlConnectToEntry,
+  CurlSpeedLimit,
+  CurlParallelOptions,
+  CurlHttpVersion,
+  CurlSslVersion,
+  CurlIpVersion,
+  CurlAuthMethod,
+  CurlDelegation
+} from 'rezo/adapters/curl';
+```
 
 ### XHR Adapter
 
@@ -775,6 +1022,363 @@ interface ProxyConfig {
   };
 }
 ```
+
+### Proxy Manager
+
+Rezo includes a powerful Proxy Manager for enterprise scenarios requiring proxy rotation, health monitoring, and intelligent failover. The Proxy Manager automatically rotates through a pool of proxies, tracks their health, and removes failing proxies from circulation.
+
+#### Basic Usage
+
+```typescript
+import rezo, { ProxyManager } from 'rezo';
+
+// Create a proxy manager with a pool of proxies
+const proxyManager = new ProxyManager({
+  proxies: [
+    { protocol: 'http', host: 'proxy1.example.com', port: 8080 },
+    { protocol: 'http', host: 'proxy2.example.com', port: 8080 },
+    { protocol: 'socks5', host: 'proxy3.example.com', port: 1080 }
+  ]
+});
+
+// Create client with proxy manager
+const client = rezo.create({
+  proxyManager
+});
+
+// Requests automatically rotate through available proxies
+await client.get('https://api.example.com/data');
+```
+
+#### Rotation Strategies
+
+```typescript
+import { ProxyManager } from 'rezo';
+
+// Random rotation (default) - randomly selects from available proxies
+const randomManager = new ProxyManager({
+  proxies: [...],
+  rotationStrategy: 'random'
+});
+
+// Sequential rotation - cycles through proxies in order
+const sequentialManager = new ProxyManager({
+  proxies: [...],
+  rotationStrategy: 'sequential'
+});
+
+// Per-proxy limit - switches after N requests per proxy
+const limitManager = new ProxyManager({
+  proxies: [...],
+  rotationStrategy: 'per-proxy-limit',
+  perProxyLimit: 100  // Switch after 100 requests
+});
+```
+
+#### URL Filtering (Whitelist/Blacklist)
+
+Control which URLs use the proxy manager with glob patterns or regular expressions:
+
+```typescript
+import { ProxyManager } from 'rezo';
+
+const proxyManager = new ProxyManager({
+  proxies: [...],
+  
+  // Only use proxies for these URL patterns (glob or regex)
+  whitelist: [
+    '*.example.com',           // Glob pattern
+    'https://api.service.io/*',
+    /^https:\/\/secure\./      // Regex pattern
+  ],
+  
+  // Never use proxies for these URLs
+  blacklist: [
+    '*.internal.company.com',
+    'https://localhost/*'
+  ]
+});
+
+const client = rezo.create({ proxyManager });
+
+// Uses proxy (matches whitelist)
+await client.get('https://api.example.com/data');
+
+// Direct connection (matches blacklist)
+await client.get('https://app.internal.company.com/status');
+```
+
+#### Health Monitoring & Failover
+
+The Proxy Manager automatically tracks proxy health and removes failing proxies:
+
+```typescript
+import { ProxyManager } from 'rezo';
+
+const proxyManager = new ProxyManager({
+  proxies: [...],
+  
+  // Mark proxy as dead after 5 consecutive failures
+  maxFailures: 5,
+  
+  // Re-enable dead proxies after 5 minutes cooldown
+  cooldownPeriod: 5 * 60 * 1000,
+  
+  // Fail request if no proxies available (vs direct connection)
+  failWithoutProxy: true
+});
+
+// Check proxy pool status
+const status = proxyManager.getStatus();
+console.log('Active proxies:', status.active);
+console.log('Disabled proxies:', status.disabled);
+console.log('Total proxies:', status.total);
+
+// Check if proxies are available
+if (proxyManager.hasAvailableProxies()) {
+  await client.get('https://api.example.com/data');
+}
+
+// Reset all proxy states (re-enable all)
+proxyManager.reset();
+```
+
+#### Lifecycle Hooks
+
+Monitor and react to proxy events with lifecycle hooks:
+
+```typescript
+import { ProxyManager } from 'rezo';
+
+const proxyManager = new ProxyManager({
+  proxies: [...],
+  
+  hooks: {
+    // Called before selecting a proxy
+    beforeProxySelect: (url) => {
+      console.log('Selecting proxy for:', url);
+    },
+    
+    // Called after proxy selection
+    afterProxySelect: (proxy, url) => {
+      console.log('Selected:', proxy.host);
+    },
+    
+    // Called before reporting a proxy error
+    beforeProxyError: (proxy, error) => {
+      console.log('Proxy failed:', proxy.host, error.message);
+    },
+    
+    // Called after error is recorded
+    afterProxyError: (proxy, error, failureCount) => {
+      console.log('Failure count:', failureCount);
+    },
+    
+    // Called when proxy is disabled
+    afterProxyDisable: (proxy, reason) => {
+      console.log('Proxy disabled:', proxy.host, reason);
+    },
+    
+    // Called when proxy is re-enabled
+    afterProxyEnable: (proxy) => {
+      console.log('Proxy re-enabled:', proxy.host);
+    },
+    
+    // Called after rotation occurs
+    afterProxyRotate: (oldProxy, newProxy) => {
+      console.log('Rotated from', oldProxy?.host, 'to', newProxy.host);
+    }
+  }
+});
+```
+
+#### Instance-Level Hooks
+
+You can also add proxy hooks at the instance level:
+
+```typescript
+import rezo, { ProxyManager } from 'rezo';
+
+const proxyManager = new ProxyManager({ proxies: [...] });
+
+const client = rezo.create({
+  proxyManager,
+  hooks: {
+    afterProxySelect: (proxy, url) => {
+      console.log('Request will use proxy:', proxy.host);
+    },
+    afterProxyDisable: (proxy) => {
+      // Alert monitoring system
+      alertMonitoring('Proxy disabled', proxy.host);
+    }
+  }
+});
+```
+
+#### Manual Proxy Control
+
+Override Proxy Manager for specific requests:
+
+```typescript
+import rezo, { ProxyManager } from 'rezo';
+
+const proxyManager = new ProxyManager({ proxies: [...] });
+const client = rezo.create({ proxyManager });
+
+// Use a specific proxy (bypasses Proxy Manager)
+await client.get('https://api.example.com/data', {
+  proxy: {
+    protocol: 'http',
+    host: 'specific-proxy.example.com',
+    port: 8080
+  }
+});
+
+// Direct connection (bypasses Proxy Manager)
+await client.get('https://api.example.com/data', {
+  useProxyManager: false
+});
+```
+
+#### Proxy Manager Configuration
+
+```typescript
+interface ProxyManagerConfig {
+  // Array of proxy configurations
+  proxies: ProxyConfig[];
+  
+  // Rotation strategy: 'random' | 'sequential' | 'per-proxy-limit'
+  rotationStrategy?: string;
+  
+  // Requests per proxy before rotation (for 'per-proxy-limit')
+  perProxyLimit?: number;
+  
+  // URL patterns to use with proxies (glob or regex)
+  whitelist?: (string | RegExp)[];
+  
+  // URL patterns to bypass proxies (glob or regex)
+  blacklist?: (string | RegExp)[];
+  
+  // Consecutive failures before disabling proxy
+  maxFailures?: number;
+  
+  // Milliseconds before re-enabling disabled proxy
+  cooldownPeriod?: number;
+  
+  // Throw error if no proxy available (vs direct connection)
+  failWithoutProxy?: boolean;
+  
+  // Lifecycle hooks
+  hooks?: ProxyManagerHooks;
+}
+```
+
+#### Adapter Support
+
+| Adapter | Proxy Manager Support |
+|---------|----------------------|
+| HTTP | Full support |
+| HTTP/2 | Full support |
+| cURL | Full support |
+| Fetch | Not supported (browser security) |
+| React Native | Not supported (platform limitations) |
+
+### Request Queue
+
+Rezo includes a built-in zero-dependency request queue system for rate limiting, priority management, and concurrency control.
+
+#### RezoQueue - General Purpose Queue
+
+```typescript
+import { RezoQueue, Priority } from 'rezo';
+
+const queue = new RezoQueue({
+  concurrency: 5,           // Max concurrent tasks
+  interval: 1000,           // Rate limit interval (ms)
+  intervalCap: 10,          // Max tasks per interval
+  timeout: 30000,           // Task timeout (ms)
+  autoStart: true           // Start processing immediately
+});
+
+// Add tasks with priority
+queue.add(async () => {
+  return await fetch('https://api.example.com/data');
+}, { priority: Priority.HIGH });
+
+// Priority constants: LOWEST (0), LOW (25), NORMAL (50), HIGH (75), HIGHEST (100), CRITICAL (1000)
+
+// Event handling
+queue.on('completed', ({ id, result, duration }) => {
+  console.log(`Task ${id} completed in ${duration}ms`);
+});
+
+queue.on('error', ({ id, error }) => {
+  console.error(`Task ${id} failed:`, error);
+});
+
+// Queue control
+queue.pause();
+queue.resume();
+queue.cancel(taskId);
+queue.clear();
+
+// Statistics
+const stats = queue.stats();
+console.log(`Completed: ${stats.completed}, Failed: ${stats.failed}`);
+```
+
+#### HttpQueue - HTTP-Aware Queue
+
+```typescript
+import { HttpQueue, HttpMethodPriority } from 'rezo';
+
+const httpQueue = new HttpQueue({
+  concurrency: 10,
+  perDomainConcurrency: 2,   // Limit concurrent requests per domain
+  retryOnRateLimit: true,     // Auto-retry on 429 responses
+  maxRetries: 3,
+  retryDelay: 1000
+});
+
+// Add HTTP requests
+const result = await httpQueue.addHttp(
+  'https://api.example.com/users',
+  async () => fetch('https://api.example.com/users'),
+  { 
+    priority: HttpMethodPriority.GET,  // GET=75, POST=50, DELETE=25
+    timeout: 10000
+  }
+);
+
+// Domain-specific control
+httpQueue.pauseDomain('api.example.com');
+httpQueue.resumeDomain('api.example.com');
+
+// Rate limit handling
+httpQueue.onHttp('rateLimited', ({ domain, retryAfter }) => {
+  console.log(`Rate limited on ${domain}, retry in ${retryAfter}s`);
+});
+
+// Per-domain statistics
+const domainStats = httpQueue.httpStats();
+console.log(domainStats.byDomain['api.example.com']);
+```
+
+#### Queue Events
+
+| Event | Description |
+|-------|-------------|
+| `add` | Task added to queue |
+| `start` | Task started processing |
+| `completed` | Task completed successfully |
+| `error` | Task failed with error |
+| `timeout` | Task timed out |
+| `cancelled` | Task was cancelled |
+| `active` | Queue became active |
+| `idle` | Queue became idle |
+| `empty` | Queue is empty |
+| `rateLimited` | Rate limit detected (HttpQueue) |
+| `retry` | Task being retried (HttpQueue) |
 
 ### Streaming
 

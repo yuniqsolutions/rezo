@@ -6,8 +6,10 @@ export {
 export { RezoError, RezoErrorCode } from './errors/rezo-error.js';
 export { RezoHeaders } from './utils/headers.js';
 export { RezoFormData } from './utils/form-data.js';
-export { RezoCookieJar } from './utils/cookies.js';
+export { RezoCookieJar, Cookie } from './utils/cookies.js';
 export { createDefaultHooks, mergeHooks } from './core/hooks.js';
+export { ProxyManager } from './proxy/manager.js';
+export { RezoQueue, HttpQueue, Priority, HttpMethodPriority } from './queue/index.js';
 import { RezoError } from './errors/rezo-error.js';
 export const isRezoError = RezoError.isRezoError;
 export const Cancel = RezoError;

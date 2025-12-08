@@ -157,6 +157,10 @@ export const ERROR_INFO = {
   UNQ_PROXY_ERROR: {
     code: -1047,
     message: "Proxy Error: An unspecified error occurred while communicating with or through the proxy server."
+  },
+  UNQ_NO_PROXY_AVAILABLE: {
+    code: -1050,
+    message: "No Proxy Available: All proxies in ProxyManager are exhausted, disabled, or the URL did not match whitelist/blacklist rules."
   }
 };
 function setSignal() {
@@ -166,15 +170,16 @@ function setSignal() {
     clearTimeout(this.timeoutClearInstanse);
   if (this.timeout && typeof this.timeout === "number" && this.timeout > 100) {
     const controller = new AbortController;
-    this.timeoutClearInstanse = setTimeout(() => controller.abort(), this.timeout);
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+    if (typeof timer === "object" && "unref" in timer) {
+      timer.unref();
+    }
+    this.timeoutClearInstanse = timer;
     this.signal = controller.signal;
   }
 }
-export async function getDefaultConfig(config = {}) {
-  const curl = await checkCurl();
+export async function getDefaultConfig(config = {}, proxyManager) {
   return {
-    useCurl: config.curl === true,
-    isCurl: curl.status || false,
     baseURL: config.baseURL,
     headers: config.headers,
     rejectUnauthorized: config.rejectUnauthorized,
@@ -188,10 +193,11 @@ export async function getDefaultConfig(config = {}) {
     useCookies: config.enableCookieJar,
     fs: await getFS(),
     timeout: config.timeout ?? config.requestTimeout,
-    http2: config.http2 === true,
     hooks: config.hooks,
     cookieFile: config.cookieFile,
-    encoding: config.encoding
+    encoding: config.encoding,
+    proxyManager: proxyManager || null,
+    decompress: config.decompress
   };
 }
 export async function getFS() {
@@ -284,6 +290,9 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
       }
     }
   }
+  if (cookiesString) {
+    fetchOptions.headers.set("Cookie", cookiesString);
+  }
   if (options.body) {
     fetchOptions.body = options.body;
   }
@@ -300,7 +309,23 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
           const _body = options.formData || options.multipart;
           if (_body) {
             Object.entries(_body).forEach(([key, value]) => {
-              body.append(key, value);
+              if (value === null || value === undefined) {
+                body.append(key, "");
+              } else if (typeof value === "string" || Buffer.isBuffer(value)) {
+                body.append(key, value);
+              } else if (typeof value === "object" && typeof value.pipe === "function") {
+                body.append(key, value);
+              } else if (typeof value === "object" && value.value !== undefined) {
+                const val = value.value;
+                const opts = value.options || {};
+                if (typeof val === "string" || Buffer.isBuffer(val)) {
+                  body.append(key, val, opts);
+                } else {
+                  body.append(key, String(val), opts);
+                }
+              } else {
+                body.append(key, String(value));
+              }
             });
           }
           contentType = body.getContentType();
@@ -336,7 +361,23 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
         if (fetchOptions.body && typeof fetchOptions.body === "object") {
           const formData = new RezoFormData;
           Object.entries(fetchOptions.body).forEach(([key, value]) => {
-            formData.append(key, value);
+            if (value === null || value === undefined) {
+              formData.append(key, "");
+            } else if (typeof value === "string" || Buffer.isBuffer(value)) {
+              formData.append(key, value);
+            } else if (typeof value === "object" && typeof value.pipe === "function") {
+              formData.append(key, value);
+            } else if (typeof value === "object" && value.value !== undefined) {
+              const val = value.value;
+              const opts = value.options || {};
+              if (typeof val === "string" || Buffer.isBuffer(val)) {
+                formData.append(key, val, opts);
+              } else {
+                formData.append(key, String(val), opts);
+              }
+            } else {
+              formData.append(key, String(value));
+            }
           });
           fetchOptions.body = formData;
         }
@@ -404,10 +445,16 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
   if (options.sessionId) {
     fetchOptions.sessionId = options.sessionId;
   }
+  let resolvedProxyManager = null;
+  const pm = addedOptions.defaultOptions.proxyManager;
+  if (pm && options.useProxyManager !== false && !options.proxy) {
+    resolvedProxyManager = pm;
+  }
   return {
     fetchOptions,
     config,
-    options
+    options,
+    proxyManager: resolvedProxyManager
   };
 }
 function buildHeaders(headers) {
@@ -512,8 +559,6 @@ As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
     headers: requestOptions.headers,
     maxRedirects,
     retryAttempts: 0,
-    http2: requestOptions.http2 === true,
-    curl: requestOptions.curl === true,
     timeout: typeof requestOptions.timeout === "number" ? requestOptions.timeout : null,
     enableCookieJar: typeof defaultOptions.enableCookieJar === "boolean" ? defaultOptions.enableCookieJar : true,
     useCookies: typeof requestOptions.useCookies === "boolean" ? requestOptions.useCookies : true,
@@ -532,10 +577,12 @@ As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
     redirectHistory: [],
     network: {},
     timing: {},
+    transfer: {},
     responseType: requestOptions.responseType,
     proxy: normalizedProxy,
     enableRedirectCycleDetection,
-    rejectUnauthorized: typeof rejectUnauthorized === "boolean" ? rejectUnauthorized : true
+    rejectUnauthorized: typeof rejectUnauthorized === "boolean" ? rejectUnauthorized : true,
+    decompress: typeof requestOptions.decompress === "boolean" ? requestOptions.decompress : typeof defaultOptions.decompress === "boolean" ? defaultOptions.decompress : true
   };
   config.setSignal = setSignal.bind(config);
   if (requestOptions.encoding || defaultOptions.encoding) {
@@ -572,15 +619,6 @@ As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
     config.httpsAgent = options.httpsAgent;
   }
   const isSupportedRuntime = type === "node" || type === "bun" || type === "deno";
-  if (requestOptions.curl && !defaultOptions.isCurl && debug) {
-    const recommendations = isSupportedRuntime ? `Recommendations:
-` + `• Only enable 'curl' mode when absolutely necessary
-` + `• Verify curl is installed and up-to-date on your system
-` + `• For enhanced security, consider using native Rezo HTTP clients instead` : "";
-    console.warn(`⚠️ [WARNING]: ${isSupportedRuntime ? `Curl binary not detected in your environment while 'curl' mode is enabled` : `'curl' mode is not supported in '${type}' environment`}
-
-` + recommendations);
-  }
   if (saveTo) {
     if (!isSupportedRuntime) {
       throw new Error(`You can only use this feature in Node.js, Deno or Bun and not available in Edge or Browser.`);

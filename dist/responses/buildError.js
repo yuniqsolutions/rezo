@@ -348,7 +348,11 @@ export function buildRedirectError(messageOrParams, config, request, response) {
   return RezoError.createRedirectError("Redirect location not found", errorConfig, errorRequest, errorResponse);
 }
 export function builErrorFromResponse(message, response, config, request) {
-  return RezoError.createRedirectError(message, config, request, response);
+  const statusCode = response?.status || 0;
+  if (statusCode >= 400) {
+    return RezoError.createHttpError(statusCode, config, request, response);
+  }
+  return new RezoError(message, config, "REZ_UNKNOWN_ERROR", request, response);
 }
 export function buildNetworkError(message, code, config, request) {
   return RezoError.createNetworkError(message, code, config, request);

@@ -1,5 +1,5 @@
-const _mod_c8ltd7 = require('../plugin/crawler.cjs');
-exports.Crawler = _mod_c8ltd7.Crawler;;
-const _mod_ycpeyg = require('../plugin/crawler-options.cjs');
-exports.CrawlerOptions = _mod_ycpeyg.CrawlerOptions;
-exports.Domain = _mod_ycpeyg.Domain;;
+const _mod_6aofz8 = require('../plugin/crawler.cjs');
+exports.Crawler = _mod_6aofz8.Crawler;;
+const _mod_t23px8 = require('../plugin/crawler-options.cjs');
+exports.CrawlerOptions = _mod_t23px8.CrawlerOptions;
+exports.Domain = _mod_t23px8.Domain;;

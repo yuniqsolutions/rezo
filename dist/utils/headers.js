@@ -156,6 +156,22 @@ class RezoHeaders extends Headers {
     return "RezoHeaders";
   }
 }
+function sanitizeHttp2Headers(headers) {
+  const result = {};
+  for (const key of Reflect.ownKeys(headers)) {
+    if (typeof key === "symbol")
+      continue;
+    if (key.startsWith(":"))
+      continue;
+    const value = headers[key];
+    if (typeof value === "string") {
+      result[key] = value;
+    } else if (Array.isArray(value)) {
+      result[key] = value.join(", ");
+    }
+  }
+  return result;
+}
 
-export { RezoHeaders };
+export { RezoHeaders, sanitizeHttp2Headers };
 export default RezoHeaders;

@@ -136,11 +136,11 @@ export function buildAdapterContext(options, defaultOptions) {
     needsCookies: !!(options.cookieJar || defaultOptions.cookieJar),
     needsProxy: !!options.proxy,
     needsStreaming: !!internal._isStream,
-    needsHttp2: !!(options.http2 || defaultOptions.http2),
+    needsHttp2: false,
     needsUploadProgress: !!internal._isUpload,
     needsDownloadProgress: !!internal._isDownload,
     needsFileDownload: !!(internal.fileName || internal.saveTo),
-    preferredAdapter: options.adapter
+    preferredAdapter: undefined
   };
 }
 export function getAvailableAdapters(runtime) {

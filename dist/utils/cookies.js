@@ -507,5 +507,3 @@ export class RezoCookieJar extends TouchCookieJar {
   }
 }
 export const CookieJar = RezoCookieJar;
-
-export { TouchCookieJar, TouchCookie };

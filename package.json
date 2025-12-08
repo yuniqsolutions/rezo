@@ -1,6 +1,6 @@
 {
   "name": "rezo",
-  "version": "1.0.1",
+  "version": "1.0.14",
   "description": "Lightning-fast, enterprise-grade HTTP client for modern JavaScript. Full HTTP/2 support, intelligent cookie management, multiple adapters (HTTP, Fetch, cURL, XHR), streaming, proxy support (HTTP/HTTPS/SOCKS), and cross-environment compatibility.",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
@@ -66,25 +66,75 @@
     "http-proxy-agent": "^7.0.2",
     "https-proxy-agent": "^7.0.6",
     "socks-proxy-agent": "^8.0.5",
-    "p-queue": "^8.1.0",
     "linkedom": "^0.18.11",
     "agent-base": "^7.1.4"
   },
+  "typesVersions": {
+    "*": {
+      "platform/node": [
+        "dist/platform/node.d.ts"
+      ],
+      "platform/browser": [
+        "dist/platform/browser.d.ts"
+      ],
+      "platform/bun": [
+        "dist/platform/bun.d.ts"
+      ],
+      "platform/deno": [
+        "dist/platform/deno.d.ts"
+      ],
+      "platform/worker": [
+        "dist/platform/worker.d.ts"
+      ],
+      "platform/react-native": [
+        "dist/platform/react-native.d.ts"
+      ],
+      "adapters/http": [
+        "dist/adapters/entries/http.d.ts"
+      ],
+      "adapters/http2": [
+        "dist/adapters/entries/http2.d.ts"
+      ],
+      "adapters/curl": [
+        "dist/adapters/entries/curl.d.ts"
+      ],
+      "adapters/fetch": [
+        "dist/adapters/entries/fetch.d.ts"
+      ],
+      "adapters/xhr": [
+        "dist/adapters/entries/xhr.d.ts"
+      ],
+      "adapters/react-native": [
+        "dist/adapters/entries/react-native.d.ts"
+      ],
+      "crawler": [
+        "dist/crawler.d.ts"
+      ],
+      "dom": [
+        "dist/dom/index.d.ts"
+      ]
+    }
+  },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
-    },
-    "./crawler": {
-      "types": "./dist/crawler.d.ts",
-      "import": "./dist/entries/crawler.js",
-      "require": "./dist/entries/crawler.cjs"
-    },
-    "./dom": {
-      "types": "./dist/dom/index.d.ts",
-      "import": "./dist/dom/index.js",
-      "require": "./dist/dom/index.cjs"
+      "types": {
+        "require": "./dist/index.d.ts",
+        "default": "./dist/index.d.ts"
+      },
+      "react-native": {
+        "types": "./dist/platform/react-native.d.ts",
+        "require": "./dist/platform/react-native.cjs",
+        "default": "./dist/platform/react-native.js"
+      },
+      "browser": {
+        "types": "./dist/platform/browser.d.ts",
+        "require": "./dist/platform/browser.cjs",
+        "default": "./dist/platform/browser.js"
+      },
+      "default": {
+        "require": "./dist/index.cjs",
+        "default": "./dist/index.js"
+      }
     },
     "./platform/node": {
       "types": "./dist/platform/node.d.ts",
@@ -126,15 +176,15 @@
       "import": "./dist/adapters/entries/http2.js",
       "require": "./dist/adapters/entries/http2.cjs"
     },
-    "./adapters/fetch": {
-      "types": "./dist/adapters/entries/fetch.d.ts",
-      "import": "./dist/adapters/entries/fetch.js",
-      "require": "./dist/adapters/entries/fetch.cjs"
-    },
     "./adapters/curl": {
       "types": "./dist/adapters/entries/curl.d.ts",
       "import": "./dist/adapters/entries/curl.js",
       "require": "./dist/adapters/entries/curl.cjs"
+    },
+    "./adapters/fetch": {
+      "types": "./dist/adapters/entries/fetch.d.ts",
+      "import": "./dist/adapters/entries/fetch.js",
+      "require": "./dist/adapters/entries/fetch.cjs"
     },
     "./adapters/xhr": {
       "types": "./dist/adapters/entries/xhr.d.ts",
@@ -146,7 +196,16 @@
       "import": "./dist/adapters/entries/react-native.js",
       "require": "./dist/adapters/entries/react-native.cjs"
     },
-    "./package.json": "./package.json"
+    "./crawler": {
+      "types": "./dist/crawler.d.ts",
+      "import": "./dist/entries/crawler.js",
+      "require": "./dist/entries/crawler.cjs"
+    },
+    "./dom": {
+      "types": "./dist/dom/index.d.ts",
+      "import": "./dist/dom/index.js",
+      "require": "./dist/dom/index.cjs"
+    }
   },
   "browser": {
     "./dist/platform/node.js": "./dist/platform/browser.js",

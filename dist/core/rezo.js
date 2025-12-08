@@ -1,11 +1,12 @@
 import { RezoCookieJar } from '../utils/cookies.js';
 import { RezoHeaders } from '../utils/headers.js';
 import { RezoFormData } from '../utils/form-data.js';
-import PQueue from "p-queue";
+import { RezoQueue } from '../queue/queue.js';
 import { RezoURLSearchParams } from '../utils/data-operations.js';
 import packageJson from "../../package.json" with { type: 'json' };
 import { createDefaultHooks, mergeHooks, runVoidHooksSync, runTransformHooks } from './hooks.js';
 import { ResponseCache, DNSCache } from '../cache/index.js';
+import { ProxyManager } from '../proxy/manager.js';
 let globalAdapter = null;
 export function setGlobalAdapter(adapter) {
   globalAdapter = adapter;
@@ -38,6 +39,7 @@ export class Rezo {
   responseCache;
   dnsCache;
   adapter;
+  _proxyManager = null;
   constructor(config, adapter) {
     if (!adapter && !globalAdapter) {
       throw new Error(`No HTTP adapter configured. Import from a platform-specific entry:
@@ -58,7 +60,7 @@ export class Rezo {
     this.sessionId = generateInstanceSessionId();
     this.isQueueEnabled = config?.queueOptions?.enable || false;
     if (this.isQueueEnabled) {
-      this.queue = new PQueue(config?.queueOptions?.options);
+      this.queue = new RezoQueue(config?.queueOptions?.options);
     }
     const cacheConfig = parseCacheOption(config?.cache);
     if (cacheConfig.response) {
@@ -68,6 +70,16 @@ export class Rezo {
       const dnsOptions = typeof config?.cache === "object" && typeof config.cache.dns === "object" ? config.cache.dns : undefined;
       this.dnsCache = new DNSCache(dnsOptions);
     }
+    if (config?.proxyManager) {
+      if (config.proxyManager instanceof ProxyManager) {
+        this._proxyManager = config.proxyManager;
+      } else {
+        this._proxyManager = new ProxyManager(config.proxyManager);
+      }
+    }
+  }
+  get proxyManager() {
+    return this._proxyManager;
   }
   clearCache() {
     this.responseCache?.clear();
@@ -164,11 +176,18 @@ export class Rezo {
     }, this.defaults, this.jar);
   };
   postMultipart = async (url, data, options = {}) => {
-    data = data instanceof FormData ? await RezoFormData.fromNativeFormData(data) : data;
+    let formData;
+    if (data instanceof RezoFormData) {
+      formData = data;
+    } else if (data instanceof FormData) {
+      formData = await RezoFormData.fromNativeFormData(data);
+    } else {
+      formData = RezoFormData.fromObject(data);
+    }
     return this.executeRequest({
       ...options,
       url,
-      formData: data,
+      formData,
       method: "POST"
     }, this.defaults, this.jar);
   };
@@ -205,11 +224,18 @@ export class Rezo {
     }, this.defaults, this.jar);
   };
   putMultipart = async (url, data, options = {}) => {
-    data = data instanceof FormData ? await RezoFormData.fromNativeFormData(data) : data;
+    let formData;
+    if (data instanceof RezoFormData) {
+      formData = data;
+    } else if (data instanceof FormData) {
+      formData = await RezoFormData.fromNativeFormData(data);
+    } else {
+      formData = RezoFormData.fromObject(data);
+    }
     return this.executeRequest({
       ...options,
       url,
-      formData: data,
+      formData,
       method: "PUT"
     }, this.defaults, this.jar);
   };
@@ -246,11 +272,18 @@ export class Rezo {
     }, this.defaults, this.jar);
   };
   patchMultipart = async (url, data, options = {}) => {
-    data = data instanceof FormData ? await RezoFormData.fromNativeFormData(data) : data;
+    let formData;
+    if (data instanceof RezoFormData) {
+      formData = data;
+    } else if (data instanceof FormData) {
+      formData = await RezoFormData.fromNativeFormData(data);
+    } else {
+      formData = RezoFormData.fromObject(data);
+    }
     return this.executeRequest({
       ...options,
       url,
-      formData: data,
+      formData,
       method: "PATCH"
     }, this.defaults, this.jar);
   };
@@ -295,7 +328,8 @@ export class Rezo {
       }
     }
     const executeWithHooks = async () => {
-      const response = await this.adapter(options, defaultOptions, jar);
+      const mergedDefaults = this._proxyManager ? { ...defaultOptions, _proxyManager: this._proxyManager } : defaultOptions;
+      const response = await this.adapter(options, mergedDefaults, jar);
       if (jar.cookieFile) {
         try {
           jar.saveToFile();
@@ -348,6 +382,9 @@ export class Rezo {
   get cookieJar() {
     return this.jar;
   }
+  set cookieJar(jar) {
+    this.jar = jar;
+  }
   saveCookies(filePath) {
     if (filePath) {
       this.jar.saveToFile(filePath);
@@ -382,6 +419,19 @@ export class Rezo {
       body: data,
       _isUpload: true
     }, this.defaults, this.jar);
+  }
+  setCookies(cookies, url, startNew) {
+    if (!this.jar)
+      this.jar = new RezoCookieJar;
+    if (startNew)
+      this.jar.removeAllCookiesSync();
+    this.jar.setCookiesSync(cookies, url);
+  }
+  getCookies() {
+    return this.jar.cookies();
+  }
+  clearCookies() {
+    this.jar?.removeAllCookiesSync();
   }
 }
 export const defaultTransforms = {
@@ -442,9 +492,18 @@ export const defaultTransforms = {
     }
   ]
 };
+import { RezoError } from '../errors/rezo-error.js';
 export function createRezoInstance(adapter, config) {
   const instance = new Rezo(config, adapter);
   instance.create = (cfg) => new Rezo(cfg, adapter);
+  instance.isRezoError = RezoError.isRezoError;
+  instance.isCancel = (error) => {
+    return error instanceof RezoError && error.code === "ECONNABORTED";
+  };
+  instance.Cancel = RezoError;
+  instance.CancelToken = AbortController;
+  instance.all = Promise.all.bind(Promise);
+  instance.spread = (callback) => (array) => callback(...array);
   return instance;
 }
 export function createDefaultInstance(config) {

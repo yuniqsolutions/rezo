@@ -71,15 +71,72 @@ export class RezoFormData extends NodeFormData {
   static fromObject(obj, options) {
     const formData = new RezoFormData(options);
     for (const [key, value] of Object.entries(obj)) {
-      if (Array.isArray(value)) {
-        for (const item of value) {
-          formData.append(key, item);
-        }
-      } else {
-        formData.append(key, value);
-      }
+      RezoFormData.appendValue(formData, key, value);
     }
     return formData;
+  }
+  static appendValue(formData, key, value) {
+    if (value === null || value === undefined) {
+      return;
+    }
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      formData.append(key, String(value));
+      return;
+    }
+    if (Buffer.isBuffer(value)) {
+      formData.append(key, value, {
+        contentType: "application/octet-stream"
+      });
+      return;
+    }
+    if (value instanceof Uint8Array) {
+      formData.append(key, Buffer.from(value), {
+        contentType: "application/octet-stream"
+      });
+      return;
+    }
+    if (value instanceof Readable) {
+      formData.append(key, value);
+      return;
+    }
+    if (typeof File !== "undefined" && value instanceof File) {
+      formData.append(key, value, {
+        filename: value.name,
+        contentType: value.type || "application/octet-stream"
+      });
+      return;
+    }
+    if (typeof Blob !== "undefined" && value instanceof Blob) {
+      formData.append(key, value, {
+        contentType: value.type || "application/octet-stream"
+      });
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        RezoFormData.appendValue(formData, key, item);
+      }
+      return;
+    }
+    if (typeof value === "object" && value !== null && "value" in value && (value.filename || value.contentType)) {
+      const opts = {};
+      if (value.filename)
+        opts.filename = value.filename;
+      if (value.contentType)
+        opts.contentType = value.contentType;
+      formData.append(key, value.value, opts);
+      return;
+    }
+    if (typeof value === "object" && value !== null) {
+      const jsonString = JSON.stringify(value);
+      const jsonBuffer = Buffer.from(jsonString, "utf8");
+      formData.append(key, jsonBuffer, {
+        filename: `${key}.json`,
+        contentType: "application/json"
+      });
+      return;
+    }
+    formData.append(key, String(value));
   }
   async toUrlQueryString(convertBinaryToBase64 = false) {
     const params = new URLSearchParams;

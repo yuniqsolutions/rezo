@@ -50,16 +50,16 @@ export class CompressionUtil {
     if (!config) {
       return true;
     }
+    if (config.decompress === false) {
+      return false;
+    }
     if (config.compression?.enabled === false) {
       return false;
     }
-    if (config.compression?.enabled === undefined) {
-      if (config.compression?.algorithms) {
-        return config.compression.algorithms.includes(contentEncoding.toLowerCase());
-      }
-      return true;
+    if (config.compression?.algorithms) {
+      return config.compression.algorithms.includes(contentEncoding.toLowerCase());
     }
-    return config.compression.enabled;
+    return true;
   }
   static createZstdDecompressStream(response) {
     const decompressor = getZstdDecompressor();

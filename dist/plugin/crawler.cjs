@@ -3,7 +3,7 @@ const { FileCacher } = require('../cache/file-cacher.cjs');
 const { UrlStore } = require('../cache/url-store.cjs');
 const { parseHTML } = require("linkedom");
 const path = require("node:path");
-const PQueue = require("p-queue");
+const { RezoQueue } = require('../queue/queue.cjs');
 const { Scraper } = require('./scraper.cjs');
 const { CrawlerOptions } = require('./crawler-options.cjs');
 String.prototype.addBaseUrl = function(url) {
@@ -46,7 +46,7 @@ class Crawler {
   leadsFinder;
   constructor(crawlerOptions, http) {
     this.http = http;
-    this.queue = new PQueue({
+    this.queue = new RezoQueue({
       concurrency: 1000
     });
     this.config = new CrawlerOptions(crawlerOptions);
