@@ -133,7 +133,7 @@ export function getAdapterCapabilities(adapter) {
 export function buildAdapterContext(options, defaultOptions) {
   const internal = options;
   return {
-    needsCookies: !!(options.cookieJar || defaultOptions.cookieJar),
+    needsCookies: !!(options.jar || defaultOptions.jar),
     needsProxy: !!options.proxy,
     needsStreaming: !!internal._isStream,
     needsHttp2: false,

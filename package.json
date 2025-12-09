@@ -1,6 +1,6 @@
 {
   "name": "rezo",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Lightning-fast, enterprise-grade HTTP client for modern JavaScript. Full HTTP/2 support, intelligent cookie management, multiple adapters (HTTP, Fetch, cURL, XHR), streaming, proxy support (HTTP/HTTPS/SOCKS), and cross-environment compatibility.",
   "main": "dist/index.cjs",
   "module": "dist/index.js",

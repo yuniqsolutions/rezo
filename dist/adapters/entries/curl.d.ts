@@ -2693,8 +2693,19 @@ export interface RezoRequestConfig<D = any> {
 	useProxyManager?: boolean;
 	/** Whether to enable automatic cookie handling */
 	useCookies?: boolean;
-	/** Custom cookie jar for managing cookies */
-	cookieJar?: RezoCookieJar;
+	/**
+	 * Custom cookie jar for managing cookies in this request.
+	 * Note: Passing jar per-request is supported but not recommended.
+	 * For better cookie management, pass the jar when creating the instance:
+	 * @example
+	 * ```typescript
+	 * const client = new Rezo({ jar: myJar });
+	 * // or
+	 * const client = rezo.create({ jar: myJar });
+	 * ```
+	 * If you need custom cookies for a single request, use the `cookies` option instead.
+	 */
+	jar?: RezoCookieJar;
 	/** Cookies to send with the request in various formats */
 	cookies?: Cookies["array"] | Cookies["netscape"] | Cookies["serialized"] | Cookies["setCookiesString"];
 	/** Callback for upload progress events */
@@ -3125,8 +3136,17 @@ export interface RezoDefaultOptions {
 	hooks?: Partial<RezoHooks>;
 	/** Whether to enable automatic cookie handling (default: true)*/
 	enableCookieJar?: boolean;
-	/** Custom cookie jar for managing cookies */
-	cookieJar?: RezoHttpRequest["cookieJar"];
+	/**
+	 * Custom cookie jar for managing cookies.
+	 * The recommended way to manage cookies - pass the jar when creating the instance.
+	 * @example
+	 * ```typescript
+	 * const client = new Rezo({ jar: myJar });
+	 * // or
+	 * const client = rezo.create({ jar: myJar });
+	 * ```
+	 */
+	jar?: RezoHttpRequest["jar"];
 	/** Set default cookies to send with the requests in various formats */
 	cookies?: RezoHttpRequest["cookies"];
 	/**

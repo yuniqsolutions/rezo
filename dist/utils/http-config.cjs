@@ -562,7 +562,7 @@ As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
     timeout: typeof requestOptions.timeout === "number" ? requestOptions.timeout : null,
     enableCookieJar: typeof defaultOptions.enableCookieJar === "boolean" ? defaultOptions.enableCookieJar : true,
     useCookies: typeof requestOptions.useCookies === "boolean" ? requestOptions.useCookies : true,
-    cookieJar: requestOptions.cookieJar || jar,
+    cookieJar: requestOptions.jar || jar,
     retry: {
       maxRetries: retryLimit,
       retryDelay,

@@ -49,8 +49,8 @@ class Rezo {
     }
     this.adapter = adapter || globalAdapter;
     this.defaults = config || {};
-    if (config?.cookieJar instanceof RezoCookieJar) {
-      this.jar = config.cookieJar;
+    if (config?.jar instanceof RezoCookieJar) {
+      this.jar = config.jar;
     } else if (config?.cookieFile) {
       this.jar = RezoCookieJar.fromFile(config.cookieFile);
     } else {
