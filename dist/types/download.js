@@ -1,0 +1,10 @@
+export var DownloadState;
+((DownloadState) => {
+  DownloadState["PENDING"] = "pending";
+  DownloadState["CONNECTING"] = "connecting";
+  DownloadState["DOWNLOADING"] = "downloading";
+  DownloadState["PAUSED"] = "paused";
+  DownloadState["COMPLETED"] = "completed";
+  DownloadState["FAILED"] = "failed";
+  DownloadState["CANCELLED"] = "cancelled";
+})(DownloadState ||= {});
