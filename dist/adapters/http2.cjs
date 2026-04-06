@@ -1,12 +1,13 @@
 const http2 = require("node:http2");
+const tls = require("node:tls");
 const zlib = require("node:zlib");
 const { URL } = require("node:url");
 const { Readable } = require("node:stream");
 const { RezoError } = require('../errors/rezo-error.cjs');
 const { buildSmartError, buildDecompressionError, builErrorFromResponse, buildDownloadError } = require('../responses/buildError.cjs');
-const { RezoCookieJar } = require('../utils/cookies.cjs');
+const { RezoCookieJar } = require('../cookies/cookie-jar.cjs');
 const RezoFormData = require('../utils/form-data.cjs');
-const { getDefaultConfig, prepareHTTPOptions } = require('../utils/http-config.cjs');
+const { getDefaultConfig, prepareHTTPOptions, calculateRetryDelay, shouldRetry } = require('../utils/http-config.cjs');
 const { RezoHeaders, sanitizeHttp2Headers } = require('../utils/headers.cjs');
 const { RezoURLSearchParams } = require('../utils/data-operations.cjs');
 const { StreamResponse } = require('../responses/stream.cjs');
@@ -14,11 +15,134 @@ const { DownloadResponse } = require('../responses/download.cjs');
 const { UploadResponse } = require('../responses/upload.cjs');
 const { CompressionUtil } = require('../utils/compression.cjs');
 const { isSameDomain, RezoPerformance } = require('../utils/tools.cjs');
+const { SocksClient } = require('../internal/agents/socks-client.cjs');
+const net = require("node:net");
 const { ResponseCache } = require('../cache/response-cache.cjs');
+const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
+const { buildTlsOptions } = require('../stealth/tls-fingerprint.cjs');
 let zstdDecompressSync = null;
 let zstdChecked = false;
+const debugLog = {
+  requestStart: (config, url, method) => {
+    if (config.debug) {
+      console.log(`
+[Rezo Debug] ─────────────────────────────────────`);
+      console.log(`[Rezo Debug] ${method} ${url}`);
+      console.log(`[Rezo Debug] Request ID: ${config.requestId}`);
+      if (config.originalRequest?.headers) {
+        const headers = config.originalRequest.headers instanceof RezoHeaders ? config.originalRequest.headers.toObject() : config.originalRequest.headers;
+        console.log(`[Rezo Debug] Request Headers:`, JSON.stringify(headers, null, 2));
+      }
+      if (config.proxy && typeof config.proxy === "object") {
+        console.log(`[Rezo Debug] Proxy: ${config.proxy.protocol}://${config.proxy.host}:${config.proxy.port}`);
+      } else if (config.proxy && typeof config.proxy === "string") {
+        console.log(`[Rezo Debug] Proxy: ${config.proxy}`);
+      }
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track] → ${method} ${url}`);
+    }
+  },
+  redirect: (config, fromUrl, toUrl, statusCode, method) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Redirect ${statusCode}: ${fromUrl}`);
+      console.log(`[Rezo Debug]        → ${toUrl} (${method})`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ↳ ${statusCode} → ${toUrl}`);
+    }
+  },
+  retry: (config, attempt, maxRetries, statusCode, delay) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Retry ${attempt}/${maxRetries} after status ${statusCode}${delay > 0 ? ` (waiting ${delay}ms)` : ""}`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ⟳ Retry ${attempt}/${maxRetries} (status ${statusCode})`);
+    }
+  },
+  maxRetries: (config, maxRetries) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Max retries (${maxRetries}) reached, throwing error`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ✗ Max retries reached`);
+    }
+  },
+  response: (config, status, statusText, duration) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Response: ${status} ${statusText} (${duration.toFixed(2)}ms)`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track] ✓ ${status} ${statusText}`);
+    }
+  },
+  responseHeaders: (config, headers) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Response Headers:`, JSON.stringify(headers, null, 2));
+    }
+  },
+  cookies: (config, cookieCount) => {
+    if (config.debug && cookieCount > 0) {
+      console.log(`[Rezo Debug] Cookies received: ${cookieCount}`);
+    }
+  },
+  timing: (config, timing) => {
+    if (config.debug) {
+      const parts = [];
+      if (timing.dns)
+        parts.push(`DNS: ${timing.dns.toFixed(2)}ms`);
+      if (timing.connect)
+        parts.push(`Connect: ${timing.connect.toFixed(2)}ms`);
+      if (timing.tls)
+        parts.push(`TLS: ${timing.tls.toFixed(2)}ms`);
+      if (timing.ttfb)
+        parts.push(`TTFB: ${timing.ttfb.toFixed(2)}ms`);
+      if (timing.total)
+        parts.push(`Total: ${timing.total.toFixed(2)}ms`);
+      if (parts.length > 0) {
+        console.log(`[Rezo Debug] Timing: ${parts.join(" | ")}`);
+      }
+    }
+  },
+  complete: (config, finalUrl, redirectCount, duration) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Complete: ${finalUrl}`);
+      if (redirectCount > 0) {
+        console.log(`[Rezo Debug] Redirects: ${redirectCount}`);
+      }
+      console.log(`[Rezo Debug] Total Duration: ${duration.toFixed(2)}ms`);
+      console.log(`[Rezo Debug] ─────────────────────────────────────
+`);
+    }
+  }
+};
+function looksCompressed(buffer, encoding) {
+  if (buffer.length < 2)
+    return false;
+  const enc = encoding.toLowerCase();
+  if (enc === "gzip" || enc === "x-gzip") {
+    return buffer[0] === 31 && buffer[1] === 139;
+  }
+  if (enc === "deflate" || enc === "x-deflate") {
+    return buffer[0] === 120;
+  }
+  if (enc === "zstd") {
+    return buffer.length >= 4 && buffer[0] === 40 && buffer[1] === 181 && buffer[2] === 47 && buffer[3] === 253;
+  }
+  if (enc === "br" || enc === "brotli") {
+    const firstByte = buffer[0];
+    if (firstByte === 123 || firstByte === 91 || firstByte === 60) {
+      return false;
+    }
+    return true;
+  }
+  return true;
+}
 async function decompressBuffer(buffer, contentEncoding) {
   const encoding = contentEncoding.toLowerCase();
+  if (!looksCompressed(buffer, encoding)) {
+    return buffer;
+  }
   switch (encoding) {
     case "gzip":
     case "x-gzip":
@@ -100,41 +224,90 @@ class Http2SessionPool {
       this.cleanupInterval.unref();
     }
   }
-  getSessionKey(url, options) {
-    return `${url.protocol}//${url.host}`;
+  getSessionKey(url, options, proxy) {
+    const proxyKey = proxy ? typeof proxy === "string" ? proxy : `${proxy.protocol}://${proxy.host}:${proxy.port}` : "";
+    return `${url.protocol}//${url.host}${proxyKey ? `@${proxyKey}` : ""}`;
   }
-  async getSession(url, options, timeout) {
-    const key = this.getSessionKey(url, options);
+  isSessionHealthy(session, entry) {
+    if (session.closed || session.destroyed)
+      return false;
+    if (entry.goawayReceived)
+      return false;
+    const socket = session.socket;
+    if (socket && (socket.destroyed || socket.closed || !socket.writable))
+      return false;
+    return true;
+  }
+  async getSession(url, options, timeout, forceNew = false, proxy, stealthProfile) {
+    const key = this.getSessionKey(url, options, proxy);
     const existing = this.sessions.get(key);
-    if (existing && !existing.session.closed && !existing.session.destroyed) {
+    if (!forceNew && existing && this.isSessionHealthy(existing.session, existing)) {
       existing.lastUsed = Date.now();
       existing.refCount++;
       return existing.session;
     }
-    const session = await this.createSession(url, options, timeout);
-    this.sessions.set(key, {
+    if (existing && !this.isSessionHealthy(existing.session, existing)) {
+      try {
+        existing.session.close();
+      } catch {}
+      this.sessions.delete(key);
+    }
+    const session = await this.createSession(url, options, timeout, proxy, stealthProfile);
+    const entry = {
       session,
       lastUsed: Date.now(),
-      refCount: 1
-    });
+      refCount: 1,
+      goawayReceived: false,
+      proxy
+    };
+    this.sessions.set(key, entry);
     session.on("close", () => {
       this.sessions.delete(key);
     });
     session.on("error", () => {
       this.sessions.delete(key);
     });
+    session.on("goaway", () => {
+      entry.goawayReceived = true;
+    });
     return session;
   }
-  createSession(url, options, timeout) {
-    return new Promise((resolve, reject) => {
-      const authority = `${url.protocol}//${url.host}`;
-      const sessionOptions = {
-        ...options,
-        rejectUnauthorized: options?.rejectUnauthorized !== false,
-        ALPNProtocols: ["h2", "http/1.1"],
-        timeout
+  async createSession(url, options, timeout, proxy, stealthProfile) {
+    const authority = `${url.protocol}//${url.host}`;
+    const sessionOptions = {
+      ...options,
+      rejectUnauthorized: options?.rejectUnauthorized !== false,
+      ALPNProtocols: ["h2", "http/1.1"],
+      timeout
+    };
+    if (stealthProfile) {
+      const tlsOpts = buildTlsOptions(stealthProfile.tls);
+      sessionOptions.secureContext = tlsOpts.secureContext;
+      sessionOptions.ALPNProtocols = stealthProfile.tls.alpnProtocols;
+      sessionOptions.minVersion = stealthProfile.tls.minVersion;
+      sessionOptions.maxVersion = stealthProfile.tls.maxVersion;
+      const h2 = stealthProfile.h2Settings;
+      sessionOptions.settings = {
+        headerTableSize: h2.headerTableSize,
+        enablePush: h2.enablePush,
+        initialWindowSize: h2.initialWindowSize,
+        maxFrameSize: h2.maxFrameSize,
+        ...h2.maxConcurrentStreams > 0 ? { maxConcurrentStreams: h2.maxConcurrentStreams } : {},
+        ...h2.maxHeaderListSize > 0 ? { maxHeaderListSize: h2.maxHeaderListSize } : {}
       };
+    }
+    if (proxy) {
+      const tunnelSocket = await this.createProxyTunnel(url, proxy, timeout, options?.rejectUnauthorized, stealthProfile);
+      sessionOptions.createConnection = () => tunnelSocket;
+    }
+    return new Promise((resolve, reject) => {
       const session = http2.connect(authority, sessionOptions);
+      session.setMaxListeners(20);
+      if (stealthProfile && stealthProfile.h2Settings.connectionWindowSize > 0) {
+        try {
+          session.setLocalWindowSize(stealthProfile.h2Settings.connectionWindowSize);
+        } catch {}
+      }
       let settled = false;
       const timeoutId = timeout ? setTimeout(() => {
         if (!settled) {
@@ -164,8 +337,191 @@ class Http2SessionPool {
       });
     });
   }
-  releaseSession(url) {
-    const key = this.getSessionKey(url);
+  async createProxyTunnel(url, proxy, timeout, rejectUnauthorized, stealthProfile) {
+    return new Promise((resolve, reject) => {
+      let proxyUrl;
+      let proxyAuth;
+      if (typeof proxy === "string") {
+        proxyUrl = new URL(proxy);
+        if (proxyUrl.username || proxyUrl.password) {
+          proxyAuth = Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString("base64");
+        }
+      } else {
+        const protocol = proxy.protocol || "http";
+        let proxyUrlStr = `${protocol}://${proxy.host}:${proxy.port}`;
+        if (proxy.auth) {
+          const encodedUser = encodeURIComponent(proxy.auth.username);
+          const encodedPass = encodeURIComponent(proxy.auth.password);
+          proxyUrlStr = `${protocol}://${encodedUser}:${encodedPass}@${proxy.host}:${proxy.port}`;
+          proxyAuth = Buffer.from(`${proxy.auth.username}:${proxy.auth.password}`).toString("base64");
+        }
+        proxyUrl = new URL(proxyUrlStr);
+      }
+      const targetHost = url.hostname;
+      const targetPort = url.port || (url.protocol === "https:" ? "443" : "80");
+      const stealthTlsOpts = stealthProfile ? buildTlsOptions(stealthProfile.tls) : undefined;
+      if (proxyUrl.protocol.startsWith("socks")) {
+        const socksType = proxyUrl.protocol === "socks5:" || proxyUrl.protocol === "socks5h:" ? 5 : 4;
+        const socksOpts = {
+          proxy: {
+            host: proxyUrl.hostname,
+            port: parseInt(proxyUrl.port || "1080", 10),
+            type: socksType,
+            userId: proxyUrl.username ? decodeURIComponent(proxyUrl.username) : undefined,
+            password: proxyUrl.password ? decodeURIComponent(proxyUrl.password) : undefined
+          },
+          destination: {
+            host: targetHost,
+            port: parseInt(targetPort, 10)
+          },
+          command: "connect",
+          timeout
+        };
+        SocksClient.createConnection(socksOpts).then(({ socket }) => {
+          if (url.protocol === "https:") {
+            const tlsSocket = tls.connect({
+              socket,
+              host: targetHost,
+              servername: targetHost,
+              rejectUnauthorized: rejectUnauthorized !== false,
+              ALPNProtocols: ["h2", "http/1.1"],
+              ...stealthTlsOpts
+            });
+            tlsSocket.setMaxListeners(20);
+            const tlsTimeoutId = timeout ? setTimeout(() => {
+              tlsSocket.destroy();
+              reject(new Error(`TLS handshake timeout after ${timeout}ms`));
+            }, timeout) : null;
+            tlsSocket.on("secureConnect", () => {
+              if (tlsTimeoutId)
+                clearTimeout(tlsTimeoutId);
+              const alpn = tlsSocket.alpnProtocol;
+              if (alpn && alpn !== "h2") {
+                tlsSocket.destroy();
+                reject(new Error(`Server does not support HTTP/2 (negotiated: ${alpn})`));
+                return;
+              }
+              resolve(tlsSocket);
+            });
+            tlsSocket.on("error", (err) => {
+              if (tlsTimeoutId)
+                clearTimeout(tlsTimeoutId);
+              reject(new Error(`TLS handshake failed: ${err.message}`));
+            });
+          } else {
+            resolve(socket);
+          }
+        }).catch((err) => {
+          reject(new Error(`SOCKS proxy connection failed: ${err.message}`));
+        });
+        return;
+      }
+      const proxyHost = proxyUrl.hostname;
+      const proxyPort = parseInt(proxyUrl.port || (proxyUrl.protocol === "https:" ? "443" : "80"), 10);
+      let proxySocket;
+      const connectToProxy = () => {
+        if (proxyUrl.protocol === "https:") {
+          proxySocket = tls.connect({
+            host: proxyHost,
+            port: proxyPort,
+            rejectUnauthorized: rejectUnauthorized !== false
+          });
+        } else {
+          proxySocket = net.connect({
+            host: proxyHost,
+            port: proxyPort
+          });
+        }
+        let settled = false;
+        const timeoutId = timeout ? setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            proxySocket.destroy();
+            reject(new Error(`Proxy connection timeout after ${timeout}ms`));
+          }
+        }, timeout) : null;
+        proxySocket.on("error", (err) => {
+          if (!settled) {
+            settled = true;
+            if (timeoutId)
+              clearTimeout(timeoutId);
+            reject(new Error(`Proxy connection error: ${err.message}`));
+          }
+        });
+        proxySocket.on("connect", () => {
+          const connectRequest = [
+            `CONNECT ${targetHost}:${targetPort} HTTP/1.1`,
+            `Host: ${targetHost}:${targetPort}`,
+            proxyAuth ? `Proxy-Authorization: Basic ${proxyAuth}` : "",
+            "",
+            ""
+          ].filter(Boolean).join(`\r
+`);
+          proxySocket.write(connectRequest);
+        });
+        let responseBuffer = "";
+        proxySocket.on("data", function onData(data) {
+          if (settled)
+            return;
+          responseBuffer += data.toString();
+          const headerEnd = responseBuffer.indexOf(`\r
+\r
+`);
+          if (headerEnd !== -1) {
+            settled = true;
+            if (timeoutId)
+              clearTimeout(timeoutId);
+            proxySocket.removeListener("data", onData);
+            const statusLine = responseBuffer.split(`\r
+`)[0];
+            const statusMatch = statusLine.match(/HTTP\/\d\.\d (\d{3})/);
+            const statusCode = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+            if (statusCode === 200) {
+              if (url.protocol === "https:") {
+                const tlsSocket = tls.connect({
+                  socket: proxySocket,
+                  host: targetHost,
+                  servername: targetHost,
+                  rejectUnauthorized: rejectUnauthorized !== false,
+                  ALPNProtocols: ["h2", "http/1.1"],
+                  ...stealthTlsOpts
+                });
+                tlsSocket.setMaxListeners(20);
+                const tlsTimeoutId = timeout ? setTimeout(() => {
+                  tlsSocket.destroy();
+                  reject(new Error(`TLS handshake timeout after ${timeout}ms`));
+                }, timeout) : null;
+                tlsSocket.on("secureConnect", () => {
+                  if (tlsTimeoutId)
+                    clearTimeout(tlsTimeoutId);
+                  const alpn = tlsSocket.alpnProtocol;
+                  if (alpn && alpn !== "h2") {
+                    tlsSocket.destroy();
+                    reject(new Error(`Server does not support HTTP/2 (negotiated: ${alpn})`));
+                    return;
+                  }
+                  resolve(tlsSocket);
+                });
+                tlsSocket.on("error", (err) => {
+                  if (tlsTimeoutId)
+                    clearTimeout(tlsTimeoutId);
+                  reject(new Error(`TLS handshake failed: ${err.message}`));
+                });
+              } else {
+                resolve(proxySocket);
+              }
+            } else {
+              proxySocket.destroy();
+              reject(new Error(`Proxy CONNECT failed with status ${statusCode}: ${statusLine}`));
+            }
+          }
+        });
+      };
+      connectToProxy();
+    });
+  }
+  releaseSession(url, proxy) {
+    const key = this.getSessionKey(url, undefined, proxy);
     const entry = this.sessions.get(key);
     if (entry) {
       entry.refCount = Math.max(0, entry.refCount - 1);
@@ -178,8 +534,8 @@ class Http2SessionPool {
       }
     }
   }
-  closeSession(url) {
-    const key = this.getSessionKey(url);
+  closeSession(url, proxy) {
+    const key = this.getSessionKey(url, undefined, proxy);
     const entry = this.sessions.get(key);
     if (entry) {
       entry.session.close();
@@ -199,6 +555,30 @@ class Http2SessionPool {
     }
     this.closeAllSessions();
   }
+}
+function updateTiming(config, timing, contentLengthCounter) {
+  const now = performance.now();
+  config.timing.domainLookupStart = timing.dnsStart || config.timing.startTime;
+  config.timing.domainLookupEnd = timing.dnsEnd || timing.dnsStart || config.timing.startTime;
+  config.timing.connectStart = timing.tcpStart || timing.dnsEnd || config.timing.startTime;
+  config.timing.secureConnectionStart = timing.tlsStart || 0;
+  config.timing.connectEnd = timing.tcpEnd || timing.tlsEnd || timing.tcpStart || config.timing.startTime;
+  config.timing.requestStart = timing.tcpEnd || config.timing.startTime;
+  config.timing.responseStart = timing.firstByteTime || config.timing.requestStart;
+  config.timing.responseEnd = now;
+  config.transfer.bodySize = contentLengthCounter;
+  config.transfer.responseSize = contentLengthCounter;
+}
+function getTimingDurations(config) {
+  const t = config.timing;
+  return {
+    total: t.responseEnd - t.startTime,
+    dns: t.domainLookupEnd - t.domainLookupStart,
+    tcp: t.secureConnectionStart > 0 ? t.secureConnectionStart - t.connectStart : t.connectEnd - t.connectStart,
+    tls: t.secureConnectionStart > 0 ? t.connectEnd - t.secureConnectionStart : undefined,
+    firstByte: t.responseStart - t.startTime,
+    download: t.responseEnd - t.responseStart
+  };
 }
 const responseCacheInstances = new Map;
 function getCacheConfigKey(option) {
@@ -267,7 +647,15 @@ function buildUrlTree(config, finalUrl) {
     const urlStr = typeof config.url === "string" ? config.url : config.url.toString();
     urls.push(urlStr);
   }
-  if (finalUrl && (urls.length === 0 || urls[0] !== finalUrl)) {
+  if (config.redirectHistory && config.redirectHistory.length > 0) {
+    for (const redirect of config.redirectHistory) {
+      const redirectUrl = typeof redirect.url === "string" ? redirect.url : redirect.url?.toString?.() || "";
+      if (redirectUrl && urls[urls.length - 1] !== redirectUrl) {
+        urls.push(redirectUrl);
+      }
+    }
+  }
+  if (finalUrl && (urls.length === 0 || urls[urls.length - 1] !== finalUrl)) {
     urls.push(finalUrl);
   }
   return urls.length > 0 ? urls : [finalUrl];
@@ -276,23 +664,59 @@ function sanitizeConfig(config) {
   const { data: _data, ...sanitized } = config;
   return sanitized;
 }
-function updateCookies(config, headers, url) {
+async function updateCookies(config, headers, url, rootJar) {
   const setCookieHeaders = headers["set-cookie"];
   if (!setCookieHeaders)
     return;
   const cookieHeaderArray = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
   if (cookieHeaderArray.length === 0)
     return;
+  const tempJar = new RezoCookieJar;
+  tempJar.setCookiesSync(cookieHeaderArray, url);
+  const parsedCookies = tempJar.cookies();
+  const acceptedCookies = [];
+  let hookError = null;
+  if (config.hooks?.beforeCookie && config.hooks.beforeCookie.length > 0) {
+    for (const cookie of parsedCookies.array) {
+      let shouldAccept = true;
+      for (const hook of config.hooks.beforeCookie) {
+        try {
+          const result = await hook({
+            cookie,
+            source: "response",
+            url,
+            isValid: true
+          }, config);
+          if (result === false) {
+            shouldAccept = false;
+            break;
+          }
+        } catch (err) {
+          hookError = err;
+          if (config.debug) {
+            console.log("[Rezo Debug] beforeCookie hook error:", err);
+          }
+        }
+      }
+      if (shouldAccept) {
+        acceptedCookies.push(cookie);
+      }
+    }
+  } else {
+    acceptedCookies.push(...parsedCookies.array);
+  }
+  const acceptedCookieStrings = acceptedCookies.map((c) => c.toSetCookieString());
   const jar = new RezoCookieJar;
-  jar.setCookiesSync(cookieHeaderArray, url);
-  if (config.enableCookieJar && config.cookieJar) {
-    config.cookieJar.setCookiesSync(cookieHeaderArray, url);
+  jar.setCookiesSync(acceptedCookieStrings, url);
+  const jarToSync = rootJar || config.jar;
+  if (!config.disableJar && jarToSync) {
+    jarToSync.setCookiesSync(acceptedCookieStrings, url);
   }
   const cookies = jar.cookies();
   cookies.setCookiesString = cookieHeaderArray;
   if (config.useCookies) {
     const existingArray = config.responseCookies?.array || [];
-    for (const cookie of cookies.array) {
+    for (const cookie of acceptedCookies) {
       const existingIndex = existingArray.findIndex((c) => c.key === cookie.key && c.domain === cookie.domain);
       if (existingIndex >= 0) {
         existingArray[existingIndex] = cookie;
@@ -305,6 +729,17 @@ function updateCookies(config, headers, url) {
     config.responseCookies.setCookiesString = cookieHeaderArray;
   } else {
     config.responseCookies = cookies;
+  }
+  if (!hookError && config.hooks?.afterCookie && config.hooks.afterCookie.length > 0) {
+    for (const hook of config.hooks.afterCookie) {
+      try {
+        await hook(acceptedCookies, config);
+      } catch (err) {
+        if (config.debug) {
+          console.log("[Rezo Debug] afterCookie hook error:", err);
+        }
+      }
+    }
   }
 }
 function mergeRequestAndResponseCookies(config, responseCookies, url) {
@@ -336,7 +771,6 @@ function mergeRequestAndResponseCookies(config, responseCookies, url) {
     serialized: [],
     netscape: `# Netscape HTTP Cookie File
 # This file was generated by Rezo HTTP client
-# Based on uniqhtt cookie implementation
 `,
     string: "",
     setCookiesString: []
@@ -363,8 +797,10 @@ async function executeRequest(options, defaultOptions, jar) {
         port: selectedProxy.port,
         auth: selectedProxy.auth
       };
-    } else if (proxyManager.config.failWithoutProxy) {
-      throw new RezoError("No proxy available: All proxies exhausted or URL did not match whitelist/blacklist", mainConfig, "UNQ_NO_PROXY_AVAILABLE", fetchOptions);
+    } else if (proxyManager.shouldProxy(requestUrl) && !proxyManager.hasAvailableProxies() && proxyManager.config.failWithoutProxy) {
+      const noProxyError = new RezoError("No proxy available: All proxies in the pool are exhausted, disabled, or in cooldown", mainConfig, "REZ_NO_PROXY_AVAILABLE", fetchOptions);
+      proxyManager.notifyNoProxiesAvailable(requestUrl, noProxyError);
+      throw noProxyError;
     }
   }
   const cacheOption = options.cache;
@@ -413,14 +849,18 @@ async function executeRequest(options, defaultOptions, jar) {
   let downloadResponse;
   let uploadResponse;
   if (isStream) {
-    streamResponse = new StreamResponse;
+    streamResponse = options._streamResponse || new StreamResponse;
   } else if (isDownload) {
-    const fileName = options.fileName || options.saveTo || "";
-    const url = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
-    downloadResponse = new DownloadResponse(fileName, url);
+    downloadResponse = options._downloadResponse || (() => {
+      const fileName = options.fileName || options.saveTo || "";
+      const url = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
+      return new DownloadResponse(fileName, url);
+    })();
   } else if (isUpload) {
-    const url = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
-    uploadResponse = new UploadResponse(url);
+    uploadResponse = options._uploadResponse || (() => {
+      const url = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
+      return new UploadResponse(url);
+    })();
   }
   if (proxyManager && selectedProxy) {
     if (streamResponse) {
@@ -447,12 +887,21 @@ async function executeRequest(options, defaultOptions, jar) {
     }
   }
   try {
-    const res = executeHttp2Request(fetchOptions, mainConfig, options, perform, fs, streamResponse, downloadResponse, uploadResponse);
+    const res = executeHttp2Request(fetchOptions, mainConfig, options, perform, fs, streamResponse, downloadResponse, uploadResponse, jar);
     if (streamResponse) {
+      res.catch((err) => {
+        streamResponse.emit("error", err);
+      });
       return streamResponse;
     } else if (downloadResponse) {
+      res.catch((err) => {
+        downloadResponse.emit("error", err);
+      });
       return downloadResponse;
     } else if (uploadResponse) {
+      res.catch((err) => {
+        uploadResponse.emit("error", err);
+      });
       return uploadResponse;
     }
     const response = await res;
@@ -476,29 +925,50 @@ async function executeRequest(options, defaultOptions, jar) {
   } catch (error) {
     if (proxyManager && selectedProxy) {
       proxyManager.reportFailure(selectedProxy, error);
+      if (proxyManager.config.retryWithNextProxy) {
+        const maxRetries = proxyManager.config.maxProxyRetries ?? 3;
+        const attempt = (mainConfig._proxyRetryCount ?? 0) + 1;
+        if (attempt <= maxRetries) {
+          mainConfig._proxyRetryCount = attempt;
+          const retryUrl = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
+          const nextProxy = proxyManager.next(retryUrl);
+          if (nextProxy) {
+            options.proxy = {
+              protocol: nextProxy.protocol,
+              host: nextProxy.host,
+              port: nextProxy.port,
+              auth: nextProxy.auth
+            };
+            return executeRequest(options, defaultOptions, jar);
+          }
+        }
+      }
     }
     throw error;
   }
 }
-async function executeHttp2Request(fetchOptions, config, options, perform, fs, streamResult, downloadResult, uploadResult) {
+async function executeHttp2Request(fetchOptions, config, options, perform, fs, streamResult, downloadResult, uploadResult, rootJar) {
   let requestCount = 0;
   const _stats = { statusOnNext: "abort" };
   let responseStatusCode;
-  let retries = 0;
-  const retryDelay = config?.retry?.retryDelay || 0;
-  const maxRetries = config?.retry?.maxRetries || 0;
-  const incrementDelay = config?.retry?.incrementDelay || false;
-  const statusCodes = config?.retry?.statusCodes;
+  let retryAttempt = 0;
+  const retryConfig = config?.retry;
+  const startTime = performance.now();
   const timing = {
-    startTime: performance.now(),
-    startTimestamp: Date.now()
+    startTime
   };
+  config.timing.startTime = startTime;
   const ABSOLUTE_MAX_ATTEMPTS = 50;
   const visitedUrls = new Set;
   let totalAttempts = 0;
   config.setSignal();
-  const timeoutClearInstance = config.timeoutClearInstanse;
-  delete config.timeoutClearInstanse;
+  const timeoutClearInstance = config.timeoutClearInstance;
+  delete config.timeoutClearInstance;
+  if (!config.requestId) {
+    config.requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+  }
+  const requestUrl = fetchOptions.fullUrl ? String(fetchOptions.fullUrl) : "";
+  debugLog.requestStart(config, requestUrl, fetchOptions.method || "GET");
   const eventEmitter = streamResult || downloadResult || uploadResult;
   if (eventEmitter) {
     eventEmitter.emit("initiated");
@@ -511,7 +981,7 @@ async function executeHttp2Request(fetchOptions, config, options, perform, fs, s
       throw error;
     }
     try {
-      const response = await executeHttp2Stream(config, fetchOptions, requestCount, timing, _stats, responseStatusCode, fs, streamResult, downloadResult, uploadResult, sessionPool);
+      const response = await executeHttp2Stream(config, fetchOptions, requestCount, timing, _stats, responseStatusCode, fs, streamResult, downloadResult, uploadResult, sessionPool, rootJar);
       const statusOnNext = _stats.statusOnNext;
       if (response instanceof RezoError) {
         const fileName = config.fileName;
@@ -526,45 +996,85 @@ async function executeHttp2Request(fetchOptions, config, options, perform, fs, s
           duration: perform.now()
         });
         perform.reset();
-        if (!responseStatusCode || !config.retry) {
+        if (!retryConfig) {
           throw response;
         }
-        if (config.retry) {
-          if (config.retry.condition) {
-            const isPassed = await config.retry.condition(response);
-            if (typeof isPassed === "boolean" && isPassed === false) {
-              throw response;
+        const method = fetchOptions.method || "GET";
+        retryAttempt++;
+        if (retryConfig.condition) {
+          const shouldContinue = await retryConfig.condition(response, retryAttempt);
+          if (shouldContinue === false) {
+            if (retryConfig.onRetryExhausted) {
+              await retryConfig.onRetryExhausted(response, retryAttempt);
             }
-          } else {
-            if (!statusCodes.includes(responseStatusCode)) {
-              throw response;
-            }
-            if (maxRetries <= retries) {
-              if (config.debug) {
-                console.log(`Max retries (${maxRetries}) reached`);
-              }
-              throw response;
-            }
-            retries++;
-            if (config.debug) {
-              console.log(`Retrying... ${retryDelay > 0 ? "in " + (incrementDelay ? retryDelay * retries : retryDelay) + "ms" : ""}`);
-            }
-            if (retryDelay > 0) {
-              await new Promise((resolve) => setTimeout(resolve, incrementDelay ? retryDelay * retries : retryDelay));
-            }
+            throw response;
           }
-          config.retryAttempts++;
+        } else {
+          const canRetry = shouldRetry(response, retryAttempt, method, retryConfig);
+          if (!canRetry) {
+            if (retryAttempt > retryConfig.maxRetries) {
+              debugLog.maxRetries(config, retryConfig.maxRetries);
+              if (retryConfig.onRetryExhausted) {
+                await retryConfig.onRetryExhausted(response, retryAttempt);
+              }
+            }
+            throw response;
+          }
         }
+        const currentDelay = calculateRetryDelay(retryAttempt, retryConfig.retryDelay, retryConfig.backoff, retryConfig.maxDelay);
+        debugLog.retry(config, retryAttempt, retryConfig.maxRetries, responseStatusCode || 0, currentDelay);
+        if (retryConfig.onRetry) {
+          const shouldProceed = await retryConfig.onRetry(response, retryAttempt, currentDelay);
+          if (shouldProceed === false) {
+            throw response;
+          }
+        }
+        if (config.hooks?.beforeRetry && config.hooks.beforeRetry.length > 0) {
+          for (const hook of config.hooks.beforeRetry) {
+            await hook(config, response, retryAttempt);
+          }
+        }
+        if (currentDelay > 0) {
+          await new Promise((resolve) => setTimeout(resolve, currentDelay));
+        }
+        config.retryAttempts++;
         continue;
       }
       if (statusOnNext === "success") {
+        const totalDuration = performance.now() - timing.startTime;
+        debugLog.response(config, response.status, response.statusText, totalDuration);
+        if (response.headers) {
+          const headersObj = response.headers instanceof RezoHeaders ? response.headers.toObject() : response.headers;
+          debugLog.responseHeaders(config, headersObj);
+        }
+        if (response.cookies?.array) {
+          debugLog.cookies(config, response.cookies.array.length);
+        }
+        debugLog.complete(config, response.finalUrl || requestUrl, config.redirectCount, totalDuration);
         return response;
       }
       if (statusOnNext === "error") {
+        if (shouldWaitOnStatus(response.status, options.waitOnStatus)) {
+          const rateLimitWaitAttempt = config._rateLimitWaitAttempt || 0;
+          const waitResult = await handleRateLimitWait({
+            status: response.status,
+            headers: response.headers,
+            data: response.data,
+            url: fetchOptions.fullUrl || fetchOptions.url?.toString() || "",
+            method: fetchOptions.method || "GET",
+            config,
+            options,
+            currentWaitAttempt: rateLimitWaitAttempt
+          });
+          if (waitResult.shouldRetry) {
+            config._rateLimitWaitAttempt = waitResult.waitAttempt;
+            continue;
+          }
+        }
         const httpError = builErrorFromResponse(`Request failed with status code ${response.status}`, response, config, fetchOptions);
-        if (config.retry && statusCodes?.includes(response.status)) {
-          if (maxRetries > retries) {
-            retries++;
+        if (retryConfig && retryConfig.statusCodes?.includes(response.status)) {
+          retryAttempt++;
+          if (retryAttempt <= retryConfig.maxRetries) {
             config.retryAttempts++;
             config.errors.push({
               attempt: config.retryAttempts,
@@ -572,11 +1082,12 @@ async function executeHttp2Request(fetchOptions, config, options, perform, fs, s
               duration: perform.now()
             });
             perform.reset();
+            const currentDelay = calculateRetryDelay(retryAttempt, retryConfig.retryDelay, retryConfig.backoff, retryConfig.maxDelay);
             if (config.debug) {
-              console.log(`Request failed with status code ${response.status}, retrying...${retryDelay > 0 ? " in " + (incrementDelay ? retryDelay * retries : retryDelay) + "ms" : ""}`);
+              console.log(`Request failed with status code ${response.status}, retrying...${currentDelay > 0 ? " in " + currentDelay + "ms" : ""}`);
             }
-            if (retryDelay > 0) {
-              await new Promise((resolve) => setTimeout(resolve, incrementDelay ? retryDelay * retries : retryDelay));
+            if (currentDelay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, currentDelay));
             }
             continue;
           }
@@ -601,17 +1112,37 @@ async function executeHttp2Request(fetchOptions, config, options, perform, fs, s
           visitedUrls.add(normalizedRedirectUrl);
         }
         const redirectCode = response.status;
-        const onRedirect = config.beforeRedirect ? config.beforeRedirect({
+        const fromUrl = fetchOptions.fullUrl;
+        if (config.hooks?.beforeRedirect && config.hooks.beforeRedirect.length > 0) {
+          const redirectContext = {
+            redirectUrl: new URL(location),
+            fromUrl: fetchOptions.fullUrl,
+            status: response.status,
+            headers: response.headers,
+            sameDomain: isSameDomain(fetchOptions.fullUrl, location),
+            method: fetchOptions.method.toUpperCase(),
+            body: config.originalBody,
+            request: fetchOptions,
+            redirectCount: config.redirectCount,
+            timestamp: Date.now()
+          };
+          for (const hook of config.hooks.beforeRedirect) {
+            await hook(redirectContext, config, response);
+          }
+        }
+        const redirectCallback = config.beforeRedirect || config.onRedirect;
+        const onRedirect = redirectCallback ? redirectCallback({
           url: new URL(location),
           status: response.status,
           headers: response.headers,
           sameDomain: isSameDomain(fetchOptions.fullUrl, location),
-          method: fetchOptions.method.toUpperCase()
+          method: fetchOptions.method.toUpperCase(),
+          body: config.originalBody
         }) : undefined;
         if (typeof onRedirect !== "undefined") {
           if (typeof onRedirect === "boolean" && !onRedirect) {
             throw builErrorFromResponse("Redirect denied by user", response, config, fetchOptions);
-          } else if (typeof onRedirect === "object" && !onRedirect.redirect) {
+          } else if (typeof onRedirect === "object" && !onRedirect.redirect && !onRedirect.withoutBody && !("body" in onRedirect)) {
             throw builErrorFromResponse("Redirect denied by user", response, config, fetchOptions);
           }
         }
@@ -631,14 +1162,88 @@ async function executeHttp2Request(fetchOptions, config, options, perform, fs, s
         });
         perform.reset();
         config.redirectCount++;
-        if (response.status === 301 || response.status === 302 || response.status === 303) {
-          if (config.treat302As303 !== false || response.status === 303) {
-            options.method = "GET";
-            delete options.body;
-          }
-        }
         fetchOptions.fullUrl = location;
         delete options.params;
+        const normalizedRedirect = typeof onRedirect === "object" ? onRedirect.redirect || onRedirect.withoutBody || "body" in onRedirect : undefined;
+        if (typeof onRedirect === "object" && normalizedRedirect) {
+          let method;
+          const userMethod = onRedirect.method;
+          if (redirectCode === 301 || redirectCode === 302 || redirectCode === 303) {
+            method = userMethod || "GET";
+          } else {
+            method = userMethod || fetchOptions.method;
+          }
+          config.method = method;
+          options.method = method;
+          fetchOptions.method = method;
+          if (onRedirect.redirect && onRedirect.url) {
+            options.fullUrl = onRedirect.url;
+            fetchOptions.fullUrl = onRedirect.url;
+          }
+          if (onRedirect.withoutBody) {
+            delete options.body;
+            delete fetchOptions.body;
+            config.originalBody = undefined;
+            if (fetchOptions.headers instanceof RezoHeaders) {
+              fetchOptions.headers.delete("Content-Type");
+              fetchOptions.headers.delete("Content-Length");
+            }
+          } else if ("body" in onRedirect) {
+            options.body = onRedirect.body;
+            fetchOptions.body = onRedirect.body;
+            config.originalBody = onRedirect.body;
+          } else if (redirectCode === 307 || redirectCode === 308) {
+            const methodUpper = method.toUpperCase();
+            if ((methodUpper === "POST" || methodUpper === "PUT" || methodUpper === "PATCH") && config.originalBody !== undefined) {
+              options.body = config.originalBody;
+              fetchOptions.body = config.originalBody;
+            }
+          } else {
+            delete options.body;
+            delete fetchOptions.body;
+            if (fetchOptions.headers instanceof RezoHeaders) {
+              fetchOptions.headers.delete("Content-Type");
+              fetchOptions.headers.delete("Content-Length");
+            }
+          }
+          debugLog.redirect(config, fromUrl, fetchOptions.fullUrl, redirectCode, method);
+        } else if (response.status === 301 || response.status === 302 || response.status === 303) {
+          debugLog.redirect(config, fromUrl, fetchOptions.fullUrl, redirectCode, "GET");
+          options.method = "GET";
+          fetchOptions.method = "GET";
+          config.method = "GET";
+          delete options.body;
+          delete fetchOptions.body;
+          if (fetchOptions.headers instanceof RezoHeaders) {
+            fetchOptions.headers.delete("Content-Type");
+            fetchOptions.headers.delete("Content-Length");
+          }
+        } else {
+          debugLog.redirect(config, fromUrl, fetchOptions.fullUrl, redirectCode, fetchOptions.method);
+        }
+        const jarToSync = rootJar || config.jar;
+        if (response.cookies?.setCookiesString?.length > 0 && jarToSync) {
+          try {
+            jarToSync.setCookiesSync(response.cookies.setCookiesString, fromUrl);
+          } catch (e) {}
+        }
+        if (jarToSync && !config.disableJar) {
+          try {
+            const cookieString = jarToSync.getCookieStringSync(fetchOptions.fullUrl);
+            if (cookieString) {
+              if (fetchOptions.headers instanceof RezoHeaders) {
+                fetchOptions.headers.set("cookie", cookieString);
+              } else if (fetchOptions.headers) {
+                fetchOptions.headers["cookie"] = cookieString;
+              } else {
+                fetchOptions.headers = new RezoHeaders({ cookie: cookieString });
+              }
+              if (config.debug) {
+                console.log(`[Rezo Debug] HTTP/2: Updated Cookie header for redirect: ${cookieString.substring(0, 100)}...`);
+              }
+            }
+          } catch (e) {}
+        }
         requestCount++;
         continue;
       }
@@ -651,7 +1256,7 @@ async function executeHttp2Request(fetchOptions, config, options, perform, fs, s
     }
   }
 }
-async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _stats, responseStatusCode, fs, streamResult, downloadResult, uploadResult, sessionPool) {
+async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _stats, responseStatusCode, fs, streamResult, downloadResult, uploadResult, sessionPool, rootJar) {
   return new Promise(async (resolve) => {
     try {
       const { fullUrl, body } = fetchOptions;
@@ -662,15 +1267,26 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
         config.isSecure = isSecure;
         config.finalUrl = url.href;
         config.network.protocol = "h2";
-        config.timing.startTimestamp = timing.startTimestamp;
       }
-      const headers = {
-        [http2.constants.HTTP2_HEADER_METHOD]: fetchOptions.method.toUpperCase(),
-        [http2.constants.HTTP2_HEADER_PATH]: url.pathname + url.search,
-        [http2.constants.HTTP2_HEADER_SCHEME]: url.protocol.replace(":", ""),
-        [http2.constants.HTTP2_HEADER_AUTHORITY]: url.host
+      const stealthProfile = fetchOptions._resolvedStealth;
+      const pseudoValues = {
+        ":method": fetchOptions.method.toUpperCase(),
+        ":path": url.pathname + url.search,
+        ":scheme": url.protocol.replace(":", ""),
+        ":authority": url.host
       };
-      const reqHeaders = fetchOptions.headers instanceof RezoHeaders ? fetchOptions.headers.toObject() : fetchOptions.headers || {};
+      const headers = {};
+      if (stealthProfile) {
+        for (const ph of stealthProfile.pseudoHeaderOrder) {
+          headers[ph] = pseudoValues[ph];
+        }
+      } else {
+        headers[http2.constants.HTTP2_HEADER_METHOD] = pseudoValues[":method"];
+        headers[http2.constants.HTTP2_HEADER_PATH] = pseudoValues[":path"];
+        headers[http2.constants.HTTP2_HEADER_SCHEME] = pseudoValues[":scheme"];
+        headers[http2.constants.HTTP2_HEADER_AUTHORITY] = pseudoValues[":authority"];
+      }
+      const reqHeaders = stealthProfile && fetchOptions.headers instanceof RezoHeaders ? fetchOptions.headers.toOrderedObject(stealthProfile.headerOrder) : fetchOptions.headers instanceof RezoHeaders ? fetchOptions.headers.toObject() : fetchOptions.headers || {};
       for (const [key, value] of Object.entries(reqHeaders)) {
         if (value !== undefined && value !== null) {
           headers[key.toLowerCase()] = String(value);
@@ -678,6 +1294,11 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
       }
       if (!headers["accept-encoding"]) {
         headers["accept-encoding"] = "gzip, deflate, br";
+      }
+      if (config.debug && headers["cookie"]) {
+        console.log(`[Rezo Debug] HTTP/2: Sending Cookie header: ${String(headers["cookie"]).substring(0, 100)}...`);
+      } else if (config.debug) {
+        console.log(`[Rezo Debug] HTTP/2: No Cookie header in request`);
       }
       if (body instanceof RezoFormData) {
         headers["content-type"] = `multipart/form-data; boundary=${body.getBoundary()}`;
@@ -712,56 +1333,181 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
         sessionOptions.pfx = securityContext.pfx;
       if (securityContext?.passphrase)
         sessionOptions.passphrase = securityContext.passphrase;
+      const forceNewSession = requestCount > 0;
       let session;
+      if (config.debug) {
+        console.log(`[Rezo Debug] HTTP/2: Acquiring session for ${url.host}${forceNewSession ? " (forcing new for redirect)" : ""}${fetchOptions.proxy ? " (via proxy)" : ""}...`);
+      }
       try {
-        session = await (sessionPool || Http2SessionPool.getInstance()).getSession(url, sessionOptions, config.timeout !== null ? config.timeout : undefined);
+        session = await (sessionPool || Http2SessionPool.getInstance()).getSession(url, sessionOptions, config.timeout !== null ? config.timeout : undefined, forceNewSession, fetchOptions.proxy, stealthProfile);
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Session acquired successfully`);
+        }
       } catch (err) {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Session failed:`, err.message);
+        }
         const error = buildSmartError(config, fetchOptions, err);
         _stats.statusOnNext = "error";
         resolve(error);
         return;
-      }
-      const req = session.request(headers);
-      if (config.timeout) {
-        req.setTimeout(config.timeout, () => {
-          req.close(http2.constants.NGHTTP2_CANCEL);
-          const error = buildSmartError(config, fetchOptions, new Error(`Request timeout after ${config.timeout}ms`));
-          _stats.statusOnNext = "error";
-          resolve(error);
-        });
       }
       let chunks = [];
       let contentLengthCounter = 0;
       let responseHeaders = {};
       let status = 0;
       let statusText = "";
+      let resolved = false;
+      let isRedirect = false;
+      let timeoutId = null;
+      const sessionErrorHandler = (err) => {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Session error:`, err.message);
+        }
+        if (!resolved) {
+          resolved = true;
+          if (timeoutId)
+            clearTimeout(timeoutId);
+          const error = buildSmartError(config, fetchOptions, err);
+          _stats.statusOnNext = "error";
+          resolve(error);
+        }
+      };
+      session.once("error", sessionErrorHandler);
+      session.once("goaway", (errorCode, lastStreamID) => {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Session GOAWAY received (errorCode: ${errorCode}, lastStreamID: ${lastStreamID})`);
+        }
+      });
+      const cleanupSessionListeners = () => {
+        session.removeListener("error", sessionErrorHandler);
+      };
+      if (config.debug) {
+        console.log(`[Rezo Debug] HTTP/2: Creating request stream...`);
+      }
+      let req;
+      try {
+        req = session.request(headers);
+      } catch (err) {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Failed to create request stream:`, err.message);
+        }
+        session.removeListener("error", sessionErrorHandler);
+        const error = buildSmartError(config, fetchOptions, err);
+        _stats.statusOnNext = "error";
+        resolve(error);
+        return;
+      }
+      if (config.debug) {
+        console.log(`[Rezo Debug] HTTP/2: Request stream created`);
+      }
+      const requestTimeout = config.timeout || 30000;
+      timeoutId = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          cleanupSessionListeners();
+          if (config.debug) {
+            console.log(`[Rezo Debug] HTTP/2: Request timeout after ${requestTimeout}ms (no response received)`);
+          }
+          req.close(http2.constants.NGHTTP2_CANCEL);
+          const error = buildSmartError(config, fetchOptions, new Error(`Request timeout after ${requestTimeout}ms`));
+          _stats.statusOnNext = "error";
+          resolve(error);
+        }
+      }, requestTimeout);
+      const sessionSocket = session.socket;
+      if (sessionSocket && typeof sessionSocket.ref === "function") {
+        sessionSocket.ref();
+      }
+      req.on("close", () => {
+        if (config.debug && !resolved) {
+          console.log(`[Rezo Debug] HTTP/2: Stream closed (status: ${status}, resolved: ${resolved})`);
+        }
+        if (!resolved && status === 0) {
+          resolved = true;
+          clearTimeout(timeoutId);
+          cleanupSessionListeners();
+          if (config.debug) {
+            console.log(`[Rezo Debug] HTTP/2: Stream closed without response - retrying with new session`);
+          }
+          const error = buildSmartError(config, fetchOptions, new Error("HTTP/2 stream closed without response"));
+          _stats.statusOnNext = "error";
+          resolve(error);
+        }
+      });
+      req.on("aborted", () => {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Stream aborted`);
+        }
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeoutId);
+          cleanupSessionListeners();
+          const error = buildSmartError(config, fetchOptions, new Error("HTTP/2 stream aborted"));
+          _stats.statusOnNext = "error";
+          resolve(error);
+        }
+      });
+      req.on("error", (err) => {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Stream error:`, err.message);
+        }
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeoutId);
+          cleanupSessionListeners();
+          const error = buildSmartError(config, fetchOptions, err);
+          _stats.statusOnNext = "error";
+          resolve(error);
+        }
+      });
+      req.on("frameError", (type, code, id) => {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Frame error - type: ${type}, code: ${code}, id: ${id}`);
+        }
+      });
       req.on("response", (headers) => {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Response received, status: ${headers[":status"]}`);
+        }
         responseHeaders = headers;
         status = Number(headers[http2.constants.HTTP2_HEADER_STATUS]) || 200;
         statusText = getStatusText(status);
-        if (!config.timing.ttfbMs) {
+        if (!timing.firstByteTime) {
           timing.firstByteTime = performance.now();
-          config.timing.ttfbMs = timing.firstByteTime - timing.startTime;
+          config.timing.responseStart = timing.firstByteTime;
         }
         const location = headers["location"];
-        const isRedirect = status >= 300 && status < 400 && location;
+        isRedirect = status >= 300 && status < 400 && !!location;
         if (isRedirect) {
           _stats.statusOnNext = "redirect";
-          _stats.redirectUrl = new URL(location, url).href;
+          const redirectUrlObj = new URL(location, url);
+          if (!redirectUrlObj.hash && url.hash) {
+            redirectUrlObj.hash = url.hash;
+          }
+          _stats.redirectUrl = redirectUrlObj.href;
         }
         config.network.httpVersion = "h2";
-        updateCookies(config, headers, url.href);
+        (async () => {
+          try {
+            await updateCookies(config, headers, url.href, rootJar);
+          } catch (err) {
+            if (config.debug) {
+              console.log("[Rezo Debug] Cookie hook error:", err);
+            }
+          }
+        })();
         if (eventEmitter && !isRedirect) {
           const headersEvent = {
             status,
             statusText,
-            headers: new RezoHeaders(headers),
+            headers: new RezoHeaders(sanitizeHttp2Headers(headers)),
             contentType: headers["content-type"],
             contentLength: headers["content-length"] ? parseInt(headers["content-length"], 10) : undefined,
             cookies: config.responseCookies?.array || [],
             timing: {
-              firstByte: config.timing.ttfbMs,
-              total: performance.now() - timing.startTime
+              firstByte: config.timing.responseStart - config.timing.startTime,
+              total: performance.now() - config.timing.startTime
             }
           };
           eventEmitter.emit("headers", headersEvent);
@@ -776,7 +1522,11 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
           }
         }
       });
+      const dataStartTime = performance.now();
       req.on("data", (chunk) => {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Received data chunk: ${chunk.length} bytes (total: ${contentLengthCounter + chunk.length})`);
+        }
         chunks.push(chunk);
         contentLengthCounter += chunk.length;
         if (streamResult) {
@@ -784,263 +1534,300 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
         }
         const contentLength = responseHeaders["content-length"] ? parseInt(responseHeaders["content-length"], 10) : undefined;
         if (eventEmitter) {
+          const now = performance.now();
+          const elapsed = now - dataStartTime;
+          const speed = elapsed > 0 ? contentLengthCounter / (elapsed / 1000) : 0;
+          const remaining = contentLength && contentLength > contentLengthCounter && speed > 0 ? (contentLength - contentLengthCounter) / speed * 1000 : 0;
           const progressEvent = {
             loaded: contentLengthCounter,
             total: contentLength || 0,
-            percentage: contentLength ? Math.round(contentLengthCounter / contentLength * 100) : 0,
-            speed: 0,
-            averageSpeed: 0,
-            estimatedTime: 0,
-            timestamp: Date.now()
+            percentage: contentLength ? contentLengthCounter / contentLength * 100 : 0,
+            speed,
+            averageSpeed: speed,
+            estimatedTime: remaining,
+            timestamp: now
           };
           eventEmitter.emit("progress", progressEvent);
-          eventEmitter.emit("download-progress", progressEvent);
         }
       });
       req.on("end", async () => {
-        config.timing.endTimestamp = Date.now();
-        config.timing.durationMs = performance.now() - timing.startTime;
-        config.timing.transferMs = timing.firstByteTime ? performance.now() - timing.firstByteTime : config.timing.durationMs;
-        if (!config.transfer) {
-          config.transfer = { requestSize: 0, responseSize: 0, headerSize: 0, bodySize: 0 };
-        }
-        if (config.transfer.requestSize === undefined) {
-          config.transfer.requestSize = 0;
-        }
-        if (config.transfer.requestSize === 0 && body) {
-          if (typeof body === "string") {
-            config.transfer.requestSize = Buffer.byteLength(body, "utf8");
-          } else if (body instanceof Buffer || body instanceof Uint8Array) {
-            config.transfer.requestSize = body.length;
-          } else if (body instanceof URLSearchParams || body instanceof RezoURLSearchParams) {
-            config.transfer.requestSize = Buffer.byteLength(body.toString(), "utf8");
-          } else if (body instanceof RezoFormData) {
-            config.transfer.requestSize = body.getLengthSync();
-          } else if (typeof body === "object") {
-            config.transfer.requestSize = Buffer.byteLength(JSON.stringify(body), "utf8");
-          }
-        }
-        config.transfer.bodySize = contentLengthCounter;
-        config.transfer.responseSize = contentLengthCounter;
-        (sessionPool || Http2SessionPool.getInstance()).releaseSession(url);
-        if (_stats.statusOnNext === "redirect") {
-          const partialResponse = {
-            data: "",
-            status,
-            statusText,
-            headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
-            cookies: config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] },
-            config,
-            contentType: responseHeaders["content-type"],
-            contentLength: contentLengthCounter,
-            finalUrl: url.href,
-            urls: buildUrlTree(config, url.href)
-          };
-          resolve(partialResponse);
+        if (resolved)
           return;
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Stream 'end' event fired (status: ${status}, chunks: ${chunks.length}, bytes: ${contentLengthCounter})`);
         }
-        let responseBody = Buffer.concat(chunks);
-        const contentEncoding = responseHeaders["content-encoding"];
-        if (contentEncoding && contentLengthCounter > 0 && CompressionUtil.shouldDecompress(contentEncoding, config)) {
-          try {
-            const decompressed = await decompressBuffer(responseBody, contentEncoding);
-            responseBody = decompressed;
-          } catch (err) {
-            const error = buildDecompressionError({
-              statusCode: status,
-              headers: sanitizeHttp2Headers(responseHeaders),
-              contentType: responseHeaders["content-type"],
-              contentLength: String(contentLengthCounter),
-              cookies: config.responseCookies?.setCookiesString || [],
-              statusText: err.message,
-              url: url.href,
-              body: responseBody,
-              finalUrl: url.href,
+        resolved = true;
+        clearTimeout(timeoutId);
+        cleanupSessionListeners();
+        try {
+          updateTiming(config, timing, contentLengthCounter);
+          if (!config.transfer) {
+            config.transfer = { requestSize: 0, responseSize: 0, headerSize: 0, bodySize: 0 };
+          }
+          if (config.transfer.requestSize === undefined) {
+            config.transfer.requestSize = 0;
+          }
+          if (config.transfer.requestSize === 0 && body) {
+            if (typeof body === "string") {
+              config.transfer.requestSize = Buffer.byteLength(body, "utf8");
+            } else if (Buffer.isBuffer(body) || body instanceof Uint8Array) {
+              config.transfer.requestSize = body.length;
+            } else if (body instanceof URLSearchParams || body instanceof RezoURLSearchParams) {
+              config.transfer.requestSize = Buffer.byteLength(body.toString(), "utf8");
+            } else if (body instanceof RezoFormData) {
+              config.transfer.requestSize = await body.getLength() || 0;
+            } else if (typeof body === "object") {
+              config.transfer.requestSize = Buffer.byteLength(JSON.stringify(body), "utf8");
+            }
+          }
+          (sessionPool || Http2SessionPool.getInstance()).releaseSession(url, fetchOptions.proxy);
+          if (isRedirect) {
+            _stats.statusOnNext = "redirect";
+            const partialResponse = {
+              data: "",
+              status,
+              statusText,
+              headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
+              cookies: config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] },
               config,
-              request: fetchOptions
-            });
-            _stats.statusOnNext = "error";
-            resolve(error);
+              contentType: responseHeaders["content-type"],
+              contentLength: contentLengthCounter,
+              finalUrl: url.href,
+              urls: buildUrlTree(config, url.href)
+            };
+            resolve(partialResponse);
             return;
           }
-        }
-        let data;
-        const contentType = responseHeaders["content-type"] || "";
-        const responseType = config.responseType || fetchOptions.responseType || "auto";
-        if (responseType === "buffer" || responseType === "arrayBuffer") {
-          data = responseBody;
-        } else if (responseType === "text") {
-          data = responseBody.toString("utf-8");
-        } else if (responseType === "json" || responseType === "auto" && contentType.includes("application/json")) {
-          try {
-            data = JSON.parse(responseBody.toString("utf-8"));
-          } catch {
-            data = responseBody.toString("utf-8");
+          let responseBody = Buffer.concat(chunks);
+          const contentEncoding = responseHeaders["content-encoding"];
+          if (contentEncoding && contentLengthCounter > 0 && CompressionUtil.shouldDecompress(contentEncoding, config)) {
+            try {
+              const decompressed = await decompressBuffer(responseBody, contentEncoding);
+              responseBody = decompressed;
+            } catch (err) {
+              const error = buildDecompressionError({
+                statusCode: status,
+                headers: sanitizeHttp2Headers(responseHeaders),
+                contentType: responseHeaders["content-type"],
+                contentLength: String(contentLengthCounter),
+                cookies: config.responseCookies?.setCookiesString || [],
+                statusText: err.message,
+                url: url.href,
+                body: responseBody,
+                finalUrl: url.href,
+                config,
+                request: fetchOptions
+              });
+              _stats.statusOnNext = "error";
+              resolve(error);
+              return;
+            }
           }
-        } else {
-          if (contentType.includes("application/json")) {
+          let data;
+          const contentType = responseHeaders["content-type"] || "";
+          const responseType = config.responseType || fetchOptions.responseType || "auto";
+          if (responseType === "buffer" || responseType === "arrayBuffer") {
+            data = responseBody;
+          } else if (responseType === "text") {
+            data = responseBody.toString("utf-8");
+          } else if (responseType === "json" || responseType === "auto" && contentType.includes("application/json")) {
             try {
               data = JSON.parse(responseBody.toString("utf-8"));
             } catch {
               data = responseBody.toString("utf-8");
             }
           } else {
-            data = responseBody.toString("utf-8");
+            if (contentType.includes("application/json")) {
+              try {
+                data = JSON.parse(responseBody.toString("utf-8"));
+              } catch {
+                data = responseBody.toString("utf-8");
+              }
+            } else {
+              data = responseBody.toString("utf-8");
+            }
           }
-        }
-        config.status = status;
-        config.statusText = statusText;
-        _stats.statusOnNext = status >= 400 ? "error" : "success";
-        const responseCookies = config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] };
-        const mergedCookies = mergeRequestAndResponseCookies(config, responseCookies, url.href);
-        const finalResponse = {
-          data,
-          status,
-          statusText,
-          headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
-          cookies: mergedCookies,
-          config,
-          contentType,
-          contentLength: contentLengthCounter,
-          finalUrl: url.href,
-          urls: buildUrlTree(config, url.href)
-        };
-        if (downloadResult && fs && config.fileName) {
-          try {
-            fs.writeFileSync(config.fileName, responseBody);
-            const downloadFinishEvent = {
-              status,
-              statusText,
-              headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
-              contentType,
-              contentLength: responseBody.length,
-              finalUrl: url.href,
-              cookies: mergedCookies,
-              urls: buildUrlTree(config, url.href),
-              fileName: config.fileName,
-              fileSize: responseBody.length,
-              timing: {
-                total: config.timing.durationMs || 0,
-                dns: config.timing.dnsMs,
-                tcp: config.timing.tcpMs,
-                tls: config.timing.tlsMs,
-                firstByte: config.timing.ttfbMs,
-                download: config.timing.transferMs || 0
-              },
-              averageSpeed: config.timing.transferMs ? responseBody.length / config.timing.transferMs * 1000 : 0,
-              config: sanitizeConfig(config)
-            };
-            downloadResult.emit("finish", downloadFinishEvent);
-            downloadResult.emit("done", downloadFinishEvent);
-            downloadResult._markFinished();
-          } catch (err) {
-            const error = buildDownloadError({
-              statusCode: status,
-              headers: sanitizeHttp2Headers(responseHeaders),
-              contentType,
-              contentLength: String(contentLengthCounter),
-              cookies: config.responseCookies?.setCookiesString || [],
-              statusText: err.message,
-              url: url.href,
-              body: responseBody,
-              finalUrl: url.href,
-              config,
-              request: fetchOptions
-            });
-            downloadResult.emit("error", error);
-            resolve(error);
-            return;
-          }
-        }
-        if (streamResult) {
-          const streamFinishEvent = {
+          config.status = status;
+          config.statusText = statusText;
+          const _validateStatus = fetchOptions.validateStatus ?? ((s) => s >= 200 && s < 300);
+          _stats.statusOnNext = fetchOptions.validateStatus === null || _validateStatus(status) ? "success" : "error";
+          const responseCookies = config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] };
+          const mergedCookies = mergeRequestAndResponseCookies(config, responseCookies, url.href);
+          const finalResponse = {
+            data,
             status,
             statusText,
             headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
+            cookies: mergedCookies,
+            config,
             contentType,
             contentLength: contentLengthCounter,
             finalUrl: url.href,
-            cookies: config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] },
-            urls: buildUrlTree(config, url.href),
-            timing: {
-              total: config.timing.durationMs || 0,
-              dns: config.timing.dnsMs,
-              tcp: config.timing.tcpMs,
-              tls: config.timing.tlsMs,
-              firstByte: config.timing.ttfbMs,
-              download: config.timing.transferMs
-            },
-            config: sanitizeConfig(config)
+            urls: buildUrlTree(config, url.href)
           };
-          streamResult.emit("finish", streamFinishEvent);
-          streamResult.emit("done", streamFinishEvent);
-          streamResult.emit("end");
-          streamResult._markFinished();
-        }
-        if (uploadResult) {
-          const uploadFinishEvent = {
-            response: {
+          if (downloadResult && fs && config.fileName) {
+            try {
+              const { dirname } = await import("node:path");
+              const dir = dirname(config.fileName);
+              if (dir && dir !== ".")
+                fs.mkdirSync(dir, { recursive: true });
+              fs.writeFileSync(config.fileName, responseBody);
+              const downloadFinishEvent = {
+                status,
+                statusText,
+                headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
+                contentType,
+                contentLength: responseBody.length,
+                finalUrl: url.href,
+                cookies: mergedCookies,
+                urls: buildUrlTree(config, url.href),
+                fileName: config.fileName,
+                fileSize: responseBody.length,
+                timing: {
+                  ...getTimingDurations(config),
+                  download: getTimingDurations(config).download || 0
+                },
+                averageSpeed: getTimingDurations(config).download ? responseBody.length / getTimingDurations(config).download * 1000 : 0,
+                config: sanitizeConfig(config)
+              };
+              downloadResult.emit("finish", downloadFinishEvent);
+              downloadResult.emit("done", downloadFinishEvent);
+              downloadResult.emit("complete", downloadFinishEvent);
+              downloadResult._markFinished();
+            } catch (err) {
+              const error = buildDownloadError({
+                statusCode: status,
+                headers: sanitizeHttp2Headers(responseHeaders),
+                contentType,
+                contentLength: String(contentLengthCounter),
+                cookies: config.responseCookies?.setCookiesString || [],
+                statusText: err.message,
+                url: url.href,
+                body: responseBody,
+                finalUrl: url.href,
+                config,
+                request: fetchOptions
+              });
+              downloadResult.emit("error", error);
+              resolve(error);
+              return;
+            }
+          }
+          if (streamResult) {
+            const streamFinishEvent = {
               status,
               statusText,
               headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
-              data,
               contentType,
-              contentLength: contentLengthCounter
-            },
-            finalUrl: url.href,
-            cookies: config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] },
-            urls: buildUrlTree(config, url.href),
-            uploadSize: config.transfer.requestSize || 0,
-            timing: {
-              total: config.timing.durationMs || 0,
-              dns: config.timing.dnsMs,
-              tcp: config.timing.tcpMs,
-              tls: config.timing.tlsMs,
-              upload: config.timing.transferMs || 0,
-              waiting: config.timing.ttfbMs || 0,
-              download: config.timing.transferMs
-            },
-            averageUploadSpeed: config.timing.transferMs ? (config.transfer.requestSize || 0) / config.timing.transferMs * 1000 : 0,
-            averageDownloadSpeed: config.timing.transferMs ? contentLengthCounter / config.timing.transferMs * 1000 : 0,
-            config: sanitizeConfig(config)
-          };
-          uploadResult.emit("finish", uploadFinishEvent);
-          uploadResult.emit("done", uploadFinishEvent);
-          uploadResult._markFinished();
+              contentLength: contentLengthCounter,
+              finalUrl: url.href,
+              cookies: config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] },
+              urls: buildUrlTree(config, url.href),
+              timing: getTimingDurations(config),
+              config: sanitizeConfig(config)
+            };
+            streamResult.emit("finish", streamFinishEvent);
+            streamResult.emit("done", streamFinishEvent);
+            streamResult.emit("complete", streamFinishEvent);
+            streamResult._markFinished();
+          }
+          if (uploadResult) {
+            const uploadFinishEvent = {
+              response: {
+                status,
+                statusText,
+                headers: new RezoHeaders(sanitizeHttp2Headers(responseHeaders)),
+                data,
+                contentType,
+                contentLength: contentLengthCounter
+              },
+              finalUrl: url.href,
+              cookies: config.responseCookies || { array: [], serialized: [], netscape: "", string: "", setCookiesString: [] },
+              urls: buildUrlTree(config, url.href),
+              uploadSize: config.transfer.requestSize || 0,
+              timing: {
+                ...getTimingDurations(config),
+                upload: getTimingDurations(config).firstByte || 0,
+                waiting: getTimingDurations(config).download > 0 && getTimingDurations(config).firstByte > 0 ? getTimingDurations(config).download - getTimingDurations(config).firstByte : 0
+              },
+              averageUploadSpeed: getTimingDurations(config).firstByte && config.transfer.requestSize ? config.transfer.requestSize / getTimingDurations(config).firstByte * 1000 : 0,
+              averageDownloadSpeed: getTimingDurations(config).download ? contentLengthCounter / getTimingDurations(config).download * 1000 : 0,
+              config: sanitizeConfig(config)
+            };
+            uploadResult.emit("finish", uploadFinishEvent);
+            uploadResult.emit("done", uploadFinishEvent);
+            uploadResult.emit("complete", uploadFinishEvent);
+            uploadResult._markFinished();
+          }
+          resolve(finalResponse);
+        } catch (endError) {
+          if (config.debug) {
+            console.log(`[Rezo Debug] HTTP/2: Error in 'end' handler:`, endError.message);
+          }
+          (sessionPool || Http2SessionPool.getInstance()).releaseSession(url, fetchOptions.proxy);
+          const error = buildSmartError(config, fetchOptions, endError);
+          _stats.statusOnNext = "error";
+          resolve(error);
         }
-        resolve(finalResponse);
-      });
-      req.on("error", (err) => {
-        _stats.statusOnNext = "error";
-        (sessionPool || Http2SessionPool.getInstance()).releaseSession(url);
-        const error = buildSmartError(config, fetchOptions, err);
-        if (eventEmitter) {
-          eventEmitter.emit("error", error);
-        }
-        resolve(error);
       });
       if (body) {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Writing request body (type: ${body?.constructor?.name || typeof body})...`);
+        }
         if (body instanceof URLSearchParams || body instanceof RezoURLSearchParams) {
           req.write(body.toString());
         } else if (body instanceof FormData || body instanceof RezoFormData) {
-          if (body instanceof RezoFormData) {
-            body.pipe(req);
-            return;
+          const form = body instanceof RezoFormData ? body : RezoFormData.fromNativeFormData(body);
+          const buffer = await form.toBuffer();
+          if (uploadResult) {
+            const chunkSize = 16384;
+            const totalSize = buffer.length;
+            let written = 0;
+            const uploadStart = performance.now();
+            for (let offset = 0;offset < totalSize; offset += chunkSize) {
+              const end = Math.min(offset + chunkSize, totalSize);
+              const chunk = buffer.subarray(offset, end);
+              req.write(chunk);
+              written += chunk.length;
+              const now = performance.now();
+              const elapsed = now - uploadStart;
+              const speed = elapsed > 0 ? written / (elapsed / 1000) : 0;
+              uploadResult.emit("progress", {
+                loaded: written,
+                total: totalSize,
+                percentage: written / totalSize * 100,
+                speed,
+                averageSpeed: speed,
+                estimatedTime: speed > 0 ? (totalSize - written) / speed * 1000 : 0,
+                timestamp: now
+              });
+            }
           } else {
-            const form = fetchOptions._convertedFormData || await RezoFormData.fromNativeFormData(body);
-            form.pipe(req);
-            return;
+            req.write(buffer);
           }
-        } else if (typeof body === "object" && !(body instanceof Buffer) && !(body instanceof Uint8Array) && !(body instanceof Readable)) {
+        } else if (typeof body === "object" && !Buffer.isBuffer(body) && !(body instanceof Uint8Array) && !(body instanceof Readable)) {
           req.write(JSON.stringify(body));
         } else if (body instanceof Readable) {
+          if (config.debug) {
+            console.log(`[Rezo Debug] HTTP/2: Piping stream body...`);
+          }
           body.pipe(req);
           return;
         } else {
           req.write(body);
         }
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: Body written, calling req.end()...`);
+        }
+      } else {
+        if (config.debug) {
+          console.log(`[Rezo Debug] HTTP/2: No body, calling req.end()...`);
+        }
       }
       req.end();
+      if (config.debug) {
+        console.log(`[Rezo Debug] HTTP/2: req.end() called, waiting for response...`);
+      }
     } catch (error) {
       _stats.statusOnNext = "error";
       const rezoError = buildSmartError(config, fetchOptions, error);

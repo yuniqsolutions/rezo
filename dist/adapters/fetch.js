@@ -1,16 +1,16 @@
-import { URL } from "node:url";
 import { RezoError } from '../errors/rezo-error.js';
 import { buildSmartError, builErrorFromResponse, buildDownloadError } from '../responses/buildError.js';
-import { RezoCookieJar } from '../utils/cookies.js';
+import { RezoCookieJar } from '../cookies/index.js';
 import RezoFormData from '../utils/form-data.js';
-import { getDefaultConfig, prepareHTTPOptions } from '../utils/http-config.js';
+import { getDefaultConfig, prepareHTTPOptions, calculateRetryDelay, shouldRetry } from '../utils/http-config.js';
 import { RezoHeaders } from '../utils/headers.js';
 import { RezoURLSearchParams } from '../utils/data-operations.js';
-import { StreamResponse } from '../responses/stream.js';
-import { DownloadResponse } from '../responses/download.js';
-import { UploadResponse } from '../responses/upload.js';
+import { StreamResponse } from '../responses/universal/stream.js';
+import { DownloadResponse } from '../responses/universal/download.js';
+import { UploadResponse } from '../responses/universal/upload.js';
 import { isSameDomain, RezoPerformance } from '../utils/tools.js';
-import { ResponseCache } from '../cache/response-cache.js';
+import { ResponseCache } from '../cache/universal-response-cache.js';
+import { handleRateLimitWait, shouldWaitOnStatus } from '../utils/rate-limit-wait.js';
 const Environment = {
   isNode: typeof process !== "undefined" && process.versions?.node,
   isBrowser: typeof window !== "undefined" && typeof document !== "undefined",
@@ -18,6 +18,7 @@ const Environment = {
   isDeno: typeof globalThis.Deno !== "undefined",
   isBun: typeof globalThis.Bun !== "undefined",
   isEdgeRuntime: typeof globalThis.EdgeRuntime !== "undefined" || typeof globalThis.caches !== "undefined",
+  isCloudflareWorker: typeof globalThis.caches !== "undefined" && typeof globalThis.navigator !== "undefined" && globalThis.navigator?.userAgent === "Cloudflare-Workers",
   get hasFetch() {
     return typeof fetch !== "undefined";
   },
@@ -26,8 +27,131 @@ const Environment = {
   },
   get hasAbortController() {
     return typeof AbortController !== "undefined";
+  },
+  get canUseCookieJar() {
+    if (this.isBrowser || this.isWebWorker)
+      return false;
+    return !!(this.isNode || this.isBun || this.isDeno || this.isCloudflareWorker || this.isEdgeRuntime);
   }
 };
+const debugLog = {
+  requestStart: (config, url, method) => {
+    if (config.debug) {
+      console.log(`
+[Rezo Debug] ─────────────────────────────────────`);
+      console.log(`[Rezo Debug] ${method} ${url}`);
+      console.log(`[Rezo Debug] Request ID: ${config.requestId}`);
+      console.log(`[Rezo Debug] Adapter: fetch`);
+      if (config.originalRequest?.headers) {
+        const headers = config.originalRequest.headers instanceof RezoHeaders ? config.originalRequest.headers.toObject() : config.originalRequest.headers;
+        console.log(`[Rezo Debug] Request Headers:`, JSON.stringify(headers, null, 2));
+      }
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track] → ${method} ${url}`);
+    }
+  },
+  retry: (config, attempt, maxRetries, statusCode, delay) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Retry ${attempt}/${maxRetries} after status ${statusCode}${delay > 0 ? ` (waiting ${delay}ms)` : ""}`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ⟳ Retry ${attempt}/${maxRetries} (status ${statusCode})`);
+    }
+  },
+  maxRetries: (config, maxRetries) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Max retries (${maxRetries}) reached, throwing error`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ✗ Max retries reached`);
+    }
+  },
+  response: (config, status, statusText, duration) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Response: ${status} ${statusText} (${duration.toFixed(2)}ms)`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track] ✓ ${status} ${statusText}`);
+    }
+  },
+  responseHeaders: (config, headers) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Response Headers:`, JSON.stringify(headers, null, 2));
+    }
+  },
+  cookies: (config, cookieCount) => {
+    if (config.debug && cookieCount > 0) {
+      console.log(`[Rezo Debug] Cookies received: ${cookieCount}`);
+    }
+  },
+  timing: (config, timing) => {
+    if (config.debug) {
+      const parts = [];
+      if (timing.ttfb)
+        parts.push(`TTFB: ${timing.ttfb.toFixed(2)}ms`);
+      if (timing.total)
+        parts.push(`Total: ${timing.total.toFixed(2)}ms`);
+      if (parts.length > 0) {
+        console.log(`[Rezo Debug] Timing: ${parts.join(" | ")}`);
+      }
+    }
+  },
+  redirect: (config, fromUrl, toUrl, statusCode, method) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Redirect ${statusCode}: ${fromUrl}`);
+      console.log(`[Rezo Debug]        → ${toUrl} (${method})`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ↳ ${statusCode} → ${toUrl}`);
+    }
+  },
+  complete: (config, url, redirectCount, duration) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Complete: ${url}`);
+      if (redirectCount && redirectCount > 0) {
+        console.log(`[Rezo Debug] Redirects: ${redirectCount}`);
+      }
+      if (duration) {
+        console.log(`[Rezo Debug] Total Duration: ${duration.toFixed(2)}ms`);
+      }
+      console.log(`[Rezo Debug] ─────────────────────────────────────
+`);
+    }
+  },
+  error: (config, error) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Error: ${error instanceof Error ? error.message : error}`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ✗ Error: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+};
+function updateTiming(config, timing, bodySize) {
+  const now = performance.now();
+  config.timing.domainLookupStart = config.timing.startTime;
+  config.timing.domainLookupEnd = config.timing.startTime;
+  config.timing.connectStart = config.timing.startTime;
+  config.timing.secureConnectionStart = 0;
+  config.timing.connectEnd = config.timing.startTime;
+  config.timing.requestStart = config.timing.startTime;
+  config.timing.responseStart = timing.firstByteTime || config.timing.startTime;
+  config.timing.responseEnd = now;
+  config.transfer.bodySize = bodySize;
+  config.transfer.responseSize = bodySize;
+}
+function getTimingDurations(config) {
+  const t = config.timing;
+  return {
+    total: t.responseEnd - t.startTime,
+    dns: t.domainLookupEnd - t.domainLookupStart,
+    tcp: t.secureConnectionStart > 0 ? t.secureConnectionStart - t.connectStart : t.connectEnd - t.connectStart,
+    tls: t.secureConnectionStart > 0 ? t.connectEnd - t.secureConnectionStart : undefined,
+    firstByte: t.responseStart - t.startTime,
+    download: t.responseEnd - t.responseStart
+  };
+}
 const responseCacheInstances = new Map;
 function getCacheConfigKey(option) {
   if (option === true)
@@ -95,7 +219,15 @@ function buildUrlTree(config, finalUrl) {
     const urlStr = typeof config.url === "string" ? config.url : config.url.toString();
     urls.push(urlStr);
   }
-  if (finalUrl && (urls.length === 0 || urls[0] !== finalUrl)) {
+  if (config.redirectHistory && config.redirectHistory.length > 0) {
+    for (const redirect of config.redirectHistory) {
+      const redirectUrl = typeof redirect.url === "string" ? redirect.url : redirect.url?.toString?.() || "";
+      if (redirectUrl && urls[urls.length - 1] !== redirectUrl) {
+        urls.push(redirectUrl);
+      }
+    }
+  }
+  if (finalUrl && (urls.length === 0 || urls[urls.length - 1] !== finalUrl)) {
     urls.push(finalUrl);
   }
   return urls.length > 0 ? urls : [finalUrl];
@@ -105,7 +237,7 @@ function sanitizeConfig(config) {
   delete sanitized.data;
   return sanitized;
 }
-function parseCookiesFromHeaders(headers, url, config) {
+async function parseCookiesFromHeaders(headers, url, config) {
   let setCookieHeaders = [];
   if (typeof headers.getSetCookie === "function") {
     setCookieHeaders = headers.getSetCookie() || [];
@@ -125,13 +257,59 @@ function parseCookiesFromHeaders(headers, url, config) {
       setCookiesString: []
     };
   }
+  const tempJar = new RezoCookieJar;
+  tempJar.setCookiesSync(setCookieHeaders, url);
+  const parsedCookies = tempJar.cookies();
+  const acceptedCookies = [];
+  let hookError = null;
+  if (config?.hooks?.beforeCookie && config.hooks.beforeCookie.length > 0) {
+    for (const cookie of parsedCookies.array) {
+      let shouldAccept = true;
+      for (const hook of config.hooks.beforeCookie) {
+        try {
+          const result = await hook({
+            cookie,
+            source: "response",
+            url,
+            isValid: true
+          }, config);
+          if (result === false) {
+            shouldAccept = false;
+            break;
+          }
+        } catch (err) {
+          hookError = err;
+          if (config.debug) {
+            console.log("[Rezo Debug] beforeCookie hook error:", err);
+          }
+        }
+      }
+      if (shouldAccept) {
+        acceptedCookies.push(cookie);
+      }
+    }
+  } else {
+    acceptedCookies.push(...parsedCookies.array);
+  }
+  const acceptedCookieStrings = acceptedCookies.map((c) => c.toSetCookieString());
   const jar = new RezoCookieJar;
-  jar.setCookiesSync(setCookieHeaders, url);
-  if (config?.enableCookieJar && config?.cookieJar) {
-    config.cookieJar.setCookiesSync(setCookieHeaders, url);
+  jar.setCookiesSync(acceptedCookieStrings, url);
+  if (!config?.disableJar && config?.jar) {
+    config.jar.setCookiesSync(acceptedCookieStrings, url);
   }
   const cookies = jar.cookies();
   cookies.setCookiesString = setCookieHeaders;
+  if (!hookError && config?.hooks?.afterCookie && config.hooks.afterCookie.length > 0) {
+    for (const hook of config.hooks.afterCookie) {
+      try {
+        await hook(acceptedCookies, config);
+      } catch (err) {
+        if (config.debug) {
+          console.log("[Rezo Debug] afterCookie hook error:", err);
+        }
+      }
+    }
+  }
   return cookies;
 }
 function mergeRequestAndResponseCookies(config, responseCookies, url) {
@@ -163,7 +341,6 @@ function mergeRequestAndResponseCookies(config, responseCookies, url) {
     serialized: [],
     netscape: `# Netscape HTTP Cookie File
 # This file was generated by Rezo HTTP client
-# Based on uniqhtt cookie implementation
 `,
     string: "",
     setCookiesString: []
@@ -269,22 +446,35 @@ export async function executeRequest(options, defaultOptions, jar) {
   let downloadResponse;
   let uploadResponse;
   if (isStream) {
-    streamResponse = new StreamResponse;
+    streamResponse = options._streamResponse || new StreamResponse;
   } else if (isDownload) {
-    const fileName = options.fileName || options.saveTo || "";
-    const url = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
-    downloadResponse = new DownloadResponse(fileName, url);
+    downloadResponse = options._downloadResponse || (() => {
+      const fileName = options.fileName || options.saveTo || "";
+      const url = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
+      return new DownloadResponse(fileName, url);
+    })();
   } else if (isUpload) {
-    const url = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
-    uploadResponse = new UploadResponse(url);
+    uploadResponse = options._uploadResponse || (() => {
+      const url = typeof fetchOptions.url === "string" ? fetchOptions.url : fetchOptions.url?.toString() || "";
+      return new UploadResponse(url);
+    })();
   }
   try {
-    const res = executeFetchRequest(fetchOptions, mainConfig, options, perform, streamResponse, downloadResponse, uploadResponse);
+    const res = executeFetchRequest(fetchOptions, mainConfig, options, perform, streamResponse, downloadResponse, uploadResponse, jar);
     if (streamResponse) {
+      res.catch((err) => {
+        streamResponse.emit("error", err);
+      });
       return streamResponse;
     } else if (downloadResponse) {
+      res.catch((err) => {
+        downloadResponse.emit("error", err);
+      });
       return downloadResponse;
     } else if (uploadResponse) {
+      res.catch((err) => {
+        uploadResponse.emit("error", err);
+      });
       return uploadResponse;
     }
     const response = await res;
@@ -306,22 +496,25 @@ export async function executeRequest(options, defaultOptions, jar) {
     throw error;
   }
 }
-async function executeFetchRequest(fetchOptions, config, options, perform, streamResult, downloadResult, uploadResult) {
+async function executeFetchRequest(fetchOptions, config, options, perform, streamResult, downloadResult, uploadResult, rootJar) {
   let requestCount = 0;
   const _stats = { statusOnNext: "abort" };
-  let retries = 0;
-  const retryDelay = config?.retry?.retryDelay || 0;
-  const maxRetries = config?.retry?.maxRetries || 0;
-  const incrementDelay = config?.retry?.incrementDelay || false;
-  const statusCodes = config?.retry?.statusCodes;
+  let retryAttempt = 0;
+  const retryConfig = config?.retry;
+  const startTime = performance.now();
   const timing = {
-    startTime: performance.now(),
-    startTimestamp: Date.now()
+    startTime
   };
+  config.timing.startTime = startTime;
   const ABSOLUTE_MAX_ATTEMPTS = 50;
   const visitedUrls = new Set;
   let totalAttempts = 0;
   config.setSignal();
+  if (!config.requestId) {
+    config.requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+  }
+  const requestUrl = fetchOptions.fullUrl ? String(fetchOptions.fullUrl) : "";
+  debugLog.requestStart(config, requestUrl, fetchOptions.method || "GET");
   const eventEmitter = streamResult || downloadResult || uploadResult;
   if (eventEmitter) {
     eventEmitter.emit("initiated");
@@ -344,36 +537,73 @@ async function executeFetchRequest(fetchOptions, config, options, perform, strea
           duration: perform.now()
         });
         perform.reset();
-        if (!config.retry) {
+        if (!retryConfig) {
           throw response;
         }
-        if (config.retry) {
-          let shouldRetry = false;
-          if (config.retry.condition) {
-            const isPassed = await config.retry.condition(response);
-            shouldRetry = isPassed === true;
-          } else {
-            shouldRetry = statusCodes ? statusCodes.includes(response.status || 0) : true;
-          }
-          if (!shouldRetry || retries >= maxRetries) {
+        const method = fetchOptions.method || "GET";
+        retryAttempt++;
+        if (retryConfig.condition) {
+          const shouldContinue = await retryConfig.condition(response, retryAttempt);
+          if (shouldContinue === false) {
+            if (retryConfig.onRetryExhausted) {
+              await retryConfig.onRetryExhausted(response, retryAttempt);
+            }
             throw response;
           }
-          retries++;
-          config.retryAttempts++;
-          if (retryDelay > 0) {
-            await new Promise((resolve) => setTimeout(resolve, incrementDelay ? retryDelay * retries : retryDelay));
+        } else {
+          const canRetry = shouldRetry(response, retryAttempt, method, retryConfig);
+          if (!canRetry) {
+            if (retryAttempt > retryConfig.maxRetries && retryConfig.onRetryExhausted) {
+              await retryConfig.onRetryExhausted(response, retryAttempt);
+            }
+            throw response;
           }
+        }
+        config.retryAttempts++;
+        const currentDelay = calculateRetryDelay(retryAttempt, retryConfig.retryDelay, retryConfig.backoff, retryConfig.maxDelay);
+        if (retryConfig.onRetry) {
+          const shouldProceed = await retryConfig.onRetry(response, retryAttempt, currentDelay);
+          if (shouldProceed === false) {
+            throw response;
+          }
+        }
+        if (config.hooks?.beforeRetry && config.hooks.beforeRetry.length > 0) {
+          for (const hook of config.hooks.beforeRetry) {
+            await hook(config, response, retryAttempt);
+          }
+        }
+        if (currentDelay > 0) {
+          await new Promise((resolve) => setTimeout(resolve, currentDelay));
         }
         continue;
       }
       if (statusOnNext === "success") {
+        const totalDuration = performance.now() - timing.startTime;
+        debugLog.complete(config, response.finalUrl || requestUrl, config.redirectCount, totalDuration);
         return response;
       }
       if (statusOnNext === "error") {
+        if (shouldWaitOnStatus(response.status, options.waitOnStatus)) {
+          const rateLimitWaitAttempt = config._rateLimitWaitAttempt || 0;
+          const waitResult = await handleRateLimitWait({
+            status: response.status,
+            headers: response.headers,
+            data: response.data,
+            url: fetchOptions.fullUrl || fetchOptions.url?.toString() || "",
+            method: fetchOptions.method || "GET",
+            config,
+            options,
+            currentWaitAttempt: rateLimitWaitAttempt
+          });
+          if (waitResult.shouldRetry) {
+            config._rateLimitWaitAttempt = waitResult.waitAttempt;
+            continue;
+          }
+        }
         const httpError = builErrorFromResponse(`Request failed with status code ${response.status}`, response, config, fetchOptions);
-        if (config.retry && statusCodes?.includes(response.status)) {
-          if (maxRetries > retries) {
-            retries++;
+        if (retryConfig && retryConfig.statusCodes?.includes(response.status)) {
+          retryAttempt++;
+          if (retryAttempt <= retryConfig.maxRetries) {
             config.retryAttempts++;
             config.errors.push({
               attempt: config.retryAttempts,
@@ -381,11 +611,12 @@ async function executeFetchRequest(fetchOptions, config, options, perform, strea
               duration: perform.now()
             });
             perform.reset();
+            const currentDelay = calculateRetryDelay(retryAttempt, retryConfig.retryDelay, retryConfig.backoff, retryConfig.maxDelay);
             if (config.debug) {
-              console.log(`Request failed with status code ${response.status}, retrying...${retryDelay > 0 ? " in " + (incrementDelay ? retryDelay * retries : retryDelay) + "ms" : ""}`);
+              console.log(`Request failed with status code ${response.status}, retrying...${currentDelay > 0 ? " in " + currentDelay + "ms" : ""}`);
             }
-            if (retryDelay > 0) {
-              await new Promise((resolve) => setTimeout(resolve, incrementDelay ? retryDelay * retries : retryDelay));
+            if (currentDelay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, currentDelay));
             }
             continue;
           }
@@ -410,17 +641,36 @@ async function executeFetchRequest(fetchOptions, config, options, perform, strea
           visitedUrls.add(normalizedRedirectUrl);
         }
         const redirectCode = response.status;
-        const onRedirect = config.beforeRedirect ? config.beforeRedirect({
+        if (config.hooks?.beforeRedirect && config.hooks.beforeRedirect.length > 0) {
+          const redirectContext = {
+            redirectUrl: new URL(location),
+            fromUrl: fetchOptions.fullUrl,
+            status: response.status,
+            headers: response.headers,
+            sameDomain: isSameDomain(fetchOptions.fullUrl, location),
+            method: fetchOptions.method.toUpperCase(),
+            body: config.originalBody,
+            request: fetchOptions,
+            redirectCount: config.redirectCount,
+            timestamp: Date.now()
+          };
+          for (const hook of config.hooks.beforeRedirect) {
+            await hook(redirectContext, config, response);
+          }
+        }
+        const redirectCallback = config.beforeRedirect || config.onRedirect;
+        const onRedirect = redirectCallback ? redirectCallback({
           url: new URL(location),
           status: response.status,
           headers: response.headers,
           sameDomain: isSameDomain(fetchOptions.fullUrl, location),
-          method: fetchOptions.method.toUpperCase()
+          method: fetchOptions.method.toUpperCase(),
+          body: config.originalBody
         }) : undefined;
         if (typeof onRedirect !== "undefined") {
           if (typeof onRedirect === "boolean" && !onRedirect) {
             throw builErrorFromResponse("Redirect denied by user", response, config, fetchOptions);
-          } else if (typeof onRedirect === "object" && !onRedirect.redirect) {
+          } else if (typeof onRedirect === "object" && !onRedirect.redirect && !onRedirect.withoutBody && !("body" in onRedirect)) {
             throw builErrorFromResponse("Redirect denied by user", response, config, fetchOptions);
           }
         }
@@ -440,13 +690,85 @@ async function executeFetchRequest(fetchOptions, config, options, perform, strea
         });
         perform.reset();
         config.redirectCount++;
-        if (response.status === 301 || response.status === 302 || response.status === 303) {
-          if (config.treat302As303 !== false || response.status === 303) {
-            options.method = "GET";
+        const fromUrl = fetchOptions.fullUrl;
+        fetchOptions.fullUrl = location;
+        const normalizedRedirect = typeof onRedirect === "object" ? onRedirect.redirect || onRedirect.withoutBody || "body" in onRedirect : undefined;
+        if (typeof onRedirect === "object" && normalizedRedirect) {
+          let method;
+          const userMethod = onRedirect.method;
+          if (redirectCode === 301 || redirectCode === 302 || redirectCode === 303) {
+            method = userMethod || "GET";
+          } else {
+            method = userMethod || fetchOptions.method;
+          }
+          config.method = method;
+          options.method = method;
+          fetchOptions.method = method;
+          if (onRedirect.redirect && onRedirect.url) {
+            options.fullUrl = onRedirect.url;
+            fetchOptions.fullUrl = onRedirect.url;
+          }
+          if (onRedirect.withoutBody) {
             delete options.body;
+            delete fetchOptions.body;
+            config.originalBody = undefined;
+            if (fetchOptions.headers instanceof RezoHeaders) {
+              fetchOptions.headers.delete("Content-Type");
+              fetchOptions.headers.delete("Content-Length");
+            }
+          } else if ("body" in onRedirect) {
+            options.body = onRedirect.body;
+            fetchOptions.body = onRedirect.body;
+            config.originalBody = onRedirect.body;
+          } else if (redirectCode === 307 || redirectCode === 308) {
+            const methodUpper = method.toUpperCase();
+            if ((methodUpper === "POST" || methodUpper === "PUT" || methodUpper === "PATCH") && config.originalBody !== undefined) {
+              options.body = config.originalBody;
+              fetchOptions.body = config.originalBody;
+            }
+          } else {
+            delete options.body;
+            delete fetchOptions.body;
+            if (fetchOptions.headers instanceof RezoHeaders) {
+              fetchOptions.headers.delete("Content-Type");
+              fetchOptions.headers.delete("Content-Length");
+            }
+          }
+          debugLog.redirect(config, fromUrl, fetchOptions.fullUrl, redirectCode, method);
+          if (onRedirect.redirect && onRedirect.setHeaders) {
+            if (fetchOptions.headers instanceof RezoHeaders) {
+              for (const [key, value] of Object.entries(onRedirect.setHeaders)) {
+                fetchOptions.headers.set(key, value);
+              }
+            }
+          }
+        } else if (redirectCode === 301 || redirectCode === 302 || redirectCode === 303) {
+          debugLog.redirect(config, fromUrl, fetchOptions.fullUrl, redirectCode, "GET");
+          options.method = "GET";
+          fetchOptions.method = "GET";
+          config.method = "GET";
+          delete options.body;
+          delete fetchOptions.body;
+          if (fetchOptions.headers instanceof RezoHeaders) {
+            fetchOptions.headers.delete("Content-Type");
+            fetchOptions.headers.delete("Content-Length");
+          }
+        } else {
+          debugLog.redirect(config, fromUrl, fetchOptions.fullUrl, redirectCode, fetchOptions.method);
+        }
+        const jarToSync = rootJar || config.jar;
+        if (response.cookies?.array?.length > 0 && jarToSync) {
+          try {
+            jarToSync.setCookiesSync(response.cookies.array, fromUrl);
+          } catch (e) {}
+        }
+        if (Environment.canUseCookieJar && jarToSync) {
+          const redirectUrl = fetchOptions.fullUrl || "";
+          const cookiesString = jarToSync.getCookieHeader(redirectUrl);
+          if (cookiesString && fetchOptions.headers instanceof RezoHeaders) {
+            fetchOptions.headers.set("Cookie", cookiesString);
           }
         }
-        fetchOptions.fullUrl = location;
         delete options.params;
         requestCount++;
         continue;
@@ -471,7 +793,6 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
       config.finalUrl = url.href;
       config.network.protocol = isSecure ? "https" : "http";
       config.network.httpVersion = undefined;
-      config.timing.startTimestamp = timing.startTimestamp;
       if (!config.transfer) {
         config.transfer = { requestSize: 0, responseSize: 0, headerSize: 0, bodySize: 0 };
       } else if (config.transfer.requestSize === undefined) {
@@ -504,9 +825,22 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
         abortController.abort();
         if (timeoutId)
           clearTimeout(timeoutId);
+        if (config.hooks?.onAbort && config.hooks.onAbort.length > 0) {
+          for (const hook of config.hooks.onAbort) {
+            try {
+              hook({
+                reason: "signal",
+                message: "Request aborted by signal",
+                url: url.toString(),
+                elapsed: performance.now() - timing.startTime,
+                timestamp: Date.now()
+              }, config);
+            } catch {}
+          }
+        }
       });
     }
-    if (body instanceof RezoFormData) {
+    if (body instanceof RezoFormData && typeof body.getContentType === "function") {
       const contentType = body.getContentType();
       if (contentType && !headers.has("content-type")) {
         headers.set("content-type", contentType);
@@ -520,19 +854,23 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
         config.transfer.requestSize = body.byteLength || body.length;
       } else if (body instanceof URLSearchParams || body instanceof RezoURLSearchParams) {
         config.transfer.requestSize = body.toString().length;
-      } else if (body instanceof RezoFormData) {
-        config.transfer.requestSize = body.getLengthSync();
+      } else if (body instanceof RezoFormData && typeof body.getLengthSync === "function") {
+        const len = body.getLengthSync();
+        if (len !== undefined) {
+          config.transfer.requestSize = len;
+        }
       } else if (typeof body === "object" && !(body instanceof Blob) && !(body instanceof ReadableStream)) {
         config.transfer.requestSize = JSON.stringify(body).length;
       }
     }
+    const credentials = Environment.canUseCookieJar ? "omit" : config.withCredentials !== false ? "include" : "omit";
     const fetchInit = {
       method: fetchOptions.method.toUpperCase(),
       headers,
       body: preparedBody,
       signal: abortController.signal,
       redirect: "manual",
-      credentials: config.enableCookieJar ? "include" : "same-origin"
+      credentials
     };
     let response;
     try {
@@ -541,6 +879,20 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
       if (timeoutId)
         clearTimeout(timeoutId);
       if (err.name === "AbortError") {
+        if (config.hooks?.onTimeout && config.hooks.onTimeout.length > 0) {
+          const elapsed = performance.now() - timing.startTime;
+          for (const hook of config.hooks.onTimeout) {
+            try {
+              hook({
+                type: "request",
+                timeout: config.timeout || 0,
+                elapsed,
+                url: url.toString(),
+                timestamp: Date.now()
+              }, config);
+            } catch {}
+          }
+        }
         const error = buildSmartError(config, fetchOptions, new Error(`Request timeout after ${config.timeout}ms`));
         _stats.statusOnNext = "error";
         return error;
@@ -550,22 +902,26 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
       if (timeoutId)
         clearTimeout(timeoutId);
     }
-    if (!config.timing.ttfbMs) {
+    if (!timing.firstByteTime) {
       timing.firstByteTime = performance.now();
-      config.timing.ttfbMs = timing.firstByteTime - timing.startTime;
+      config.timing.responseStart = timing.firstByteTime;
     }
     const status = response.status;
     const statusText = response.statusText;
     const responseHeaders = fromFetchHeaders(response.headers);
     const contentType = response.headers.get("content-type") || "";
     const contentLength = response.headers.get("content-length");
-    const cookies = parseCookiesFromHeaders(response.headers, url.href, config);
+    const cookies = await parseCookiesFromHeaders(response.headers, url.href, config);
     config.responseCookies = cookies;
     const location = response.headers.get("location");
     const isRedirect = status >= 300 && status < 400 && location;
     if (isRedirect) {
       _stats.statusOnNext = "redirect";
-      _stats.redirectUrl = new URL(location, url).href;
+      const redirectUrlObj = new URL(location, url);
+      if (!redirectUrlObj.hash && url.hash) {
+        redirectUrlObj.hash = url.hash;
+      }
+      _stats.redirectUrl = redirectUrlObj.href;
       const partialResponse = {
         data: "",
         status,
@@ -589,8 +945,8 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
         contentLength: contentLength ? parseInt(contentLength, 10) : undefined,
         cookies: cookies.array,
         timing: {
-          firstByte: config.timing.ttfbMs,
-          total: performance.now() - timing.startTime
+          firstByte: config.timing.responseStart - config.timing.startTime,
+          total: performance.now() - config.timing.startTime
         }
       };
       eventEmitter.emit("headers", headersEvent);
@@ -604,14 +960,36 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
         uploadResult.statusText = statusText;
       }
     }
+    if (config.hooks?.afterHeaders && config.hooks.afterHeaders.length > 0) {
+      const ttfb = config.timing.responseStart - config.timing.startTime;
+      const headersReceivedEvent = {
+        status,
+        statusText,
+        headers: responseHeaders,
+        contentType,
+        contentLength: contentLength ? parseInt(contentLength, 10) : undefined,
+        cookies: cookies.array,
+        timing: {
+          firstByte: ttfb,
+          total: performance.now() - config.timing.startTime
+        }
+      };
+      for (const hook of config.hooks.afterHeaders) {
+        await hook(headersReceivedEvent, config);
+      }
+    }
     if (streamResult && response.body) {
-      handleStreamingResponse(response, config, timing, streamResult, url, status, statusText, responseHeaders, cookies);
+      await handleStreamingResponse(response, config, timing, streamResult, url, status, statusText, responseHeaders, cookies);
       return {};
     }
     let responseData;
     let bodyBuffer;
     const responseType = config.responseType || fetchOptions.responseType || "auto";
-    if (responseType === "buffer" || responseType === "arrayBuffer") {
+    const isDownloadMode = !!(downloadResult && config.fileName);
+    if (isDownloadMode) {
+      bodyBuffer = await response.arrayBuffer();
+      responseData = Environment.isNode ? Buffer.from(bodyBuffer) : bodyBuffer;
+    } else if (responseType === "buffer" || responseType === "arrayBuffer") {
       bodyBuffer = await response.arrayBuffer();
       responseData = Environment.isNode ? Buffer.from(bodyBuffer) : bodyBuffer;
     } else if (responseType === "blob") {
@@ -635,16 +1013,21 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
         responseData = await response.text();
       }
     }
-    config.timing.endTimestamp = Date.now();
-    config.timing.durationMs = performance.now() - timing.startTime;
-    config.timing.transferMs = timing.firstByteTime ? performance.now() - timing.firstByteTime : config.timing.durationMs;
     const bodySize = bodyBuffer?.byteLength || (typeof responseData === "string" ? responseData.length : 0);
-    config.transfer.bodySize = bodySize;
-    config.transfer.responseSize = bodySize;
+    updateTiming(config, timing, bodySize);
     config.status = status;
     config.statusText = statusText;
-    _stats.statusOnNext = status >= 400 ? "error" : "success";
+    const _validateStatus = fetchOptions.validateStatus ?? ((s) => s >= 200 && s < 300);
+    _stats.statusOnNext = fetchOptions.validateStatus === null || _validateStatus(status) ? "success" : "error";
     const mergedCookies = mergeRequestAndResponseCookies(config, cookies, url.href);
+    const duration = performance.now() - timing.startTime;
+    debugLog.response(config, status, statusText, duration);
+    debugLog.responseHeaders(config, responseHeaders.toObject());
+    debugLog.cookies(config, mergedCookies.array.length);
+    debugLog.timing(config, {
+      ttfb: timing.firstByteTime ? timing.firstByteTime - timing.startTime : undefined,
+      total: duration
+    });
     const finalResponse = {
       data: responseData,
       status,
@@ -660,6 +1043,10 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
     if (downloadResult && config.fileName && Environment.isNode) {
       try {
         const fs = await import("node:fs");
+        const { dirname } = await import("node:path");
+        const dir = dirname(config.fileName);
+        if (dir && dir !== ".")
+          fs.mkdirSync(dir, { recursive: true });
         const buffer = bodyBuffer ? Buffer.from(bodyBuffer) : Buffer.from(responseData);
         fs.writeFileSync(config.fileName, buffer);
         const downloadFinishEvent = {
@@ -674,18 +1061,15 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
           fileName: config.fileName,
           fileSize: buffer.length,
           timing: {
-            total: config.timing.durationMs || 0,
-            dns: config.timing.dnsMs,
-            tcp: config.timing.tcpMs,
-            tls: config.timing.tlsMs,
-            firstByte: config.timing.ttfbMs,
-            download: config.timing.transferMs || 0
+            ...getTimingDurations(config),
+            download: getTimingDurations(config).download || 0
           },
-          averageSpeed: config.timing.transferMs ? buffer.length / config.timing.transferMs * 1000 : 0,
+          averageSpeed: getTimingDurations(config).download ? buffer.length / getTimingDurations(config).download * 1000 : 0,
           config: sanitizeConfig(config)
         };
         downloadResult.emit("finish", downloadFinishEvent);
         downloadResult.emit("done", downloadFinishEvent);
+        downloadResult.emit("complete", downloadFinishEvent);
         downloadResult._markFinished();
       } catch (err) {
         const error = buildDownloadError({
@@ -720,20 +1104,17 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
         urls: buildUrlTree(config, url.href),
         uploadSize: config.transfer.requestSize || 0,
         timing: {
-          total: config.timing.durationMs || 0,
-          dns: config.timing.dnsMs,
-          tcp: config.timing.tcpMs,
-          tls: config.timing.tlsMs,
-          upload: config.timing.transferMs || 0,
-          waiting: config.timing.ttfbMs || 0,
-          download: config.timing.transferMs
+          ...getTimingDurations(config),
+          upload: getTimingDurations(config).firstByte || 0,
+          waiting: getTimingDurations(config).download > 0 && getTimingDurations(config).firstByte > 0 ? getTimingDurations(config).download - getTimingDurations(config).firstByte : 0
         },
-        averageUploadSpeed: config.timing.transferMs ? (config.transfer.requestSize || 0) / config.timing.transferMs * 1000 : 0,
-        averageDownloadSpeed: config.timing.transferMs ? bodySize / config.timing.transferMs * 1000 : 0,
+        averageUploadSpeed: getTimingDurations(config).firstByte && config.transfer.requestSize ? config.transfer.requestSize / getTimingDurations(config).firstByte * 1000 : 0,
+        averageDownloadSpeed: getTimingDurations(config).download ? bodySize / getTimingDurations(config).download * 1000 : 0,
         config: sanitizeConfig(config)
       };
       uploadResult.emit("finish", uploadFinishEvent);
       uploadResult.emit("done", uploadFinishEvent);
+      uploadResult.emit("complete", uploadFinishEvent);
       uploadResult._markFinished();
     }
     return finalResponse;
@@ -777,11 +1158,7 @@ async function handleStreamingResponse(response, config, timing, streamResult, u
         streamResult.emit("download-progress", progressEvent);
       }
     }
-    config.timing.endTimestamp = Date.now();
-    config.timing.durationMs = performance.now() - timing.startTime;
-    config.timing.transferMs = timing.firstByteTime ? performance.now() - timing.firstByteTime : config.timing.durationMs;
-    config.transfer.bodySize = bytesReceived;
-    config.transfer.responseSize = bytesReceived;
+    updateTiming(config, timing, bytesReceived);
     const streamFinishEvent = {
       status,
       statusText,
@@ -791,21 +1168,18 @@ async function handleStreamingResponse(response, config, timing, streamResult, u
       finalUrl: url.href,
       cookies,
       urls: buildUrlTree(config, url.href),
-      timing: {
-        total: config.timing.durationMs || 0,
-        dns: config.timing.dnsMs,
-        tcp: config.timing.tcpMs,
-        tls: config.timing.tlsMs,
-        firstByte: config.timing.ttfbMs,
-        download: config.timing.transferMs
-      },
+      timing: getTimingDurations(config),
       config: sanitizeConfig(config)
     };
     streamResult.emit("finish", streamFinishEvent);
     streamResult.emit("done", streamFinishEvent);
+    streamResult.emit("complete", streamFinishEvent);
     streamResult.emit("end");
     streamResult._markFinished();
   } catch (err) {
+    if (config.debug) {
+      console.log("[Rezo Debug] Fetch stream error:", err.message, err.stack);
+    }
     streamResult.emit("error", buildSmartError(config, {}, err));
   }
 }

@@ -4,9 +4,9 @@ const tls = require("node:tls");
 const { URL } = require("node:url");
 const { Readable } = require("node:stream");
 const { RezoError } = require('../errors/rezo-error.cjs');
-const { RezoCookieJar } = require('../utils/cookies.cjs');
+const { RezoCookieJar } = require('../cookies/index.cjs');
 const RezoHeaders = require('../utils/headers.cjs');
-const { getDefaultConfig, prepareHTTPOptions } = require('../utils/http-config.cjs');
+const { getDefaultConfig, prepareHTTPOptions, calculateRetryDelay, shouldRetry } = require('../utils/http-config.cjs');
 const { RezoURLSearchParams } = require('../utils/data-operations.cjs');
 const RezoFormData = require('../utils/form-data.cjs');
 const { rezoProxy } = require('../proxy/index.cjs');
@@ -19,7 +19,105 @@ const { buildDownloadError, buildDecompressionError, buildSmartError, builErrorF
 const { isSameDomain, RezoPerformance } = require('../utils/tools.cjs');
 const { getGlobalDNSCache } = require('../cache/dns-cache.cjs');
 const { ResponseCache } = require('../cache/response-cache.cjs');
-const dns = require("dns");
+const { getGlobalAgentPool } = require('../utils/agent-pool.cjs');
+const { buildTlsOptions } = require('../stealth/tls-fingerprint.cjs');
+const { StagedTimeoutManager, parseStagedTimeouts } = require('../utils/staged-timeout.cjs');
+const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
+const { getSocketTelemetry, beginRequestContext } = require('../utils/socket-telemetry.cjs');
+const dns = require("node:dns");
+const { bunHttp, isBunRuntime, isBunSocksRequest } = require('../internal/agents/bun-socks-http.cjs');
+const debugLog = {
+  requestStart: (config, url, method) => {
+    if (config.debug) {
+      console.log(`
+[Rezo Debug] ─────────────────────────────────────`);
+      console.log(`[Rezo Debug] ${method} ${url}`);
+      console.log(`[Rezo Debug] Request ID: ${config.requestId}`);
+      if (config.originalRequest?.headers) {
+        const headers = config.originalRequest.headers instanceof RezoHeaders ? config.originalRequest.headers.toObject() : config.originalRequest.headers;
+        console.log(`[Rezo Debug] Request Headers:`, JSON.stringify(headers, null, 2));
+      }
+      if (config.proxy && typeof config.proxy === "object") {
+        console.log(`[Rezo Debug] Proxy: ${config.proxy.protocol}://${config.proxy.host}:${config.proxy.port}`);
+      } else if (config.proxy && typeof config.proxy === "string") {
+        console.log(`[Rezo Debug] Proxy: ${config.proxy}`);
+      }
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track] → ${method} ${url}`);
+    }
+  },
+  redirect: (config, fromUrl, toUrl, statusCode, method) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Redirect ${statusCode}: ${fromUrl}`);
+      console.log(`[Rezo Debug]        → ${toUrl} (${method})`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ↳ ${statusCode} → ${toUrl}`);
+    }
+  },
+  retry: (config, attempt, maxRetries, statusCode, delay) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Retry ${attempt}/${maxRetries} after status ${statusCode}${delay > 0 ? ` (waiting ${delay}ms)` : ""}`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ⟳ Retry ${attempt}/${maxRetries} (status ${statusCode})`);
+    }
+  },
+  maxRetries: (config, maxRetries) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Max retries (${maxRetries}) reached, throwing error`);
+    } else if (config.trackUrl) {
+      console.log(`[Rezo Track]   ✗ Max retries reached`);
+    }
+  },
+  response: (config, status, statusText, duration) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Response: ${status} ${statusText} (${duration.toFixed(2)}ms)`);
+    } else if (config.trackUrl) {
+      console.log(`[Rezo Track] ✓ ${status} ${statusText}`);
+    }
+  },
+  responseHeaders: (config, headers) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Response Headers:`, JSON.stringify(headers, null, 2));
+    }
+  },
+  cookies: (config, cookieCount) => {
+    if (config.debug && cookieCount > 0) {
+      console.log(`[Rezo Debug] Cookies received: ${cookieCount}`);
+    }
+  },
+  timing: (config, timing) => {
+    if (config.debug) {
+      const parts = [];
+      if (timing.dns)
+        parts.push(`DNS: ${timing.dns.toFixed(2)}ms`);
+      if (timing.connect)
+        parts.push(`Connect: ${timing.connect.toFixed(2)}ms`);
+      if (timing.tls)
+        parts.push(`TLS: ${timing.tls.toFixed(2)}ms`);
+      if (timing.ttfb)
+        parts.push(`TTFB: ${timing.ttfb.toFixed(2)}ms`);
+      if (timing.total)
+        parts.push(`Total: ${timing.total.toFixed(2)}ms`);
+      if (parts.length > 0) {
+        console.log(`[Rezo Debug] Timing: ${parts.join(" | ")}`);
+      }
+    }
+  },
+  complete: (config, finalUrl, redirectCount, duration) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Complete: ${finalUrl}`);
+      if (redirectCount > 0) {
+        console.log(`[Rezo Debug] Redirects: ${redirectCount}`);
+      }
+      console.log(`[Rezo Debug] Total Duration: ${duration.toFixed(2)}ms`);
+      console.log(`[Rezo Debug] ─────────────────────────────────────
+`);
+    }
+  }
+};
 const responseCacheInstances = new Map;
 function getCacheConfigKey(option) {
   if (option === true)
@@ -40,6 +138,10 @@ function getResponseCache(option) {
   let cache = responseCacheInstances.get(key);
   if (!cache) {
     cache = new ResponseCache(option);
+    const existing = responseCacheInstances.get(key);
+    if (existing) {
+      return existing;
+    }
     responseCacheInstances.set(key, cache);
   }
   return cache;
@@ -87,7 +189,15 @@ function buildUrlTree(config, finalUrl) {
     const urlStr = typeof config.url === "string" ? config.url : config.url.toString();
     urls.push(urlStr);
   }
-  if (finalUrl && (urls.length === 0 || urls[0] !== finalUrl)) {
+  if (config.redirectHistory && config.redirectHistory.length > 0) {
+    for (const redirect of config.redirectHistory) {
+      const redirectUrl = typeof redirect.url === "string" ? redirect.url : redirect.url?.toString?.() || "";
+      if (redirectUrl && urls[urls.length - 1] !== redirectUrl) {
+        urls.push(redirectUrl);
+      }
+    }
+  }
+  if (finalUrl && (urls.length === 0 || urls[urls.length - 1] !== finalUrl)) {
     urls.push(finalUrl);
   }
   return urls.length > 0 ? urls : [finalUrl];
@@ -112,8 +222,10 @@ async function executeRequest(options, defaultOptions, jar) {
         port: selectedProxy.port,
         auth: selectedProxy.auth
       };
-    } else if (proxyManager.config.failWithoutProxy) {
-      throw new RezoError("No proxy available: All proxies exhausted or URL did not match whitelist/blacklist", mainConfig, "UNQ_NO_PROXY_AVAILABLE", config.fetchOptions);
+    } else if (proxyManager.shouldProxy(requestUrl) && !proxyManager.hasAvailableProxies() && proxyManager.config.failWithoutProxy) {
+      const noProxyError = new RezoError("No proxy available: All proxies in the pool are exhausted, disabled, or in cooldown", mainConfig, "REZ_NO_PROXY_AVAILABLE", config.fetchOptions);
+      proxyManager.notifyNoProxiesAvailable(requestUrl, noProxyError);
+      throw noProxyError;
     }
   }
   const cacheOption = options.cache;
@@ -152,22 +264,26 @@ async function executeRequest(options, defaultOptions, jar) {
   const isStream = options.responseType === "stream" || options._isStream;
   const isDownload = options.responseType === "download" || !!options.fileName || !!options.saveTo || options._isDownload;
   const isUpload = options.responseType === "upload" || options._isUpload;
-  if (isUpload && !config.config.data) {
+  if (isUpload && !config.config.data && !config.fetchOptions.body) {
     throw RezoError.fromError(new Error("Upload response type requires a request body (data or body)"), mainConfig, config.fetchOptions);
   }
   let streamResponse;
   let downloadResponse;
   let uploadResponse;
   if (isStream) {
-    streamResponse = new StreamResponse;
+    streamResponse = options._streamResponse || new StreamResponse;
   } else if (isDownload) {
-    const fileName = options.fileName || options.saveTo;
-    const url = typeof config.fetchOptions.url === "string" ? config.fetchOptions.url : config.fetchOptions.url.toString();
-    downloadResponse = new DownloadResponse(fileName, url);
+    downloadResponse = options._downloadResponse || (() => {
+      const fileName = options.fileName || options.saveTo;
+      const url = typeof config.fetchOptions.url === "string" ? config.fetchOptions.url : config.fetchOptions.url.toString();
+      return new DownloadResponse(fileName, url);
+    })();
   } else if (isUpload) {
-    const fileName = typeof options.body === "string" ? undefined : options.body?.name;
-    const url = typeof config.fetchOptions.url === "string" ? config.fetchOptions.url : config.fetchOptions.url.toString();
-    uploadResponse = new UploadResponse(url, fileName);
+    uploadResponse = options._uploadResponse || (() => {
+      const fileName = typeof options.body === "string" ? undefined : options.body?.name;
+      const url = typeof config.fetchOptions.url === "string" ? config.fetchOptions.url : config.fetchOptions.url.toString();
+      return new UploadResponse(url, fileName);
+    })();
   }
   if (proxyManager && selectedProxy) {
     if (streamResponse) {
@@ -194,12 +310,21 @@ async function executeRequest(options, defaultOptions, jar) {
     }
   }
   try {
-    const res = executeHttp1Request(config.fetchOptions, mainConfig, config.options, perform, d_options.fs, streamResponse, downloadResponse, uploadResponse);
+    const res = executeHttp1Request(config.fetchOptions, mainConfig, config.options, perform, d_options.fs, streamResponse, downloadResponse, uploadResponse, jar);
     if (streamResponse) {
+      res.catch((err) => {
+        streamResponse.emit("error", err);
+      });
       return streamResponse;
     } else if (downloadResponse) {
+      res.catch((err) => {
+        downloadResponse.emit("error", err);
+      });
       return downloadResponse;
     } else if (uploadResponse) {
+      res.catch((err) => {
+        uploadResponse.emit("error", err);
+      });
       return uploadResponse;
     }
     const response = await res;
@@ -223,19 +348,34 @@ async function executeRequest(options, defaultOptions, jar) {
   } catch (error) {
     if (proxyManager && selectedProxy) {
       proxyManager.reportFailure(selectedProxy, error);
+      if (proxyManager.config.retryWithNextProxy) {
+        const maxRetries = proxyManager.config.maxProxyRetries ?? 3;
+        const attempt = (mainConfig._proxyRetryCount ?? 0) + 1;
+        if (attempt <= maxRetries) {
+          mainConfig._proxyRetryCount = attempt;
+          const retryUrl = typeof config.fetchOptions.url === "string" ? config.fetchOptions.url : config.fetchOptions.url?.toString() || "";
+          const nextProxy = proxyManager.next(retryUrl);
+          if (nextProxy) {
+            options.proxy = {
+              protocol: nextProxy.protocol,
+              host: nextProxy.host,
+              port: nextProxy.port,
+              auth: nextProxy.auth
+            };
+            return executeRequest(options, defaultOptions, jar);
+          }
+        }
+      }
     }
     throw error;
   }
 }
-async function executeHttp1Request(fetchOptions, config, options, perform, fs, streamResult, downloadResult, uploadResult) {
+async function executeHttp1Request(fetchOptions, config, options, perform, fs, streamResult, downloadResult, uploadResult, rootJar) {
   let requestCount = 0;
   const _stats = { statusOnNext: "abort" };
   let responseStatusCode;
-  let retries = 0;
-  const retryDelay = config?.retry?.retryDelay || 0;
-  const maxRetries = config?.retry?.maxRetries || 0;
-  const incrementDelay = config?.retry?.incrementDelay || false;
-  const statusCodes = config?.retry?.statusCodes;
+  let retryAttempt = 0;
+  const retryConfig = config?.retry;
   const timing = {
     startTime: performance.now(),
     startTimestamp: Date.now()
@@ -244,8 +384,13 @@ async function executeHttp1Request(fetchOptions, config, options, perform, fs, s
   const visitedUrls = new Set;
   let totalAttempts = 0;
   config.setSignal();
-  const timeoutClearInstanse = config.timeoutClearInstanse;
-  delete config.timeoutClearInstanse;
+  const timeoutClearInstance = config.timeoutClearInstance;
+  delete config.timeoutClearInstance;
+  if (!config.requestId) {
+    config.requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+  }
+  const requestUrl = fetchOptions.fullUrl ? String(fetchOptions.fullUrl) : "";
+  debugLog.requestStart(config, requestUrl, fetchOptions.method || "GET");
   const eventEmitter = streamResult || downloadResult || uploadResult;
   if (eventEmitter) {
     eventEmitter.emit("initiated");
@@ -257,7 +402,7 @@ async function executeHttp1Request(fetchOptions, config, options, perform, fs, s
       throw error;
     }
     try {
-      const response = await request(config, fetchOptions, requestCount, timing, _stats, responseStatusCode, fs, streamResult, downloadResult, uploadResult);
+      const response = await request(config, fetchOptions, requestCount, timing, _stats, responseStatusCode, fs, streamResult, downloadResult, uploadResult, rootJar);
       const statusOnNext = _stats.statusOnNext;
       if (response instanceof RezoError) {
         const fileName = config.fileName;
@@ -270,79 +415,151 @@ async function executeHttp1Request(fetchOptions, config, options, perform, fs, s
           duration: perform.now()
         });
         perform.reset();
-        if (!responseStatusCode || !config.retry) {
+        if (!retryConfig) {
           throw response;
         }
-        if (config.retry) {
-          if (config.retry.condition) {
-            const isPassed = await config.retry.condition(response);
-            if (typeof isPassed === "boolean" && isPassed === false) {
-              throw response;
+        const method = fetchOptions.method || "GET";
+        retryAttempt++;
+        if (retryConfig.condition) {
+          const shouldContinue = await retryConfig.condition(response, retryAttempt);
+          if (shouldContinue === false) {
+            if (retryConfig.onRetryExhausted) {
+              await retryConfig.onRetryExhausted(response, retryAttempt);
             }
-          } else {
-            if (!statusCodes.includes(responseStatusCode)) {
-              throw response;
-            }
-            if (maxRetries <= retries) {
-              if (config.debug) {
-                console.log(`Max retries (${maxRetries}) reached, throwing the last error`);
-              }
-              throw response;
-            }
-            retries++;
-            if (config.debug) {
-              console.log(`Request failed with status code ${responseStatusCode}, retrying...${retryDelay > 0 ? " in " + (incrementDelay ? retryDelay * retries : retryDelay) + "ms" : ""}`);
-            }
-            if (retryDelay > 0) {
-              await new Promise((resolve) => setTimeout(resolve, incrementDelay ? retryDelay * retries : retryDelay));
-            }
+            throw response;
           }
-          config.retryAttempts++;
+        } else {
+          const canRetry = shouldRetry(response, retryAttempt, method, retryConfig);
+          if (!canRetry) {
+            if (retryAttempt > retryConfig.maxRetries) {
+              debugLog.maxRetries(config, retryConfig.maxRetries);
+              if (retryConfig.onRetryExhausted) {
+                await retryConfig.onRetryExhausted(response, retryAttempt);
+              }
+            }
+            throw response;
+          }
         }
+        const currentDelay = calculateRetryDelay(retryAttempt, retryConfig.retryDelay, retryConfig.backoff, retryConfig.maxDelay);
+        debugLog.retry(config, retryAttempt, retryConfig.maxRetries, responseStatusCode || 0, currentDelay);
+        if (retryConfig.onRetry) {
+          const shouldProceed = await retryConfig.onRetry(response, retryAttempt, currentDelay);
+          if (shouldProceed === false) {
+            throw response;
+          }
+        }
+        if (config.hooks?.beforeRetry && config.hooks.beforeRetry.length > 0) {
+          for (const hook of config.hooks.beforeRetry) {
+            await hook(config, response, retryAttempt);
+          }
+        }
+        if (currentDelay > 0) {
+          await new Promise((resolve) => setTimeout(resolve, currentDelay));
+        }
+        config.retryAttempts++;
         continue;
       }
       if (statusOnNext === "success") {
+        const totalDuration = performance.now() - timing.startTime;
+        debugLog.response(config, response.status, response.statusText, totalDuration);
+        if (response.headers) {
+          const headersObj = response.headers instanceof RezoHeaders ? response.headers.toObject() : response.headers;
+          debugLog.responseHeaders(config, headersObj);
+        }
+        if (response.cookies?.array) {
+          debugLog.cookies(config, response.cookies.array.length);
+        }
+        debugLog.complete(config, response.finalUrl || requestUrl, config.redirectCount, totalDuration);
         return response;
       }
       if (statusOnNext === "redirect") {
         const addedOptions = {};
         const location = _stats.redirectUrl;
         if (!location || !_stats.redirectUrl) {
-          throw builErrorFromResponse("Redirect location not found", response, config, fetchOptions);
+          const redirectError = builErrorFromResponse("Redirect location not found", response, config, fetchOptions);
+          _stats.statusOnNext = "error";
+          if (!config.errors)
+            config.errors = [];
+          config.errors.push({ attempt: config.retryAttempts + 1, error: redirectError, duration: perform.now() });
+          throw redirectError;
         }
         if (config.maxRedirects === 0) {
           config.maxRedirectsReached = true;
-          throw builErrorFromResponse(`Redirects are disabled (maxRedirects=0)`, response, config, fetchOptions);
+          const redirectError = builErrorFromResponse(`Redirects are disabled (maxRedirects=0)`, response, config, fetchOptions);
+          _stats.statusOnNext = "error";
+          if (!config.errors)
+            config.errors = [];
+          config.errors.push({ attempt: config.retryAttempts + 1, error: redirectError, duration: perform.now() });
+          throw redirectError;
         }
         const enableCycleDetection = config.enableRedirectCycleDetection === true;
         if (enableCycleDetection) {
           const normalizedRedirectUrl = _stats.redirectUrl.toLowerCase();
           if (visitedUrls.has(normalizedRedirectUrl)) {
-            throw builErrorFromResponse(`Redirect cycle detected: attempting to revisit ${_stats.redirectUrl}`, response, config, fetchOptions);
+            const redirectError = builErrorFromResponse(`Redirect cycle detected: attempting to revisit ${_stats.redirectUrl}`, response, config, fetchOptions);
+            _stats.statusOnNext = "error";
+            if (!config.errors)
+              config.errors = [];
+            config.errors.push({ attempt: config.retryAttempts + 1, error: redirectError, duration: perform.now() });
+            throw redirectError;
           }
           visitedUrls.add(normalizedRedirectUrl);
         }
         const redirectCode = response.status;
         const customHeaders = undefined;
-        const onRedirect = config.beforeRedirect ? config.beforeRedirect({
+        if (config.hooks?.beforeRedirect && config.hooks.beforeRedirect.length > 0) {
+          const redirectContext = {
+            redirectUrl: new URL(_stats.redirectUrl),
+            fromUrl: fetchOptions.fullUrl,
+            status: response.status,
+            headers: response.headers,
+            sameDomain: isSameDomain(fetchOptions.fullUrl, _stats.redirectUrl),
+            method: fetchOptions.method.toUpperCase(),
+            body: config.originalBody,
+            request: fetchOptions,
+            redirectCount: config.redirectCount,
+            timestamp: Date.now()
+          };
+          for (const hook of config.hooks.beforeRedirect) {
+            await hook(redirectContext, config, response);
+          }
+        }
+        const redirectCallback = config.beforeRedirect || config.onRedirect;
+        const onRedirect = redirectCallback ? redirectCallback({
           url: new URL(_stats.redirectUrl),
           status: response.status,
           headers: response.headers,
           sameDomain: isSameDomain(fetchOptions.fullUrl, _stats.redirectUrl),
-          method: fetchOptions.method.toUpperCase()
+          method: fetchOptions.method.toUpperCase(),
+          body: config.originalBody
         }) : undefined;
         if (typeof onRedirect !== "undefined") {
           if (typeof onRedirect === "boolean") {
             if (!onRedirect) {
-              throw builErrorFromResponse("Redirect denied by user", response, config, fetchOptions);
+              const redirectError = builErrorFromResponse("Redirect denied by user", response, config, fetchOptions);
+              _stats.statusOnNext = "error";
+              if (!config.errors)
+                config.errors = [];
+              config.errors.push({ attempt: config.retryAttempts + 1, error: redirectError, duration: perform.now() });
+              throw redirectError;
             }
-          } else if (!onRedirect.redirect) {
-            throw builErrorFromResponse("Redirect denied by user", response, config, fetchOptions);
+          } else if (!onRedirect.redirect && !onRedirect.withoutBody && !("body" in onRedirect)) {
+            const redirectError = builErrorFromResponse("Redirect denied by user", response, config, fetchOptions);
+            _stats.statusOnNext = "error";
+            if (!config.errors)
+              config.errors = [];
+            config.errors.push({ attempt: config.retryAttempts + 1, error: redirectError, duration: perform.now() });
+            throw redirectError;
           }
         }
         if (config.redirectCount >= config.maxRedirects && config.maxRedirects > 0) {
           config.maxRedirectsReached = true;
-          throw builErrorFromResponse(`Max redirects (${config.maxRedirects}) reached`, response, config, fetchOptions);
+          const redirectError = builErrorFromResponse(`Max redirects (${config.maxRedirects}) reached`, response, config, fetchOptions);
+          _stats.statusOnNext = "error";
+          if (!config.errors)
+            config.errors = [];
+          config.errors.push({ attempt: config.retryAttempts + 1, error: redirectError, duration: perform.now() });
+          throw redirectError;
         }
         config.redirectHistory.push({
           url: fetchOptions.fullUrl,
@@ -363,50 +580,102 @@ async function executeHttp1Request(fetchOptions, config, options, perform, fs, s
         addedOptions.customHeaders = customHeaders;
         addedOptions.fullUrl = fetchOptions.fullUrl;
         delete options.params;
+        const fromUrl = fetchOptions.fullUrl;
         fetchOptions.fullUrl = location;
-        let commented = false;
-        if (typeof onRedirect === "object" && onRedirect.redirect) {
-          const method = onRedirect.method || fetchOptions.method;
+        const normalizedRedirect = typeof onRedirect === "object" ? onRedirect.redirect || onRedirect.withoutBody || "body" in onRedirect : undefined;
+        if (typeof onRedirect === "object" && normalizedRedirect) {
+          let method;
+          const userMethod = onRedirect.method;
+          if (redirectCode === 301 || redirectCode === 302 || redirectCode === 303) {
+            method = userMethod || "GET";
+          } else {
+            method = userMethod || fetchOptions.method;
+          }
           config.method = method;
-          options.fullUrl = onRedirect.url;
-          fetchOptions.fullUrl = onRedirect.url;
+          options.method = method;
+          fetchOptions.method = method;
+          if (onRedirect.redirect && onRedirect.url) {
+            options.fullUrl = onRedirect.url;
+            fetchOptions.fullUrl = onRedirect.url;
+          }
           if (onRedirect.withoutBody) {
             delete options.body;
-          } else if (onRedirect.body) {
+            delete fetchOptions.body;
+            config.originalBody = undefined;
+            if (fetchOptions.headers instanceof RezoHeaders) {
+              fetchOptions.headers.delete("Content-Type");
+              fetchOptions.headers.delete("Content-Length");
+            }
+          } else if ("body" in onRedirect) {
             options.body = onRedirect.body;
+            fetchOptions.body = onRedirect.body;
+            config.originalBody = onRedirect.body;
+          } else if (redirectCode === 307 || redirectCode === 308) {
+            const methodUpper = method.toUpperCase();
+            if ((methodUpper === "POST" || methodUpper === "PUT" || methodUpper === "PATCH") && config.originalBody !== undefined) {
+              options.body = config.originalBody;
+              fetchOptions.body = config.originalBody;
+            }
+          } else {
+            delete options.body;
+            delete fetchOptions.body;
+            if (fetchOptions.headers instanceof RezoHeaders) {
+              fetchOptions.headers.delete("Content-Type");
+              fetchOptions.headers.delete("Content-Length");
+            }
           }
-          if (config.debug) {
-            commented = true;
-            console.log(`
-Redirecting to: ${fetchOptions.fullUrl} using ${method} method`);
-          }
-          if (onRedirect.setHeaders) {
+          debugLog.redirect(config, fromUrl, fetchOptions.fullUrl, redirectCode, method);
+          if (onRedirect.redirect && onRedirect.setHeaders) {
             addedOptions.customHeaders = onRedirect.setHeaders;
           }
         } else if (response.status === 301 || response.status === 302 || response.status === 303) {
-          if (config.debug) {
-            commented = true;
-            console.log(`
-Redirecting to: ${fetchOptions.fullUrl} using GET method`);
-          }
+          debugLog.redirect(config, fromUrl, fetchOptions.fullUrl, redirectCode, "GET");
           options.method = "GET";
+          fetchOptions.method = "GET";
+          config.method = "GET";
           delete options.body;
-        } else
-          commented = false;
-        if (config.debug && !commented) {
-          console.log(`Redirecting to: ${fetchOptions.fullUrl}`);
+          delete fetchOptions.body;
+          if (fetchOptions.headers instanceof RezoHeaders) {
+            fetchOptions.headers.delete("Content-Type");
+            fetchOptions.headers.delete("Content-Length");
+          }
+        } else {
+          debugLog.redirect(config, fromUrl, fetchOptions.fullUrl, redirectCode, fetchOptions.method);
         }
-        const __ = prepareHTTPOptions(fetchOptions, config.cookieJar, addedOptions, config);
+        const jarToSync = rootJar || config.jar;
+        if (response.cookies?.array?.length > 0 && jarToSync) {
+          try {
+            jarToSync.setCookiesSync(response.cookies.array, fromUrl);
+          } catch (e) {}
+        }
+        const __ = prepareHTTPOptions(fetchOptions, jarToSync, addedOptions, config);
         fetchOptions = __.fetchOptions;
         config = __.config;
         options = __.options;
         continue;
       }
       if (statusOnNext === "error") {
+        if (shouldWaitOnStatus(response.status, options.waitOnStatus)) {
+          const rateLimitWaitAttempt = config._rateLimitWaitAttempt || 0;
+          const waitResult = await handleRateLimitWait({
+            status: response.status,
+            headers: response.headers,
+            data: response.data,
+            url: fetchOptions.fullUrl || fetchOptions.url?.toString() || "",
+            method: fetchOptions.method || "GET",
+            config,
+            options,
+            currentWaitAttempt: rateLimitWaitAttempt
+          });
+          if (waitResult.shouldRetry) {
+            config._rateLimitWaitAttempt = waitResult.waitAttempt;
+            continue;
+          }
+        }
         const httpError = builErrorFromResponse(`Request failed with status code ${response.status}`, response, config, fetchOptions);
-        if (config.retry && statusCodes?.includes(response.status)) {
-          if (maxRetries > retries) {
-            retries++;
+        if (retryConfig && retryConfig.statusCodes?.includes(response.status)) {
+          retryAttempt++;
+          if (retryAttempt <= retryConfig.maxRetries) {
             config.retryAttempts++;
             config.errors.push({
               attempt: config.retryAttempts,
@@ -414,11 +683,10 @@ Redirecting to: ${fetchOptions.fullUrl} using GET method`);
               duration: perform.now()
             });
             perform.reset();
-            if (config.debug) {
-              console.log(`Request failed with status code ${response.status}, retrying...${retryDelay > 0 ? " in " + (incrementDelay ? retryDelay * retries : retryDelay) + "ms" : ""}`);
-            }
-            if (retryDelay > 0) {
-              await new Promise((resolve) => setTimeout(resolve, incrementDelay ? retryDelay * retries : retryDelay));
+            const currentDelay = calculateRetryDelay(retryAttempt, retryConfig.retryDelay, retryConfig.backoff, retryConfig.maxDelay);
+            debugLog.retry(config, retryAttempt, retryConfig.maxRetries, response.status, currentDelay);
+            if (currentDelay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, currentDelay));
             }
             continue;
           }
@@ -431,18 +699,18 @@ Redirecting to: ${fetchOptions.fullUrl} using GET method`);
     } catch (error) {
       throw error;
     } finally {
-      if (timeoutClearInstanse)
-        clearTimeout(timeoutClearInstanse);
+      if (timeoutClearInstance)
+        clearTimeout(timeoutClearInstance);
     }
   }
 }
-async function request(config, fetchOptions, requestCount, timing, _stats, responseStatusCode, fs, streamResult, downloadResult, uploadResult) {
+async function request(config, fetchOptions, requestCount, timing, _stats, responseStatusCode, fs, streamResult, downloadResult, uploadResult, rootJar) {
   return await new Promise(async (resolve) => {
     try {
       const { fullUrl, body, fileName: filename } = fetchOptions;
       const url = new URL(fullUrl || fetchOptions.url);
       const isSecure = url.protocol === "https:";
-      const httpModule = isSecure ? config.isSecure && config.adapter ? config.adapter : https : !config.isSecure && config.adapter ? config.adapter : http;
+      const httpModule = isBunRuntime() && isBunSocksRequest(fetchOptions.proxy) ? bunHttp : isSecure ? config.isSecure && config.adapter ? config.adapter : https : !config.isSecure && config.adapter ? config.adapter : http;
       await setInitialConfig(config, fetchOptions, isSecure, url, httpModule, requestCount, timing.startTime, timing.startTimestamp);
       const eventEmitter = streamResult || downloadResult || uploadResult;
       if (eventEmitter && requestCount === 0) {
@@ -456,17 +724,26 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
           retry: config.retry ? {
             maxRetries: config.retry.maxRetries,
             delay: config.retry.retryDelay,
-            backoff: config.retry.incrementDelay ? config.retry.retryDelay : undefined
+            backoff: typeof config.retry.backoff === "number" ? config.retry.backoff : config.retry.backoff === "exponential" ? 2 : config.retry.backoff === "linear" ? 1 : undefined
           } : undefined
         };
         eventEmitter.emit("start", startEvent);
       }
       const requestOptions = buildHTTPOptions(fetchOptions, isSecure, url);
+      const stagedTimeoutConfig = parseStagedTimeouts(fetchOptions.timeout);
+      const timeoutManager = new StagedTimeoutManager(stagedTimeoutConfig, config, fetchOptions);
+      if (timeoutManager.hasPhase("total")) {
+        timeoutManager.startPhase("total");
+      }
       try {
         const req = httpModule.request(requestOptions, async (res) => {
-          if (!config.timing.ttfbMs) {
+          timeoutManager.clearPhase("headers");
+          if (timeoutManager.hasPhase("body")) {
+            timeoutManager.startPhase("body");
+          }
+          if (!timing.firstByteTime) {
             timing.firstByteTime = performance.now();
-            config.timing.ttfbMs = timing.firstByteTime - timing.startTime;
+            config.timing.responseStart = timing.firstByteTime;
           }
           const { statusCode, statusMessage, headers, httpVersion, socket } = res;
           const { remoteAddress, remotePort, localAddress, localPort } = socket;
@@ -481,7 +758,7 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
           const location = headers["location"] || headers["Location"];
           const contentLength = headers["content-length"];
           const cookies = headers["set-cookie"];
-          updateCookies(config, headers, url.href);
+          await updateCookies(config, headers, url.href, rootJar);
           const cookieArray = config.responseCookies?.array || [];
           delete headers["set-cookie"];
           _stats.redirectUrl = undefined;
@@ -496,8 +773,8 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
               contentLength: contentLength ? parseInt(contentLength, 10) : undefined,
               cookies: cookieArray,
               timing: {
-                firstByte: config.timing.ttfbMs,
-                total: performance.now() - timing.startTime
+                firstByte: config.timing.responseStart - config.timing.startTime,
+                total: performance.now() - config.timing.startTime
               }
             };
             eventEmitter.emit("headers", headersEvent);
@@ -509,6 +786,24 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
             } else if (uploadResult) {
               uploadResult.status = statusCode;
               uploadResult.statusText = statusMessage;
+            }
+          }
+          if (config.hooks?.afterHeaders && config.hooks.afterHeaders.length > 0) {
+            const ttfb = config.timing.responseStart - config.timing.startTime;
+            const headersReceivedEvent = {
+              status: statusCode || 200,
+              statusText: statusMessage || "",
+              headers: new RezoHeaders(headers),
+              contentType,
+              contentLength: contentLength ? parseInt(contentLength, 10) : undefined,
+              cookies: cookieArray,
+              timing: {
+                firstByte: ttfb,
+                total: performance.now() - config.timing.startTime
+              }
+            };
+            for (const hook of config.hooks.afterHeaders) {
+              await hook(headersReceivedEvent, config);
             }
           }
           if (isSecure) {
@@ -548,7 +843,11 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
           if (isRedirected)
             _stats.statusOnNext = "redirect";
           if (isRedirected && location) {
-            _stats.redirectUrl = new URL(location, url).href;
+            const redirectUrlObj = new URL(typeof location === "string" ? location : location.toString(), url);
+            if (!redirectUrlObj.hash && url.hash) {
+              redirectUrlObj.hash = url.hash;
+            }
+            _stats.redirectUrl = redirectUrlObj.href;
             if (config.redirectCount) {
               config.redirectCount++;
             } else {
@@ -568,10 +867,26 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
               res.setEncoding(streamResult.encoding);
             }
             let streamedBytes = 0;
+            const totalBytes = contentLength ? parseInt(contentLength, 10) : 0;
+            const streamStartTime = performance.now();
             res.on("data", (chunk) => {
               streamedBytes += chunk.length;
+              const now = performance.now();
+              const elapsed = now - streamStartTime;
+              const speed = elapsed > 0 ? streamedBytes / (elapsed / 1000) : 0;
+              const percentage = totalBytes > 0 ? streamedBytes / totalBytes * 100 : 0;
+              const estimatedTime = speed > 0 && totalBytes > 0 ? (totalBytes - streamedBytes) / speed * 1000 : 0;
+              streamResult.emit("progress", {
+                loaded: streamedBytes,
+                total: totalBytes,
+                percentage,
+                speed,
+                averageSpeed: speed,
+                estimatedTime,
+                timestamp: now
+              });
             });
-            streamResult.on("finish", () => {
+            res.on("end", () => {
               updateTiming(config, timing, contentLength || "", streamedBytes, res.rawHeaders);
               const streamFinishEvent = {
                 status: statusCode || 200,
@@ -580,19 +895,14 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
                 contentType,
                 contentLength: streamedBytes,
                 finalUrl: url.toString(),
-                cookies: config.cookieJar?.cookies() || { array: [], map: {} },
+                cookies: config.jar?.cookies() || { array: [], map: {} },
                 urls: [url.toString()],
-                timing: {
-                  total: config.timing.durationMs || 0,
-                  dns: config.timing.dnsMs,
-                  tcp: config.timing.tcpMs,
-                  tls: config.timing.tlsMs,
-                  firstByte: config.timing.ttfbMs,
-                  download: config.timing.transferMs
-                },
+                timing: getTimingDurations(config),
                 config: sanitizeConfig(config)
               };
+              streamResult.emit("finish", streamFinishEvent);
               streamResult.emit("done", streamFinishEvent);
+              streamResult.emit("complete", streamFinishEvent);
               streamResult._markFinished();
               _stats.statusOnNext = "success";
               const minimalResponse = buildResponseFromIncoming(res, Buffer.alloc(0), config, url.toString(), buildUrlTree(config, url.toString()));
@@ -600,6 +910,10 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
             });
             res.pipe(streamResult);
           } else if (downloadResult && filename && fs && statusCode && statusCode >= 200 && statusCode < 300) {
+            const { dirname } = await import("node:path");
+            const dir = dirname(filename);
+            if (dir && dir !== ".")
+              fs.mkdirSync(dir, { recursive: true });
             const writeStream = fs.createWriteStream(filename);
             const totalBytes = contentLength ? parseInt(contentLength, 10) : 0;
             let downloadedBytes = 0;
@@ -641,23 +955,20 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
                 contentType,
                 contentLength: contentLengthCounter,
                 finalUrl: url.toString(),
-                cookies: config.cookieJar?.cookies() || { array: [], map: {} },
+                cookies: config.jar?.cookies() || { array: [], map: {} },
                 urls: [url.toString()],
                 fileName: filename,
                 fileSize: contentLengthCounter,
                 timing: {
-                  total: config.timing.durationMs || 0,
-                  dns: config.timing.dnsMs,
-                  tcp: config.timing.tcpMs,
-                  tls: config.timing.tlsMs,
-                  firstByte: config.timing.ttfbMs,
-                  download: config.timing.transferMs || 0
+                  ...getTimingDurations(config),
+                  download: getTimingDurations(config).download || 0
                 },
-                averageSpeed: config.timing.transferMs ? contentLengthCounter / config.timing.transferMs * 1000 : 0,
+                averageSpeed: getTimingDurations(config).download ? contentLengthCounter / getTimingDurations(config).download * 1000 : 0,
                 config: sanitizeConfig(config)
               };
               downloadResult.emit("finish", finishEvent);
               downloadResult.emit("done", finishEvent);
+              downloadResult.emit("complete", finishEvent);
               downloadResult._markFinished();
               const downloadResponse = buildDownloadResponse(res.statusCode ?? 200, res.statusMessage ?? "OK", headers, contentLengthCounter, cookies || [], res.url || url.toString(), url.toString(), [url.toString()], config);
               _stats.statusOnNext = "success";
@@ -684,6 +995,10 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
               return;
             });
           } else if (filename && fs && statusCode && statusCode >= 200 && statusCode < 300) {
+            const { dirname } = await import("node:path");
+            const dir = dirname(filename);
+            if (dir && dir !== ".")
+              fs.mkdirSync(dir, { recursive: true });
             const writeStream = fs.createWriteStream(filename);
             res.pipe(writeStream);
             writeStream.on("finish", () => {
@@ -727,7 +1042,8 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
               chunks.push(chunk);
             });
             decompressedStream.on("end", () => {
-              _stats.statusOnNext = isRedirected ? "redirect" : statusCode && statusCode >= 200 && statusCode < 300 ? "success" : "error";
+              const _validateStatus = fetchOptions.validateStatus ?? ((s) => s >= 200 && s < 300);
+              _stats.statusOnNext = isRedirected ? "redirect" : statusCode && (fetchOptions.validateStatus === null || _validateStatus(statusCode)) ? "success" : "error";
               updateTiming(config, timing, contentLength || "", contentLengthCounter, res.rawHeaders);
               const finalResponse = buildResponseFromIncoming(res, Buffer.concat(chunks), config, url.toString(), buildUrlTree(config, url.toString()), undefined, undefined, contentLengthCounter);
               if (uploadResult && !isRedirected) {
@@ -741,110 +1057,290 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
                     contentLength: contentLengthCounter
                   },
                   finalUrl: url.toString(),
-                  cookies: config.cookieJar?.cookies() || { array: [], map: {} },
+                  cookies: config.jar?.cookies() || { array: [], map: {} },
                   urls: [url.toString()],
                   uploadSize: config.transfer.requestSize || 0,
                   fileName: uploadResult.fileName,
                   timing: {
-                    total: config.timing.durationMs || 0,
-                    dns: config.timing.dnsMs,
-                    tcp: config.timing.tcpMs,
-                    tls: config.timing.tlsMs,
-                    upload: config.timing.ttfbMs || 0,
-                    waiting: config.timing.ttfbMs && config.timing.transferMs ? config.timing.transferMs - config.timing.ttfbMs : 0,
-                    download: config.timing.transferMs
+                    total: getTimingDurations(config).total,
+                    dns: getTimingDurations(config).dns,
+                    tcp: getTimingDurations(config).tcp,
+                    tls: getTimingDurations(config).tls,
+                    upload: getTimingDurations(config).firstByte || 0,
+                    waiting: getTimingDurations(config).download > 0 && getTimingDurations(config).firstByte > 0 ? getTimingDurations(config).download - getTimingDurations(config).firstByte : 0,
+                    download: getTimingDurations(config).download
                   },
-                  averageUploadSpeed: config.timing.ttfbMs && config.transfer.requestSize ? config.transfer.requestSize / config.timing.ttfbMs * 1000 : 0,
-                  averageDownloadSpeed: config.timing.transferMs ? contentLengthCounter / config.timing.transferMs * 1000 : 0,
+                  averageUploadSpeed: getTimingDurations(config).firstByte && config.transfer.requestSize ? config.transfer.requestSize / getTimingDurations(config).firstByte * 1000 : 0,
+                  averageDownloadSpeed: getTimingDurations(config).download ? contentLengthCounter / getTimingDurations(config).download * 1000 : 0,
                   config: sanitizeConfig(config)
                 };
                 uploadResult.emit("finish", uploadFinishEvent);
                 uploadResult.emit("done", uploadFinishEvent);
+                uploadResult.emit("complete", uploadFinishEvent);
                 uploadResult._markFinished();
               }
+              timeoutManager.clearAll();
               resolve(finalResponse);
             });
             decompressedStream.on("error", (err) => {
+              timeoutManager.clearAll();
               _stats.statusOnNext = "error";
               updateTiming(config, timing, contentLength || "", contentLengthCounter, res.rawHeaders);
+              const data = Buffer.concat(chunks);
               if (_stats.redirectUrl) {
-                const partialResponse = buildResponseFromIncoming(res, Buffer.concat(chunks), config, url.toString(), buildUrlTree(config, url.toString()), undefined, undefined, contentLengthCounter);
+                const partialResponse = buildResponseFromIncoming(res, data, config, url.toString(), buildUrlTree(config, url.toString()), undefined, undefined, contentLengthCounter);
                 resolve(partialResponse);
                 return;
               }
-              const error = buildDecompressionError({
-                statusCode: res.statusCode || 500,
-                headers,
-                contentType,
-                contentLength: contentLength || contentLengthCounter.toString(),
-                cookies: cookies || [],
-                statusText: err.message || "Decompression failed",
-                url: res.url || url.toString(),
-                body: Buffer.concat(chunks),
-                finalUrl: url.toString(),
-                config,
-                request: fetchOptions
-              });
-              resolve(error);
+              const isNetworkError = err.code && ["ECONNRESET", "ECONNABORTED", "ETIMEDOUT", "EPIPE", "ENOTFOUND", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "ERR_STREAM_PREMATURE_CLOSE"].includes(err.code);
+              if (isNetworkError) {
+                const partialResponse = buildResponseFromIncoming(res, data, config, url.toString(), buildUrlTree(config, url.toString()), undefined, undefined, contentLengthCounter);
+                const error = new RezoError(err.message, config, err.code, fetchOptions, partialResponse);
+                resolve(error);
+              } else {
+                const error = buildDecompressionError({
+                  statusCode: res.statusCode || 500,
+                  headers,
+                  contentType,
+                  contentLength: contentLength || contentLengthCounter.toString(),
+                  cookies: cookies || [],
+                  statusText: err.message || "Decompression failed",
+                  url: res.url || url.toString(),
+                  body: data,
+                  finalUrl: url.toString(),
+                  config,
+                  request: fetchOptions
+                });
+                resolve(error);
+              }
             });
           }
         });
-        req.on("socket", (socket) => {
-          if (socket && typeof socket.unref === "function") {
-            socket.unref();
+        req.on("error", (err) => {
+          timeoutManager.clearAll();
+          _stats.statusOnNext = "error";
+          const errCode = err.code;
+          if ((errCode === "ABORT_ERR" || err.name === "AbortError" || errCode === "ECONNABORTED") && config.hooks?.onAbort && config.hooks.onAbort.length > 0) {
+            const reason = errCode === "ECONNABORTED" ? "timeout" : "signal";
+            for (const hook of config.hooks.onAbort) {
+              try {
+                hook({
+                  reason,
+                  message: err.message,
+                  url: url.toString(),
+                  elapsed: performance.now() - timing.startTime,
+                  timestamp: Date.now()
+                }, config);
+              } catch {}
+            }
           }
-          timing.dnsStart = performance.now();
-          socket.on("lookup", () => {
-            if (!config.timing.dnsMs) {
-              if (timing.dnsStart)
-                config.timing.dnsMs = performance.now() - timing.dnsStart;
-              timing.tcpStart = performance.now();
+          const error = buildSmartError(config, fetchOptions, err);
+          resolve(error);
+        });
+        req.on("socket", (socket) => {
+          timeoutManager.setSocket(socket);
+          timeoutManager.setRequest(req);
+          timeoutManager.setTimeoutCallback((phase, elapsed) => {
+            _stats.statusOnNext = "error";
+            const error = timeoutManager.createTimeoutError(phase, elapsed);
+            if (config.hooks?.onTimeout && config.hooks.onTimeout.length > 0) {
+              const timeoutType = phase === "connect" ? "connect" : phase === "headers" ? "response" : phase === "body" ? "response" : "request";
+              for (const hook of config.hooks.onTimeout) {
+                try {
+                  hook({
+                    type: timeoutType,
+                    timeout: elapsed,
+                    elapsed,
+                    url: url.toString(),
+                    timestamp: Date.now()
+                  }, config);
+                } catch {}
+              }
             }
+            const eventEmitter = streamResult || downloadResult || uploadResult;
+            if (eventEmitter) {
+              eventEmitter.emit("error", error);
+            }
+            resolve(error);
           });
-          socket.on("secureConnect", () => {
-            if (!config.timing.tlsMs) {
-              if (timing.tlsStart && !config.timing.tlsMs)
-                config.timing.tlsMs = performance.now() - timing.tlsStart;
+          const reqContext = beginRequestContext(socket, isSecure);
+          const telemetry = getSocketTelemetry(socket);
+          if (reqContext.connectionReused) {
+            timeoutManager.clearPhase("connect");
+            if (timeoutManager.hasPhase("headers")) {
+              timeoutManager.startPhase("headers");
             }
-            const tls = {
-              cipher: socket.getCipher(),
-              cert: socket.getPeerCertificate(),
-              tlsVersion: socket.getProtocol()
-            };
-            const { cipher, cert, tlsVersion } = tls;
-            config.security.tlsVersion = tlsVersion;
-            config.security.cipher = cipher?.name;
-            config.security.certificateInfo = {
-              subject: cert.subject,
-              issuer: cert.issuer,
-              validFrom: cert.valid_from,
-              validTo: cert.valid_to,
-              fingerprint: cert.fingerprint
-            };
-            config.security.validationResults = {
-              certificateValid: !cert.fingerprint?.includes("error"),
-              hostnameMatch: cert.subject?.CN === url.hostname,
-              chainValid: true
-            };
-          });
-          socket.on("connect", () => {
-            if (!config.timing.tcpMs) {
-              if (timing.tcpStart)
-                config.timing.tcpMs = performance.now() - timing.tcpStart;
-              if (isSecure)
-                timing.tlsStart = performance.now();
+            if (telemetry) {
+              config.timing.domainLookupStart = timing.dnsStart = performance.now();
+              config.timing.domainLookupEnd = timing.dnsEnd = timing.dnsStart;
+              config.timing.connectStart = timing.tcpStart = timing.dnsEnd;
+              config.timing.connectEnd = timing.tcpEnd = timing.tcpStart;
+              if (telemetry.network.remoteAddress) {
+                config.network.remoteAddress = telemetry.network.remoteAddress;
+                config.network.remotePort = telemetry.network.remotePort;
+                config.network.localAddress = telemetry.network.localAddress;
+                config.network.localPort = telemetry.network.localPort;
+                config.network.family = telemetry.network.family;
+              }
+              if (isSecure && telemetry.tls) {
+                config.security.tlsVersion = telemetry.tls.protocol;
+                config.security.cipher = telemetry.tls.cipher;
+                if (telemetry.tls.certificate) {
+                  config.security.certificateInfo = {
+                    subject: { CN: telemetry.tls.certificate.subject },
+                    issuer: { CN: telemetry.tls.certificate.issuer },
+                    validFrom: telemetry.tls.certificate.validFrom,
+                    validTo: telemetry.tls.certificate.validTo,
+                    fingerprint: telemetry.tls.certificate.fingerprint
+                  };
+                }
+              }
+              config.connectionReuse = {
+                reused: true,
+                reuseCount: telemetry.reuse.count,
+                socketAge: Date.now() - telemetry.timings.created,
+                historicalDns: telemetry.timings.dnsDuration || 0,
+                historicalTcp: telemetry.timings.tcpDuration || 0,
+                historicalTls: telemetry.timings.tlsDuration || 0
+              };
             }
-            const { remoteAddress, remotePort, localAddress, localPort, remoteFamily } = socket;
-            if (remoteAddress && !config.network.remoteAddress) {
-              config.network.remoteAddress = remoteAddress;
-              config.network.remotePort = remotePort;
-              config.network.localAddress = localAddress;
-              config.network.localPort = localPort;
-              config.network.family = remoteFamily;
+          } else {
+            if (timeoutManager.hasPhase("connect")) {
+              timeoutManager.startPhase("connect");
             }
-          });
+            timing.dnsStart = performance.now();
+            config.timing.domainLookupStart = timing.dnsStart;
+            config.connectionReuse = {
+              reused: false,
+              reuseCount: 1
+            };
+            const populateFromTelemetry = () => {
+              if (!telemetry)
+                return;
+              if (telemetry.timings.dnsEnd && !timing.dnsEnd) {
+                timing.dnsEnd = performance.now();
+                config.timing.domainLookupEnd = timing.dnsEnd;
+                timing.tcpStart = performance.now();
+                config.timing.connectStart = timing.tcpStart;
+                if (config.hooks?.onDns && config.hooks.onDns.length > 0) {
+                  for (const hook of config.hooks.onDns) {
+                    try {
+                      hook({
+                        hostname: url.hostname,
+                        address: telemetry.timings.address || "",
+                        family: telemetry.timings.family || 4,
+                        duration: telemetry.timings.dnsDuration || 0,
+                        timestamp: Date.now()
+                      }, config);
+                    } catch (err) {
+                      if (config.debug) {
+                        console.log("[Rezo Debug] onDns hook error:", err);
+                      }
+                    }
+                  }
+                }
+              }
+              if (telemetry.timings.connectEnd && !timing.tcpEnd) {
+                timing.tcpEnd = performance.now();
+                config.timing.connectEnd = timing.tcpEnd;
+                if (isSecure) {
+                  timing.tlsStart = performance.now();
+                  config.timing.secureConnectionStart = timing.tlsStart;
+                }
+                if (telemetry.network.remoteAddress) {
+                  config.network.remoteAddress = telemetry.network.remoteAddress;
+                  config.network.remotePort = telemetry.network.remotePort;
+                  config.network.localAddress = telemetry.network.localAddress;
+                  config.network.localPort = telemetry.network.localPort;
+                  config.network.family = telemetry.network.family;
+                }
+                if (config.hooks?.onSocket && config.hooks.onSocket.length > 0) {
+                  for (const hook of config.hooks.onSocket) {
+                    try {
+                      hook({
+                        type: "connect",
+                        localAddress: telemetry.network.localAddress,
+                        localPort: telemetry.network.localPort,
+                        remoteAddress: telemetry.network.remoteAddress,
+                        remotePort: telemetry.network.remotePort,
+                        timestamp: Date.now()
+                      }, socket);
+                    } catch (err) {
+                      if (config.debug) {
+                        console.log("[Rezo Debug] onSocket hook error:", err);
+                      }
+                    }
+                  }
+                }
+                if (!isSecure) {
+                  timeoutManager.clearPhase("connect");
+                  if (timeoutManager.hasPhase("headers")) {
+                    timeoutManager.startPhase("headers");
+                  }
+                }
+              }
+              if (isSecure && telemetry.timings.secureConnectEnd && !timing.tlsEnd) {
+                timing.tlsEnd = performance.now();
+                config.timing.connectEnd = timing.tlsEnd;
+                timeoutManager.clearPhase("connect");
+                if (timeoutManager.hasPhase("headers")) {
+                  timeoutManager.startPhase("headers");
+                }
+                if (telemetry.tls) {
+                  config.security.tlsVersion = telemetry.tls.protocol;
+                  config.security.cipher = telemetry.tls.cipher;
+                  config.security.certificateInfo = telemetry.tls.certificate ? {
+                    subject: { CN: telemetry.tls.certificate.subject },
+                    issuer: { CN: telemetry.tls.certificate.issuer },
+                    validFrom: telemetry.tls.certificate.validFrom,
+                    validTo: telemetry.tls.certificate.validTo,
+                    fingerprint: telemetry.tls.certificate.fingerprint
+                  } : undefined;
+                  config.security.validationResults = {
+                    certificateValid: true,
+                    hostnameMatch: telemetry.tls.certificate?.subject === url.hostname || false,
+                    chainValid: telemetry.tls.authorized === true,
+                    authorizationError: telemetry.tls.authorizationError ? true : false
+                  };
+                  if (config.hooks?.onTls && config.hooks.onTls.length > 0) {
+                    for (const hook of config.hooks.onTls) {
+                      try {
+                        hook({
+                          protocol: telemetry.tls.protocol || "",
+                          cipher: telemetry.tls.cipher || "",
+                          authorized: telemetry.tls.authorized !== false,
+                          authorizationError: telemetry.tls.authorizationError,
+                          certificate: telemetry.tls.certificate ? {
+                            subject: telemetry.tls.certificate.subject || "",
+                            issuer: telemetry.tls.certificate.issuer || "",
+                            validFrom: telemetry.tls.certificate.validFrom || "",
+                            validTo: telemetry.tls.certificate.validTo || "",
+                            fingerprint: telemetry.tls.certificate.fingerprint || ""
+                          } : undefined,
+                          duration: telemetry.timings.tlsDuration || 0,
+                          timestamp: Date.now()
+                        }, config);
+                      } catch (err) {
+                        if (config.debug) {
+                          console.log("[Rezo Debug] onTls hook error:", err);
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            };
+            if (socket?.readyState === "open" || socket?.writable === true && !socket?.connecting) {
+              populateFromTelemetry();
+            } else if (isSecure) {
+              socket.once("secureConnect", () => populateFromTelemetry());
+            } else {
+              socket.once("connect", () => populateFromTelemetry());
+            }
+          }
         });
         req.on("error", (error) => {
+          timeoutManager.clearAll();
           _stats.statusOnNext = "error";
           updateTiming(config, timing, "", 0);
           const e = buildSmartError(config, fetchOptions, error);
@@ -860,19 +1356,41 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
           if (body instanceof URLSearchParams || body instanceof RezoURLSearchParams) {
             req.write(body.toString());
           } else if (body instanceof FormData || body instanceof RezoFormData) {
-            bodyPiped = true;
-            if (body instanceof RezoFormData) {
-              req.setHeader("Content-Type", `multipart/form-data; boundary=${body.getBoundary()}`);
-              body.pipe(req);
+            const form = body instanceof RezoFormData ? body : RezoFormData.fromNativeFormData(body);
+            const buffer = await form.toBuffer();
+            const contentType = await form.getContentTypeAsync();
+            req.setHeader("Content-Type", contentType);
+            req.setHeader("Content-Length", buffer.length);
+            if (uploadResult) {
+              const chunkSize = 16384;
+              const totalSize = buffer.length;
+              let written = 0;
+              const uploadStart = performance.now();
+              for (let offset = 0;offset < totalSize; offset += chunkSize) {
+                const end = Math.min(offset + chunkSize, totalSize);
+                const chunk = buffer.slice(offset, end);
+                req.write(chunk);
+                written += chunk.length;
+                const now = performance.now();
+                const elapsed = now - uploadStart;
+                const speed = elapsed > 0 ? written / (elapsed / 1000) : 0;
+                uploadResult.emit("progress", {
+                  loaded: written,
+                  total: totalSize,
+                  percentage: written / totalSize * 100,
+                  speed,
+                  averageSpeed: speed,
+                  estimatedTime: speed > 0 ? (totalSize - written) / speed * 1000 : 0,
+                  timestamp: now
+                });
+              }
             } else {
-              const form = await RezoFormData.fromNativeFormData(body);
-              req.setHeader("Content-Type", `multipart/form-data; boundary=${form.getBoundary()}`);
-              form.pipe(req);
+              req.write(buffer);
             }
           } else if (body instanceof Readable) {
             bodyPiped = true;
             body.pipe(req);
-          } else if (typeof body === "object" && !(body instanceof Buffer) && !(body instanceof Uint8Array)) {
+          } else if (typeof body === "object" && !Buffer.isBuffer(body) && !(body instanceof Uint8Array)) {
             req.write(JSON.stringify(body));
           } else {
             req.write(body);
@@ -903,10 +1421,15 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
   });
 }
 function updateTiming(config, timing, contentLength, contentLengthCounter, rawHeaders) {
-  config.timing.endTimestamp = Date.now();
-  const elapsedMs = performance.now() - timing.startTime;
-  config.timing.durationMs = elapsedMs;
-  config.timing.transferMs = timing.firstByteTime ? performance.now() - timing.firstByteTime : elapsedMs;
+  const now = performance.now();
+  config.timing.domainLookupStart = timing.dnsStart || config.timing.startTime;
+  config.timing.domainLookupEnd = timing.dnsEnd || timing.dnsStart || config.timing.startTime;
+  config.timing.connectStart = timing.tcpStart || timing.dnsEnd || config.timing.startTime;
+  config.timing.secureConnectionStart = timing.tlsStart || 0;
+  config.timing.connectEnd = timing.tlsEnd || timing.tcpEnd || timing.tcpStart || config.timing.startTime;
+  config.timing.requestStart = timing.tlsEnd || timing.tcpEnd || config.timing.startTime;
+  config.timing.responseStart = timing.firstByteTime || config.timing.requestStart;
+  config.timing.responseEnd = now;
   const bodySize = parseInt(contentLength || "0", 10) || contentLengthCounter;
   config.transfer.bodySize = bodySize;
   let headerSize = 0;
@@ -938,6 +1461,17 @@ function updateTiming(config, timing, contentLength, contentLengthCounter, rawHe
       retried: (config.retryAttempts || 0) > 0
     };
   }
+}
+function getTimingDurations(config) {
+  const t = config.timing;
+  return {
+    total: t.responseEnd - t.startTime,
+    dns: t.domainLookupEnd - t.domainLookupStart,
+    tcp: t.secureConnectionStart > 0 ? t.secureConnectionStart - t.connectStart : t.connectEnd - t.connectStart,
+    tls: t.secureConnectionStart > 0 ? t.connectEnd - t.secureConnectionStart : undefined,
+    firstByte: t.responseStart - t.startTime,
+    download: t.responseEnd - t.responseStart
+  };
 }
 let dnsCache = null;
 function createDNSLookup(cache) {
@@ -978,20 +1512,55 @@ function buildHTTPOptions(fetchOptions, isSecure, url) {
     useSecureContext = true,
     auth,
     dnsCache: dnsCacheOption,
-    keepAlive = false,
-    keepAliveMsecs = 60000
+    keepAlive = true,
+    keepAliveMsecs = 60000,
+    useAgentPool = true
   } = fetchOptions;
-  const secureContext = isSecure && useSecureContext ? new https.Agent({
-    secureContext: createSecureContext(),
-    servername: url.host,
-    rejectUnauthorized,
-    keepAlive,
-    keepAliveMsecs: keepAlive ? keepAliveMsecs : undefined
-  }) : undefined;
-  const customAgent = url.protocol === "https:" && httpsAgent ? httpsAgent : httpAgent ? httpAgent : undefined;
-  const agent = parseProxy(proxy) || customAgent || secureContext;
+  const stealthProfile = fetchOptions._resolvedStealth;
+  let agent;
+  if (httpAgent || httpsAgent) {
+    agent = isSecure ? httpsAgent : httpAgent;
+  } else if (proxy) {
+    agent = parseProxy(proxy, isSecure, rejectUnauthorized, stealthProfile);
+  } else if (stealthProfile && isSecure) {
+    const tlsOpts = buildTlsOptions(stealthProfile.tls);
+    tlsOpts.ALPNProtocols = ["http/1.1"];
+    agent = new https.Agent({
+      ...tlsOpts,
+      servername: url.hostname,
+      rejectUnauthorized,
+      keepAlive,
+      keepAliveMsecs: keepAlive ? keepAliveMsecs : undefined
+    });
+  } else if (useAgentPool) {
+    const agentPool = getGlobalAgentPool({
+      keepAlive: true,
+      keepAliveMsecs,
+      maxSockets: 256,
+      maxFreeSockets: 64,
+      dnsCache: dnsCacheOption !== false
+    });
+    if (isSecure) {
+      agent = agentPool.getHttpsAgent({
+        rejectUnauthorized,
+        servername: url.hostname
+      });
+    } else {
+      agent = agentPool.getHttpAgent();
+    }
+  } else if (isSecure && useSecureContext) {
+    agent = new https.Agent({
+      secureContext: createSecureContext(),
+      servername: url.hostname,
+      rejectUnauthorized,
+      keepAlive,
+      keepAliveMsecs: keepAlive ? keepAliveMsecs : undefined
+    });
+  }
   let lookup;
-  if (dnsCacheOption) {
+  if (fetchOptions.dnsLookup) {
+    lookup = fetchOptions.dnsLookup;
+  } else if (dnsCacheOption !== false && !useAgentPool) {
     if (!dnsCache) {
       const cacheOptions = typeof dnsCacheOption === "object" ? {
         enable: true,
@@ -1002,12 +1571,13 @@ function buildHTTPOptions(fetchOptions, isSecure, url) {
     }
     lookup = createDNSLookup(dnsCache);
   }
+  const headerObj = stealthProfile ? headers.toOrderedObject(stealthProfile.headerOrder) : headers.toObject();
   const requestOptions = {
     hostname: url.hostname,
     port: url.port || (isSecure ? 443 : 80),
     path: url.pathname + url.search,
     method,
-    headers: headers.toObject(),
+    headers: headerObj,
     timeout: timeout || 0,
     signal,
     rejectUnauthorized,
@@ -1055,7 +1625,7 @@ async function setInitialConfig(config, fetchOptions, isSecure, url, httpModule,
         http1: true,
         http2: config.http2,
         compression: true,
-        cookies: config.enableCookieJar,
+        cookies: !config.disableJar,
         redirects: config.maxRedirects > 0,
         proxy: !!proxy,
         timeout: !!timeout,
@@ -1065,7 +1635,7 @@ async function setInitialConfig(config, fetchOptions, isSecure, url, httpModule,
     config.features = {
       http2: !!config.http2,
       compression: !!config.compression?.enabled,
-      cookies: !!config.enableCookieJar,
+      cookies: !config.disableJar,
       redirects: config.maxRedirects > 0,
       proxy: !!proxy,
       timeout: !!timeout,
@@ -1076,27 +1646,36 @@ async function setInitialConfig(config, fetchOptions, isSecure, url, httpModule,
       browser: false,
       ssl: isSecure
     };
-    const timestampToUse = actualTimestamp || Date.now();
-    config.timing = config.timing || { startTimestamp: timestampToUse, endTimestamp: 0, durationMs: 0 };
-    config.timing.startTimestamp = config.timing.startTimestamp || timestampToUse;
+    const startTime = performance.now();
+    config.timing = config.timing || {
+      startTime,
+      domainLookupStart: startTime,
+      domainLookupEnd: startTime,
+      connectStart: startTime,
+      secureConnectionStart: 0,
+      connectEnd: startTime,
+      requestStart: startTime,
+      responseStart: startTime,
+      responseEnd: startTime
+    };
+    config.timing.startTime = config.timing.startTime || startTime;
     config.maxRedirectsReached = false;
     config.responseCookies = {
       array: [],
       serialized: [],
       netscape: `# Netscape HTTP Cookie File
 # This file was generated by Rezo HTTP client
-# Based on uniqhtt cookie implementation
 `,
       string: "",
       setCookiesString: []
     };
     config.retryAttempts = 0;
     config.errors = [];
-    config.debug = fetchOptions.debug || false;
+    config.debug = config.debug || fetchOptions.debug || false;
     config.requestId = generateRequestId();
     config.sessionId = fetchOptions.sessionId || generateSessionId();
     config.traceId = generateTraceId();
-    config.timestamp = config.timing.startTimestamp;
+    config.timestamp = Date.now();
     config.trackingData = {};
     config.transfer = {
       requestSize: 0,
@@ -1113,9 +1692,9 @@ async function setInitialConfig(config, fetchOptions, isSecure, url, httpModule,
     } else if (Buffer.isBuffer(fetchOptions.body)) {
       requestBodySize = fetchOptions.body.length;
     } else if (fetchOptions.body instanceof RezoFormData) {
-      requestBodySize = fetchOptions.body.getLengthSync();
+      requestBodySize = await fetchOptions.body.getLength();
     } else if (fetchOptions.body instanceof FormData) {
-      requestBodySize = (await RezoFormData.fromNativeFormData(fetchOptions.body)).getLengthSync();
+      requestBodySize = await RezoFormData.fromNativeFormData(fetchOptions.body).getLength();
     }
   }
   const headers = fetchOptions.headers instanceof RezoHeaders ? fetchOptions.headers : new RezoHeaders(fetchOptions.headers);
@@ -1153,10 +1732,34 @@ function emitRedirect(emitter, headers, status, statusText, sourceUri, destinati
 }
 function createSecureContext() {
   return tls.createSecureContext({
-    ecdhCurve: "X25519:prime256v1:secp384r1:secp521r1",
-    honorCipherOrder: true,
-    ciphers: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA",
-    sigalgs: "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:ecdsa_secp521r1_sha512:rsa_pss_rsae_sha512:rsa_pkcs1_sha512",
+    ecdhCurve: "X25519:prime256v1:secp384r1",
+    ciphers: [
+      "TLS_AES_128_GCM_SHA256",
+      "TLS_AES_256_GCM_SHA384",
+      "TLS_CHACHA20_POLY1305_SHA256",
+      "ECDHE-ECDSA-AES128-GCM-SHA256",
+      "ECDHE-RSA-AES128-GCM-SHA256",
+      "ECDHE-ECDSA-AES256-GCM-SHA384",
+      "ECDHE-RSA-AES256-GCM-SHA384",
+      "ECDHE-ECDSA-CHACHA20-POLY1305",
+      "ECDHE-RSA-CHACHA20-POLY1305",
+      "ECDHE-RSA-AES128-SHA",
+      "ECDHE-RSA-AES256-SHA",
+      "AES128-GCM-SHA256",
+      "AES256-GCM-SHA384",
+      "AES128-SHA",
+      "AES256-SHA"
+    ].join(":"),
+    sigalgs: [
+      "ecdsa_secp256r1_sha256",
+      "rsa_pss_rsae_sha256",
+      "rsa_pkcs1_sha256",
+      "ecdsa_secp384r1_sha384",
+      "rsa_pss_rsae_sha384",
+      "rsa_pkcs1_sha384",
+      "rsa_pss_rsae_sha512",
+      "rsa_pkcs1_sha512"
+    ].join(":"),
     minVersion: "TLSv1.2",
     maxVersion: "TLSv1.3",
     sessionTimeout: 3600
@@ -1191,38 +1794,118 @@ function generateSessionId() {
 function generateTraceId() {
   return `trc_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
 }
-function parseProxy(proxy, isScure = true, rejectUnauthorized = false) {
+const proxyAgentCache = new Map;
+const PROXY_AGENT_EVICTION_MS = 60000;
+function buildProxyAgentKey(proxy, isSecure, rejectUnauthorized) {
+  if (typeof proxy === "string") {
+    return `str:${proxy}:${isSecure}:${rejectUnauthorized}`;
+  }
+  const p = proxy;
+  const authKey = p.auth ? `${p.auth.username}:${p.auth.password}` : "";
+  return `obj:${p.protocol}://${p.host}:${p.port}:${authKey}:${isSecure}:${rejectUnauthorized}`;
+}
+function evictStaleProxyAgents() {
+  const now = Date.now();
+  for (const [key, entry] of proxyAgentCache) {
+    if (now - entry.lastUsed > PROXY_AGENT_EVICTION_MS) {
+      try {
+        entry.agent.destroy();
+      } catch {}
+      proxyAgentCache.delete(key);
+    }
+  }
+}
+let lastProxyEviction = 0;
+function parseProxy(proxy, isScure = true, rejectUnauthorized = false, stealthProfile) {
   if (!proxy) {
     return;
   }
+  const now = Date.now();
+  if (now - lastProxyEviction > PROXY_AGENT_EVICTION_MS / 2) {
+    evictStaleProxyAgents();
+    lastProxyEviction = now;
+  }
+  const cacheKey = buildProxyAgentKey(proxy, isScure, rejectUnauthorized);
+  if (!stealthProfile) {
+    const cached = proxyAgentCache.get(cacheKey);
+    if (cached) {
+      cached.lastUsed = now;
+      return cached.agent;
+    }
+  }
+  const stealthTlsOpts = stealthProfile ? buildTlsOptions(stealthProfile.tls) : undefined;
+  if (stealthTlsOpts)
+    stealthTlsOpts.ALPNProtocols = ["http/1.1"];
+  let agent;
   if (typeof proxy === "string") {
     if (proxy.startsWith("http://")) {
-      return rezoProxy(`http://${proxy.slice(7)}`, "http");
+      agent = rezoProxy(`http://${proxy.slice(7)}`, "http", stealthTlsOpts ? { targetTlsOptions: stealthTlsOpts } : undefined);
     } else if (proxy.startsWith("https://")) {
-      return rezoProxy(`https://${proxy.slice(8)}`, "https");
+      agent = rezoProxy(`https://${proxy.slice(8)}`, "https", stealthTlsOpts ? { targetTlsOptions: stealthTlsOpts } : undefined);
+    } else {
+      agent = rezoProxy(proxy, stealthTlsOpts);
     }
-    return rezoProxy(proxy);
-  }
-  if (proxy.protocol === "http" || proxy.protocol === "https") {
-    return rezoProxy({
+  } else if (proxy.protocol === "http" || proxy.protocol === "https") {
+    agent = rezoProxy({
       ...proxy,
-      client: !isScure ? "http" : "https"
+      client: !isScure ? "http" : "https",
+      ...stealthTlsOpts ? { targetTlsOptions: stealthTlsOpts } : {}
     });
+  } else {
+    agent = rezoProxy(proxy, stealthTlsOpts);
   }
-  return rezoProxy(proxy);
+  if (!stealthProfile) {
+    proxyAgentCache.set(cacheKey, { agent, lastUsed: now });
+  }
+  return agent;
 }
-function updateCookies(config, headers, url) {
+async function updateCookies(config, headers, url, rootJar) {
   const cookies = headers["set-cookie"];
   if (cookies) {
     const jar = new RezoCookieJar;
-    if (config.enableCookieJar && config.cookieJar) {
-      config.cookieJar.setCookiesSync(cookies, url);
-    }
-    jar.setCookiesSync(cookies, url);
-    if (config.useCookies) {
-      const parsedCookies = jar.cookies();
-      const existingArray = config.responseCookies?.array || [];
+    const tempJar = new RezoCookieJar;
+    tempJar.setCookiesSync(cookies, url);
+    const parsedCookies = tempJar.cookies();
+    const acceptedCookies = [];
+    let hookError = null;
+    if (config.hooks?.beforeCookie && config.hooks.beforeCookie.length > 0) {
       for (const cookie of parsedCookies.array) {
+        let shouldAccept = true;
+        for (const hook of config.hooks.beforeCookie) {
+          try {
+            const result = await hook({
+              cookie,
+              source: "response",
+              url,
+              isValid: true
+            }, config);
+            if (result === false) {
+              shouldAccept = false;
+              break;
+            }
+          } catch (err) {
+            hookError = err;
+            if (config.debug) {
+              console.log("[Rezo Debug] beforeCookie hook error:", err);
+            }
+          }
+        }
+        if (shouldAccept) {
+          acceptedCookies.push(cookie);
+        }
+      }
+    } else {
+      acceptedCookies.push(...parsedCookies.array);
+    }
+    const acceptedCookieStrings = acceptedCookies.map((c) => c.toSetCookieString());
+    const jarToUpdate = rootJar || config.jar;
+    if (!config.disableJar && jarToUpdate) {
+      jarToUpdate.setCookiesSync(acceptedCookieStrings, url);
+    }
+    jar.setCookiesSync(acceptedCookieStrings, url);
+    if (config.useCookies) {
+      const existingArray = config.responseCookies?.array || [];
+      for (const cookie of acceptedCookies) {
         const existingIndex = existingArray.findIndex((c) => c.key === cookie.key && c.domain === cookie.domain);
         if (existingIndex >= 0) {
           existingArray[existingIndex] = cookie;
@@ -1232,6 +1915,17 @@ function updateCookies(config, headers, url) {
       }
       const mergedJar = new RezoCookieJar(existingArray, url);
       config.responseCookies = mergedJar.cookies();
+    }
+    if (!hookError && config.hooks?.afterCookie && config.hooks.afterCookie.length > 0) {
+      for (const hook of config.hooks.afterCookie) {
+        try {
+          await hook(acceptedCookies, config);
+        } catch (err) {
+          if (config.debug) {
+            console.log("[Rezo Debug] afterCookie hook error:", err);
+          }
+        }
+      }
     }
   }
 }

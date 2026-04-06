@@ -1,5 +1,3 @@
-import util from "node:util";
-
 class RezoHeaders extends Headers {
   constructor(init) {
     if (init instanceof RezoHeaders) {
@@ -24,6 +22,35 @@ class RezoHeaders extends Headers {
     } else {
       super(init);
     }
+    return new Proxy(this, {
+      get(target, prop, _receiver) {
+        if (typeof prop === "symbol" || prop in target) {
+          const value = Reflect.get(target, prop, target);
+          if (typeof value === "function") {
+            return value.bind(target);
+          }
+          return value;
+        }
+        return target.get(prop) || undefined;
+      },
+      set(target, prop, value) {
+        if (typeof prop === "symbol" || prop in target) {
+          return Reflect.set(target, prop, value);
+        }
+        target.set(prop, String(value));
+        return true;
+      },
+      has(target, prop) {
+        if (typeof prop === "symbol")
+          return Reflect.has(target, prop);
+        return Reflect.has(target, prop) || target.has(prop);
+      },
+      deleteProperty(target, prop) {
+        if (typeof prop === "string")
+          target.delete(prop);
+        return true;
+      }
+    });
   }
   getAll(name) {
     if (typeof super.getAll === "function" || super.getAll !== undefined) {
@@ -105,8 +132,24 @@ class RezoHeaders extends Headers {
     }
     return headers;
   }
+  toOrderedObject(order) {
+    const unordered = this.toObject();
+    const result = Object.create(null);
+    for (const key of order) {
+      const lk = key.toLowerCase();
+      if (lk in unordered) {
+        result[lk] = unordered[lk];
+      }
+    }
+    for (const key of Object.keys(unordered)) {
+      if (!(key in result)) {
+        result[key] = unordered[key];
+      }
+    }
+    return result;
+  }
   toObject(omit) {
-    const headers = {};
+    const headers = Object.create(null);
     omit = (omit ? typeof omit === "string" ? [omit] : omit : []).map((key) => key.toLowerCase());
     for (const [key, value] of super.entries()) {
       if (omit.length > 0) {
@@ -147,10 +190,10 @@ class RezoHeaders extends Headers {
     return super.has(name);
   }
   [Symbol.iterator]() {
-    return Object.entries(this.toObject())[Symbol.iterator]();
+    return super[Symbol.iterator]();
   }
-  [util.inspect.custom](_depth, options) {
-    return `${this[Symbol.toStringTag]} ${util.inspect(this.toObject(), options)}`;
+  [Symbol.for("nodejs.util.inspect.custom")](_depth, _options, inspect) {
+    return `${this[Symbol.toStringTag]} ${inspect({ ...this.toObject() }, { colors: true, depth: null })}`;
   }
   get [Symbol.toStringTag]() {
     return "RezoHeaders";

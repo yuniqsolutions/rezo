@@ -3,10 +3,15 @@ const { setGlobalAdapter, createRezoInstance, Rezo } = require('../core/rezo.cjs
 const { RezoError, RezoErrorCode } = require('../errors/rezo-error.cjs');
 const { RezoHeaders } = require('../utils/headers.cjs');
 const { RezoFormData } = require('../utils/form-data.cjs');
-const { RezoCookieJar, Cookie } = require('../utils/cookies.cjs');
+const { RezoCookieJar, Cookie } = require('../cookies/cookie-jar.cjs');
 const { createDefaultHooks, mergeHooks } = require('../core/hooks.cjs');
-const packageJson = require("../../package.json");
-
+const { VERSION } = require('../version.cjs');
+const _mod_eg1hij = require('./react-native-providers.cjs');
+exports.createFetchStreamTransport = _mod_eg1hij.createFetchStreamTransport;
+exports.createExpoFileSystemAdapter = _mod_eg1hij.createExpoFileSystemAdapter;
+exports.createReactNativeFsAdapter = _mod_eg1hij.createReactNativeFsAdapter;
+exports.createNetInfoProvider = _mod_eg1hij.createNetInfoProvider;
+exports.createExpoBackgroundTaskProvider = _mod_eg1hij.createExpoBackgroundTaskProvider;;
 exports.Rezo = Rezo;
 exports.RezoError = RezoError;
 exports.RezoErrorCode = RezoErrorCode;
@@ -24,7 +29,8 @@ const isCancel = exports.isCancel = (error) => {
 };
 const all = exports.all = Promise.all.bind(Promise);
 const spread = exports.spread = (callback) => (array) => callback(...array);
-const VERSION = exports.VERSION = packageJson.version;
+
+exports.VERSION = VERSION;
 setGlobalAdapter(executeRequest);
 const rezo = createRezoInstance(executeRequest);
 

@@ -1,10 +1,28 @@
-import { Cookie, RezoCookieJar } from './cookies.js';
+import { RezoCookieJar } from '../cookies/cookie-jar.js';
 import RezoFormData from './form-data.js';
 import { RezoHeaders } from './headers.js';
 import { RezoURLSearchParams } from './data-operations.js';
-import path from "node:path";
-import { parseProxyString } from '../proxy/index.js';
+import { parseProxyString } from '../proxy/parse.js';
 import { createDefaultHooks, mergeHooks, serializeHooks } from '../core/hooks.js';
+const hasBuffer = typeof Buffer !== "undefined";
+function isBuffer(value) {
+  return hasBuffer && Buffer.isBuffer(value);
+}
+function isBinaryBody(value) {
+  if (value == null)
+    return false;
+  if (isBuffer(value))
+    return true;
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value))
+    return true;
+  if (typeof Blob !== "undefined" && value instanceof Blob)
+    return true;
+  if (typeof ReadableStream !== "undefined" && value instanceof ReadableStream)
+    return true;
+  if (typeof value.pipe === "function")
+    return true;
+  return false;
+}
 export const ERROR_INFO = {
   ECONNREFUSED: {
     code: -111,
@@ -158,23 +176,22 @@ export const ERROR_INFO = {
     code: -1047,
     message: "Proxy Error: An unspecified error occurred while communicating with or through the proxy server."
   },
-  UNQ_NO_PROXY_AVAILABLE: {
+  REZ_NO_PROXY_AVAILABLE: {
     code: -1050,
-    message: "No Proxy Available: All proxies in ProxyManager are exhausted, disabled, or the URL did not match whitelist/blacklist rules."
+    message: "No Proxy Available: All proxies in ProxyManager are exhausted, disabled, or in cooldown."
   }
 };
 function setSignal() {
   if (this.signal)
     return;
-  if (this.timeoutClearInstanse)
-    clearTimeout(this.timeoutClearInstanse);
+  if (this.timeoutClearInstance)
+    clearTimeout(this.timeoutClearInstance);
   if (this.timeout && typeof this.timeout === "number" && this.timeout > 100) {
     const controller = new AbortController;
     const timer = setTimeout(() => controller.abort(), this.timeout);
-    if (typeof timer === "object" && "unref" in timer) {
+    if (typeof timer === "object" && typeof timer.unref === "function")
       timer.unref();
-    }
-    this.timeoutClearInstanse = timer;
+    this.timeoutClearInstance = timer;
     this.signal = controller.signal;
   }
 }
@@ -186,11 +203,12 @@ export async function getDefaultConfig(config = {}, proxyManager) {
     httpAgent: config.httpAgent,
     httpsAgent: config.httpsAgent,
     debug: config.debug === true,
+    trackUrl: config.trackUrl === true,
     maxRedirects: config.maxRedirects,
     retry: config.retry,
     proxy: config.proxy,
     followRedirects: config.followRedirects,
-    useCookies: config.enableCookieJar,
+    useCookies: config.disableJar === true ? false : true,
     fs: await getFS(),
     timeout: config.timeout ?? config.requestTimeout,
     hooks: config.hooks,
@@ -221,13 +239,14 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
     options = settions.options;
   }
   options.headers = buildHeaders(options.headers);
-  let headers = options.headers instanceof RezoHeaders ? options.headers : new RezoHeaders(options.headers || {});
-  if (options.headers.has("Cookie")) {
-    headers = new RezoHeaders(options.headers.toObject());
+  const optHeaders = options.headers;
+  let headers = optHeaders;
+  if (optHeaders.has("Cookie")) {
+    headers = new RezoHeaders(optHeaders.toObject());
     if (!config.useCookies) {
       config.useCookies = true;
     }
-    options.headers.delete("Cookie");
+    optHeaders.delete("Cookie");
   }
   const mainUrl = !isNew && addedOptions.fullUrl ? addedOptions.fullUrl : undefined;
   const forContentType = validMethods.includes(options.method.toLowerCase());
@@ -235,7 +254,23 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
   if (!options.responseType) {
     options.responseType = "auto";
   }
-  const cookieJar = config.enableCookieJar ? jar : new RezoCookieJar(config.requestCookies);
+  let cookieJar;
+  if (!config.disableJar) {
+    cookieJar = jar;
+    if (addedOptions.isRedirected && config.responseCookies?.array && config.responseCookies.array.length > 0) {
+      const cookieSetUrl = addedOptions.redirectedUrl || (options.fullUrl || (options.url instanceof URL ? options.url.href : String(options.url)));
+      jar.setCookiesSync(config.responseCookies.array, cookieSetUrl);
+    }
+  } else {
+    cookieJar = new RezoCookieJar;
+    const cookieSetUrl = addedOptions.isRedirected && addedOptions.redirectedUrl ? addedOptions.redirectedUrl : options.fullUrl || (options.url instanceof URL ? options.url.href : String(options.url));
+    if (config.requestCookies && config.requestCookies.length > 0) {
+      cookieJar.setCookiesSync(config.requestCookies, cookieSetUrl);
+    }
+    if (addedOptions.isRedirected && config.responseCookies?.array && config.responseCookies.array.length > 0) {
+      cookieJar.setCookiesSync(config.responseCookies.array, cookieSetUrl);
+    }
+  }
   let requestCookies = [];
   fetchOptions.method = options.method;
   if (options.fullUrl) {
@@ -244,7 +279,7 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
   } else {
     fetchOptions.url = options.url;
   }
-  let contentType = options.contentType || headers.get("Content-Type") || (forContentType ? "application/json" : undefined);
+  let contentType = options.contentType || headers.get("Content-Type") || undefined;
   if (addedOptions && addedOptions.customHeaders) {
     headers = addedOptions.customHeaders instanceof RezoHeaders ? addedOptions.customHeaders : new RezoHeaders(addedOptions.customHeaders);
   }
@@ -269,15 +304,29 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
       cookieJar.setCookiesSync(options.cookies, options.url instanceof URL ? options.url.href : options.url);
     }
   }
+  const resolvedUrl = fetchOptions.url || options.url;
+  let cookieUrl;
+  if (resolvedUrl instanceof URL) {
+    cookieUrl = resolvedUrl.href;
+  } else if (typeof resolvedUrl === "string") {
+    try {
+      const parsed = new URL(resolvedUrl);
+      cookieUrl = parsed.href;
+    } catch {
+      cookieUrl = resolvedUrl;
+    }
+  } else {
+    cookieUrl = String(resolvedUrl);
+  }
   let cookiesString = "";
   if (config.useCookies) {
-    requestCookies = cookieJar.getCookiesSync(options.url instanceof URL ? options.url.href : options.url).map((c) => new Cookie(c));
-    cookiesString = cookieJar.getCookieStringSync(options.url instanceof URL ? options.url.href : options.url);
+    requestCookies = cookieJar.getCookiesForRequest(cookieUrl);
+    cookiesString = cookieJar.getCookieHeader(cookieUrl);
   }
   if (options.xsrfCookieName && options.xsrfHeaderName && requestCookies.length > 0) {
     const xsrfCookie = requestCookies.find((c) => c.key === options.xsrfCookieName);
     if (xsrfCookie && xsrfCookie.value) {
-      fetchOptions.headers.set(options.xsrfHeaderName, xsrfCookie.value);
+      headers.set(options.xsrfHeaderName, xsrfCookie.value);
     }
   }
   if (requestCookies.length > 0 && config) {
@@ -285,24 +334,31 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
       config.requestCookies = requestCookies;
     } else {
       for (const cookie of requestCookies) {
-        config.requestCookies = config.requestCookies.filter((c) => c.key !== cookie.key);
+        config.requestCookies = config.requestCookies.filter((c) => !(c.key === cookie.key && c.domain === cookie.domain));
         config.requestCookies.push(cookie);
       }
     }
   }
   if (cookiesString) {
-    fetchOptions.headers.set("Cookie", cookiesString);
+    headers.set("Cookie", cookiesString);
   }
   if (options.body) {
     fetchOptions.body = options.body;
   }
   const isFormData = fetchOptions.body && (fetchOptions.body instanceof FormData || fetchOptions.body instanceof RezoFormData);
-  if (!isFormData) {
+  const isURLEncoded = fetchOptions.body && (fetchOptions.body instanceof URLSearchParams || fetchOptions.body instanceof RezoURLSearchParams);
+  if (isURLEncoded) {
+    fetchOptions.body = fetchOptions.body.toString();
+    if (!contentType) {
+      contentType = "application/x-www-form-urlencoded";
+      headers.set("Content-Type", contentType);
+    }
+  }
+  if (!isFormData && !isURLEncoded) {
     if (options.multipart || options.json || options.formData || options.form) {
       if (options.formData || options.multipart) {
         if (options.multipart instanceof RezoFormData || options.formData instanceof RezoFormData) {
           const body = options.multipart instanceof RezoFormData ? options.multipart : options.formData;
-          contentType = body.getContentType();
           fetchOptions.body = body;
         } else {
           const body = new RezoFormData;
@@ -311,27 +367,31 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
             Object.entries(_body).forEach(([key, value]) => {
               if (value === null || value === undefined) {
                 body.append(key, "");
-              } else if (typeof value === "string" || Buffer.isBuffer(value)) {
+              } else if (typeof value === "string") {
                 body.append(key, value);
-              } else if (typeof value === "object" && typeof value.pipe === "function") {
+              } else if (isBuffer(value)) {
+                body.append(key, value);
+              } else if (value instanceof Blob) {
                 body.append(key, value);
               } else if (typeof value === "object" && value.value !== undefined) {
                 const val = value.value;
-                const opts = value.options || {};
-                if (typeof val === "string" || Buffer.isBuffer(val)) {
-                  body.append(key, val, opts);
+                const filename = value.options?.filename || value.filename;
+                if (typeof val === "string") {
+                  body.append(key, val);
+                } else if (isBuffer(val)) {
+                  body.append(key, val, filename);
+                } else if (val instanceof Blob) {
+                  body.append(key, val, filename);
                 } else {
-                  body.append(key, String(val), opts);
+                  body.append(key, String(val));
                 }
               } else {
                 body.append(key, String(value));
               }
             });
           }
-          contentType = body.getContentType();
           fetchOptions.body = body;
         }
-        fetchOptions.headers.set("Content-Type", contentType);
       } else if (options.form) {
         contentType = "application/x-www-form-urlencoded";
         if (typeof options.form === "object") {
@@ -339,21 +399,21 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
         } else {
           fetchOptions.body = options.form;
         }
-        fetchOptions.headers.set("Content-Type", contentType);
+        headers.set("Content-Type", contentType);
       } else if (options.json) {
         fetchOptions.body = options.body;
         contentType = "application/json";
-        fetchOptions.headers.set("Content-Type", contentType);
+        headers.set("Content-Type", contentType);
       }
     } else if (contentType) {
       const type = contentType.toLowerCase();
       if (type.includes("json")) {
-        fetchOptions.headers.set("Content-Type", "application/json");
+        headers.set("Content-Type", contentType);
         if (fetchOptions.body && typeof fetchOptions.body === "object") {
           fetchOptions.body = JSON.stringify(fetchOptions.body);
         }
       } else if (type.includes("x-www-form-urlencoded")) {
-        fetchOptions.headers.set("Content-Type", "application/x-www-form-urlencoded");
+        headers.set("Content-Type", contentType);
         if (fetchOptions.body && typeof fetchOptions.body === "object") {
           fetchOptions.body = new URLSearchParams(fetchOptions.body).toString();
         }
@@ -363,17 +423,23 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
           Object.entries(fetchOptions.body).forEach(([key, value]) => {
             if (value === null || value === undefined) {
               formData.append(key, "");
-            } else if (typeof value === "string" || Buffer.isBuffer(value)) {
+            } else if (typeof value === "string") {
               formData.append(key, value);
-            } else if (typeof value === "object" && typeof value.pipe === "function") {
+            } else if (isBuffer(value)) {
+              formData.append(key, value);
+            } else if (value instanceof Blob) {
               formData.append(key, value);
             } else if (typeof value === "object" && value.value !== undefined) {
               const val = value.value;
-              const opts = value.options || {};
-              if (typeof val === "string" || Buffer.isBuffer(val)) {
-                formData.append(key, val, opts);
+              const filename = value.options?.filename || value.filename;
+              if (typeof val === "string") {
+                formData.append(key, val);
+              } else if (isBuffer(val)) {
+                formData.append(key, val, filename);
+              } else if (val instanceof Blob) {
+                formData.append(key, val, filename);
               } else {
-                formData.append(key, String(val), opts);
+                formData.append(key, String(val));
               }
             } else {
               formData.append(key, String(value));
@@ -383,14 +449,41 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
         }
       } else if (type.includes("text/") || type.includes("/javascript")) {
         fetchOptions.body = fetchOptions.body ? typeof fetchOptions.body === "object" ? JSON.stringify(fetchOptions.body) : fetchOptions.body : "";
-        fetchOptions.headers.set("Content-Type", contentType);
+        headers.set("Content-Type", contentType);
+      } else {
+        headers.set("Content-Type", contentType);
+        if (fetchOptions.body && typeof fetchOptions.body === "object" && !isBinaryBody(fetchOptions.body)) {
+          fetchOptions.body = JSON.stringify(fetchOptions.body);
+        }
       }
-    } else if (contentType && !options.withoutContentType) {
-      fetchOptions.headers.set("Content-Type", contentType);
+    } else if (forContentType) {
+      const body = fetchOptions.body;
+      if (body != null && body !== "") {
+        if (typeof body === "string") {
+          const trimmed = body.trim();
+          if (trimmed.startsWith("{") && trimmed.endsWith("}") || trimmed.startsWith("[") && trimmed.endsWith("]")) {
+            try {
+              JSON.parse(trimmed);
+              contentType = "application/json";
+            } catch {
+              contentType = "text/plain";
+            }
+          } else if (/^[^=&\s]+=[^&]*(&[^=&\s]+=[^&]*)*$/.test(trimmed)) {
+            contentType = "application/x-www-form-urlencoded";
+          } else {
+            contentType = "text/plain";
+          }
+          headers.set("Content-Type", contentType);
+        } else if (isBinaryBody(body)) {} else if (typeof body === "object") {
+          contentType = "application/json";
+          headers.set("Content-Type", contentType);
+          fetchOptions.body = JSON.stringify(body);
+        }
+      }
     }
   }
   if (options.withoutContentType || isFormData) {
-    fetchOptions.headers.delete("Content-Type");
+    headers.delete("Content-Type");
   }
   if (options.withoutBodyOnRedirect && addedOptions.isRedirected) {
     fetchOptions.body = undefined;
@@ -398,36 +491,36 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
   options.rejectUnauthorized = config.rejectUnauthorized;
   if ((typeof options.autoSetReferer !== "boolean" || options.autoSetReferer) && addedOptions.redirectedUrl) {
     if (!addedOptions.customHeaders)
-      fetchOptions.headers.set("Referer", addedOptions.redirectedUrl);
+      headers.set("Referer", addedOptions.redirectedUrl);
   }
   if (!config.useCookies) {
-    fetchOptions.headers.delete("Cookie");
+    headers.delete("Cookie");
   }
   if (fetchOptions.body && (fetchOptions.body instanceof FormData || fetchOptions.body instanceof RezoFormData)) {
-    fetchOptions.headers.delete("Content-Type");
+    headers.delete("Content-Type");
   }
   if (options.proxy) {
     fetchOptions.proxy = options.proxy;
   }
-  if (fetchOptions.method.toLowerCase() === "get" && fetchOptions.headers.has("Content-Type")) {
-    fetchOptions.headers.delete("Content-Type");
+  if (fetchOptions.method.toLowerCase() === "get" && headers.has("Content-Type")) {
+    headers.delete("Content-Type");
   }
   if (mainUrl || addedOptions.redirectedUrl) {
-    fetchOptions.headers.set("host", new URL(fetchOptions.fullUrl).host);
+    headers.set("host", new URL(fetchOptions.fullUrl).host);
     if ([`POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`].includes(fetchOptions.method.toUpperCase()))
-      fetchOptions.headers.set("origin", new URL(mainUrl || fetchOptions.url).origin);
+      headers.set("origin", new URL(mainUrl || fetchOptions.url).origin);
   } else {
-    if (!fetchOptions.headers.has("origin") && options.autoSetOrigin) {
+    if (!headers.has("origin") && options.autoSetOrigin) {
       const r = [`POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`].includes(fetchOptions.method.toUpperCase());
       if (r)
-        fetchOptions.headers.set("origin", new URL(mainUrl || fetchOptions.url).origin);
+        headers.set("origin", new URL(mainUrl || fetchOptions.url).origin);
     }
-    if (mainUrl && !fetchOptions.headers.has("referer") && options.autoSetReferer) {
-      fetchOptions.headers.set("referer", mainUrl);
+    if (mainUrl && !headers.has("referer") && options.autoSetReferer) {
+      headers.set("referer", mainUrl);
     }
   }
   if (addedOptions.redirectCode && addedOptions.lastRedirectedUrl) {
-    fetchOptions.headers.set("referer", addedOptions.lastRedirectedUrl);
+    headers.set("referer", addedOptions.lastRedirectedUrl);
   }
   if (options.responseType) {
     fetchOptions.responseType = options.responseType;
@@ -445,10 +538,16 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
   if (options.sessionId) {
     fetchOptions.sessionId = options.sessionId;
   }
+  if (options._resolvedStealth) {
+    fetchOptions._resolvedStealth = options._resolvedStealth;
+  }
   let resolvedProxyManager = null;
-  const pm = addedOptions.defaultOptions.proxyManager;
+  const pm = addedOptions?.defaultOptions?.proxyManager;
   if (pm && options.useProxyManager !== false && !options.proxy) {
     resolvedProxyManager = pm;
+  }
+  if (config.fileName) {
+    fetchOptions.fileName = config.fileName;
   }
   return {
     fetchOptions,
@@ -458,12 +557,12 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
   };
 }
 function buildHeaders(headers) {
-  return headers = headers instanceof RezoHeaders ? headers : new RezoHeaders(headers);
+  return headers instanceof RezoHeaders ? headers : new RezoHeaders(headers);
 }
 function createConfig(options, jar, addedOptions) {
   const { defaultOptions } = addedOptions;
   const { fs } = defaultOptions;
-  const rawUrl = typeof options.url === "string" ? options.url : options.url.toString();
+  const rawUrl = typeof options.url === "string" ? options.url : options.url ? options.url.toString() : "";
   options["debug"] = options.debug ?? defaultOptions.debug;
   const {
     autoSetOrigin = false,
@@ -517,29 +616,37 @@ As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
   const saveTo = requestOptions.saveTo || requestOptions.fileName;
   let fileName = undefined;
   requestOptions.timeout = requestOptions.timeout ?? defaultOptions.timeout;
-  if (defaultOptions.retry && !requestOptions.retry) {
-    requestOptions.retry = {
-      maxRetries: defaultOptions.retry.maxRetries && typeof defaultOptions.retry.maxRetries === "number" ? defaultOptions.retry.maxRetries : 0,
-      retryDelay: defaultOptions.retry.retryDelay && typeof defaultOptions.retry.retryDelay === "number" ? defaultOptions.retry.retryDelay : 0,
-      incrementDelay: defaultOptions.retry.incrementDelay && typeof defaultOptions.retry.incrementDelay === "boolean" ? defaultOptions.retry.incrementDelay : false,
-      condition: defaultOptions.retry.condition,
-      statusCodes: defaultOptions.retry.statusCodes || [408, 429, 500, 502, 503, 504, 425, 520]
-    };
-  }
+  const defaultRetryConfig = defaultOptions.retry ? normalizeRetryConfig(defaultOptions.retry) : null;
+  const normalizedRetry = normalizeRetryConfig(requestOptions.retry, defaultRetryConfig || undefined);
   requestOptions.followRedirects = typeof requestOptions.followRedirects === "boolean" ? requestOptions.followRedirects : typeof defaultOptions.followRedirects === "boolean" ? defaultOptions.followRedirects : true;
-  const retryLimit = typeof requestOptions?.retry?.maxRetries === "number" && requestOptions?.retry?.maxRetries > 0 ? requestOptions?.retry?.maxRetries : 0;
-  const retryDelay = typeof requestOptions?.retry?.retryDelay === "number" && requestOptions?.retry?.retryDelay > 0 ? requestOptions?.retry?.retryDelay : 0;
-  const retryIncrementDelay = typeof requestOptions?.retry?.incrementDelay === "boolean" ? requestOptions?.retry?.incrementDelay : false;
-  const statusCodes = Array.isArray(requestOptions?.retry?.statusCodes) && requestOptions.retry.statusCodes.length > 0 ? requestOptions.retry.statusCodes : [408, 429, 500, 502, 503, 504, 425, 520];
   const redirectCount = 0;
-  const params = new RezoURLSearchParams(options.params || {});
+  if (requestOptions.validateStatus === undefined)
+    requestOptions.validateStatus = defaultOptions.validateStatus;
+  if (!requestOptions.paramsSerializer)
+    requestOptions.paramsSerializer = defaultOptions.paramsSerializer;
+  if (!requestOptions.dnsLookup)
+    requestOptions.dnsLookup = defaultOptions.dnsLookup;
   const baseURL = requestOptions.baseURL && (requestOptions.baseURL.startsWith("http://") || requestOptions.baseURL.startsWith("https://")) ? requestOptions.baseURL : defaultOptions.baseURL && (defaultOptions.baseURL.startsWith("http://") || defaultOptions.baseURL.startsWith("https://")) ? defaultOptions.baseURL : undefined;
   const url = new URL(options.url, baseURL);
-  params.forEach((value, key) => {
-    if (value && !url.searchParams.has(key)) {
-      url.searchParams.append(key, value);
+  const paramsSerializer = requestOptions.paramsSerializer;
+  if (options.params && paramsSerializer) {
+    const serialized = paramsSerializer(options.params);
+    if (serialized) {
+      const searchParams = new URLSearchParams(serialized);
+      searchParams.forEach((value, key) => {
+        if (!url.searchParams.has(key)) {
+          url.searchParams.append(key, value);
+        }
+      });
     }
-  });
+  } else {
+    const params = new RezoURLSearchParams(options.params || {});
+    params.forEach((value, key) => {
+      if (value && !url.searchParams.has(key)) {
+        url.searchParams.append(key, value);
+      }
+    });
+  }
   requestOptions.fullUrl = url.href;
   requestOptions.url = options.url;
   requestOptions.baseURL = options.baseURL;
@@ -560,18 +667,11 @@ As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
     maxRedirects,
     retryAttempts: 0,
     timeout: typeof requestOptions.timeout === "number" ? requestOptions.timeout : null,
-    enableCookieJar: typeof defaultOptions.enableCookieJar === "boolean" ? defaultOptions.enableCookieJar : true,
+    disableJar: typeof defaultOptions.disableJar === "boolean" ? defaultOptions.disableJar : false,
+    withCredentials: typeof withCredentials === "boolean" ? withCredentials : typeof defaultOptions.withCredentials === "boolean" ? defaultOptions.withCredentials : false,
     useCookies: typeof requestOptions.useCookies === "boolean" ? requestOptions.useCookies : true,
-    cookieJar: requestOptions.jar || jar,
-    retry: {
-      maxRetries: retryLimit,
-      retryDelay,
-      incrementDelay: retryIncrementDelay,
-      statusCodes,
-      condition: requestOptions.retry?.condition || defaultOptions.retry?.condition || ((error) => {
-        return error;
-      })
-    },
+    jar: requestOptions.jar || jar,
+    retry: normalizedRetry,
     originalRequest: requestOptions,
     redirectCount,
     redirectHistory: [],
@@ -582,7 +682,12 @@ As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
     proxy: normalizedProxy,
     enableRedirectCycleDetection,
     rejectUnauthorized: typeof rejectUnauthorized === "boolean" ? rejectUnauthorized : true,
-    decompress: typeof requestOptions.decompress === "boolean" ? requestOptions.decompress : typeof defaultOptions.decompress === "boolean" ? defaultOptions.decompress : true
+    decompress: typeof requestOptions.decompress === "boolean" ? requestOptions.decompress : typeof defaultOptions.decompress === "boolean" ? defaultOptions.decompress : true,
+    debug: requestOptions.debug === true || defaultOptions.debug === true,
+    trackUrl: requestOptions.trackUrl === true || defaultOptions.trackUrl === true,
+    originalBody: requestOptions.body,
+    validateStatus: requestOptions.validateStatus,
+    dnsLookup: requestOptions.dnsLookup
   };
   config.setSignal = setSignal.bind(config);
   if (requestOptions.encoding || defaultOptions.encoding) {
@@ -591,13 +696,15 @@ As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
   if (requestOptions.beforeRedirect || defaultOptions.beforeRedirect) {
     config.beforeRedirect = requestOptions.beforeRedirect || defaultOptions.beforeRedirect;
   }
+  if (requestOptions.onRedirect || defaultOptions.onRedirect) {
+    config.onRedirect = requestOptions.onRedirect || defaultOptions.onRedirect;
+  }
   config.requestCookies = [];
   config.responseCookies = {
     array: [],
     serialized: [],
     netscape: `# Netscape HTTP Cookie File
 # This file was generated by Rezo HTTP client
-# Based on uniqhtt cookie implementation
 `,
     string: "",
     setCookiesString: []
@@ -606,11 +713,11 @@ As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
   const baseHooks = mergeHooks(createDefaultHooks(), defaultOptions.hooks || {});
   const mergedHooks = mergeHooks(baseHooks, requestOptions.hooks || {});
   config.hooks = serializeHooks(mergedHooks);
-  if (typeof config.enableCookieJar !== "boolean") {
-    config.enableCookieJar = true;
+  if (typeof config.disableJar !== "boolean") {
+    config.disableJar = false;
   }
-  if (!config.enableCookieJar) {
-    config.cookieJar = new RezoCookieJar;
+  if (config.disableJar) {
+    config.jar = new RezoCookieJar;
   }
   if (options.httpAgent) {
     config.httpAgent = options.httpAgent;
@@ -625,17 +732,29 @@ As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
     } else if (!fs) {
       throw new Error(`You can only use this feature in nodejs module, not in Edge module.`);
     }
-    const name = path.basename(saveTo);
-    if (checkISPermission && checkISPermission(saveTo.length ? path.dirname(saveTo) : path.resolve(process.cwd()), fs)) {
-      const dir = name.length < saveTo.length ? path.dirname(saveTo) : path.join(process.cwd(), "download");
-      if (!fs.existsSync(dir)) {
+    const basename = (p) => p.split(/[/\\]/).pop() || "";
+    const dirname = (p) => {
+      const parts = p.split(/[/\\]/);
+      parts.pop();
+      return parts.join("/") || ".";
+    };
+    const join = (...parts) => parts.join("/").replace(/\/+/g, "/");
+    const name = basename(saveTo);
+    const cwd = typeof process !== "undefined" && process.cwd ? process.cwd() : ".";
+    const dir = name.length < saveTo.length ? dirname(saveTo) : join(cwd, "download");
+    if (!fs.existsSync(dir)) {
+      try {
         fs.mkdirSync(dir, { recursive: true });
+      } catch {
+        throw new Error(`Permission denied to save to ${saveTo}`);
       }
-      fileName = path.join(dir, name);
-      config.fileName = fileName;
-    } else {
+    }
+    if (checkISPermission && !checkISPermission(dir, fs)) {
       throw new Error(`Permission denied to save to ${saveTo}`);
     }
+    fileName = join(dir, name);
+    config.fileName = fileName;
+    requestOptions.fileName = fileName;
   }
   return {
     config,
@@ -753,4 +872,113 @@ async function curlCheckOption(isAvailable) {
     status: false,
     message
   };
+}
+const DEFAULT_RETRY_STATUS_CODES = [408, 425, 429, 500, 502, 503, 504, 520];
+const DEFAULT_RETRY_METHODS = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE"];
+export const NETWORK_ERROR_CODES = [
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "ECONNABORTED",
+  "EPIPE",
+  "EHOSTUNREACH",
+  "ENETUNREACH"
+];
+export const TIMEOUT_ERROR_CODES = ["ETIMEDOUT", "ECONNABORTED", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT"];
+export function normalizeRetryConfig(retry, defaults) {
+  if (retry === undefined || retry === false) {
+    return null;
+  }
+  if (typeof retry === "number") {
+    return {
+      maxRetries: retry,
+      retryDelay: defaults?.retryDelay ?? 1000,
+      maxDelay: defaults?.maxDelay ?? 30000,
+      backoff: defaults?.backoff ?? 1,
+      statusCodes: defaults?.statusCodes ?? DEFAULT_RETRY_STATUS_CODES,
+      retryOnTimeout: defaults?.retryOnTimeout ?? true,
+      retryOnNetworkError: defaults?.retryOnNetworkError ?? true,
+      methods: defaults?.methods ?? DEFAULT_RETRY_METHODS,
+      condition: defaults?.condition,
+      onRetry: defaults?.onRetry,
+      onRetryExhausted: defaults?.onRetryExhausted
+    };
+  }
+  if (retry === true) {
+    return {
+      maxRetries: defaults?.maxRetries ?? 3,
+      retryDelay: defaults?.retryDelay ?? 1000,
+      maxDelay: defaults?.maxDelay ?? 30000,
+      backoff: defaults?.backoff ?? 1,
+      statusCodes: defaults?.statusCodes ?? DEFAULT_RETRY_STATUS_CODES,
+      retryOnTimeout: defaults?.retryOnTimeout ?? true,
+      retryOnNetworkError: defaults?.retryOnNetworkError ?? true,
+      methods: defaults?.methods ?? DEFAULT_RETRY_METHODS,
+      condition: defaults?.condition,
+      onRetry: defaults?.onRetry,
+      onRetryExhausted: defaults?.onRetryExhausted
+    };
+  }
+  const config = retry;
+  const maxRetries = config.limit ?? config.maxRetries ?? defaults?.maxRetries ?? 3;
+  const retryDelay = config.delay ?? config.retryDelay ?? defaults?.retryDelay ?? 1000;
+  const statusCodes = config.retryOn ?? config.statusCodes ?? defaults?.statusCodes ?? DEFAULT_RETRY_STATUS_CODES;
+  let backoff = config.backoff ?? defaults?.backoff ?? 1;
+  if (backoff === undefined && config.incrementDelay === true) {
+    backoff = "linear";
+  }
+  return {
+    maxRetries,
+    retryDelay,
+    maxDelay: config.maxDelay ?? defaults?.maxDelay ?? 30000,
+    backoff,
+    statusCodes,
+    retryOnTimeout: config.retryOnTimeout ?? defaults?.retryOnTimeout ?? true,
+    retryOnNetworkError: config.retryOnNetworkError ?? defaults?.retryOnNetworkError ?? true,
+    methods: (config.methods ?? defaults?.methods ?? DEFAULT_RETRY_METHODS).map((m) => m.toUpperCase()),
+    condition: config.condition ?? defaults?.condition,
+    onRetry: config.onRetry ?? defaults?.onRetry,
+    onRetryExhausted: config.onRetryExhausted ?? defaults?.onRetryExhausted
+  };
+}
+export function calculateRetryDelay(attempt, baseDelay, backoff, maxDelay) {
+  let delay;
+  if (typeof backoff === "function") {
+    delay = backoff(attempt, baseDelay);
+  } else if (backoff === "exponential" || backoff === 2) {
+    delay = baseDelay * Math.pow(2, attempt - 1);
+  } else if (backoff === "linear") {
+    delay = baseDelay * attempt;
+  } else if (typeof backoff === "number") {
+    delay = baseDelay * Math.pow(backoff, attempt - 1);
+  } else {
+    delay = baseDelay;
+  }
+  const jitter = delay * 0.1 * (Math.random() * 2 - 1);
+  delay = delay + jitter;
+  return Math.min(Math.max(0, delay), maxDelay);
+}
+export function shouldRetry(error, attempt, method, config) {
+  if (attempt > config.maxRetries) {
+    return false;
+  }
+  if (!config.methods.includes(method.toUpperCase())) {
+    return false;
+  }
+  const statusCode = error?.response?.status ?? error?.status ?? error?.statusCode;
+  if (statusCode && config.statusCodes.includes(statusCode)) {
+    return true;
+  }
+  const errorCode = error?.code ?? error?.cause?.code;
+  if (errorCode) {
+    if (config.retryOnTimeout && TIMEOUT_ERROR_CODES.includes(errorCode)) {
+      return true;
+    }
+    if (config.retryOnNetworkError && NETWORK_ERROR_CODES.includes(errorCode)) {
+      return true;
+    }
+  }
+  return false;
 }

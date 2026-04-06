@@ -1,5 +1,6 @@
-const { RezoCookieJar } = require('../utils/cookies.cjs');
+const { RezoCookieJar } = require('../cookies/index.cjs');
 const RezoHeaders = require('../utils/headers.cjs');
+const { hasXssiPrefix, parseXssiJson } = require('../utils/xssi-json.cjs');
 const textRelatedTypes = [
   "text",
   "xml",
@@ -87,7 +88,7 @@ function formatResponse(data, config, headers) {
   if (responseType === "buffer" || responseType === "binary") {
     config.responseType = "buffer";
     if (supportsBuffer()) {
-      return data instanceof Buffer ? data : Buffer.from(data);
+      return Buffer.isBuffer(data) ? data : Buffer.from(data);
     }
     return data;
   }
@@ -99,7 +100,7 @@ function formatResponse(data, config, headers) {
         const encoder = new TextEncoder;
         return encoder.encode(data).buffer;
       }
-      if (supportsBuffer() && data instanceof Buffer) {
+      if (supportsBuffer() && Buffer.isBuffer(data)) {
         return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
       }
     }
@@ -110,7 +111,7 @@ function formatResponse(data, config, headers) {
       if (typeof data === "string") {
         return new Blob([data]);
       }
-      if (data instanceof ArrayBuffer || supportsBuffer() && data instanceof Buffer) {
+      if (data instanceof ArrayBuffer || supportsBuffer() && Buffer.isBuffer(data)) {
         return new Blob([data]);
       }
     }
@@ -119,7 +120,7 @@ function formatResponse(data, config, headers) {
   if (responseType === "text") {
     if (typeof data === "string")
       return data;
-    if (supportsBuffer() && data instanceof Buffer) {
+    if (supportsBuffer() && Buffer.isBuffer(data)) {
       return data.toString("utf-8");
     }
     if (data instanceof ArrayBuffer) {
@@ -140,32 +141,46 @@ function parseResponseBodyWithAutoDetect(data, contentType, config) {
   if (contentType && (contentType.includes("image/") || contentType.includes("video/") || contentType.includes("audio/"))) {
     config.responseType = "buffer";
     if (supportsBuffer()) {
-      return data instanceof Buffer ? data : Buffer.from(data);
+      return Buffer.isBuffer(data) ? data : Buffer.from(data);
     }
     return data;
   }
   if (contentType && contentType.includes("application/octet-stream")) {
     config.responseType = "buffer";
     if (supportsBuffer()) {
-      return data instanceof Buffer ? data : Buffer.from(data);
+      return Buffer.isBuffer(data) ? data : Buffer.from(data);
     }
     return data;
   }
   if (contentType && textRelatedTypes.some((type) => contentType.includes(type))) {
+    const str = typeof data === "string" ? data : supportsBuffer() && Buffer.isBuffer(data) ? data.toString("utf-8") : data instanceof ArrayBuffer ? new TextDecoder().decode(data) : String(data);
+    const trimmed = str.trim();
+    if (trimmed.length > 0 && (trimmed.charCodeAt(0) === 123 || trimmed.charCodeAt(0) === 91)) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        config.responseType = "json";
+        return parsed;
+      } catch {}
+    }
     config.responseType = "text";
-    if (typeof data === "string")
-      return data;
-    if (supportsBuffer() && data instanceof Buffer) {
-      return data.toString("utf-8");
+    return str;
+  }
+  {
+    const str = typeof data === "string" ? data : supportsBuffer() && Buffer.isBuffer(data) ? data.toString("utf-8") : null;
+    if (str) {
+      const trimmed = str.trim();
+      if (trimmed.length > 0 && (trimmed.charCodeAt(0) === 123 || trimmed.charCodeAt(0) === 91)) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          config.responseType = "json";
+          return parsed;
+        } catch {}
+      }
     }
-    if (data instanceof ArrayBuffer) {
-      return new TextDecoder().decode(data);
-    }
-    return String(data);
   }
   config.responseType = "buffer";
   if (supportsBuffer()) {
-    return data instanceof Buffer ? data : Buffer.from(data);
+    return Buffer.isBuffer(data) ? data : Buffer.from(data);
   }
   if (supportsArrayBuffer()) {
     if (data instanceof ArrayBuffer)
@@ -191,7 +206,7 @@ function parseResponseBody(data, contentType, responseType) {
     if (responseType === "arrayBuffer" && supportsArrayBuffer()) {
       if (data instanceof ArrayBuffer)
         return data;
-      if (supportsBuffer() && data instanceof Buffer) {
+      if (supportsBuffer() && Buffer.isBuffer(data)) {
         return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
       }
     }
@@ -200,19 +215,19 @@ function parseResponseBody(data, contentType, responseType) {
     if (responseType === "arrayBuffer" && supportsArrayBuffer()) {
       if (data instanceof ArrayBuffer)
         return data;
-      if (supportsBuffer() && data instanceof Buffer) {
+      if (supportsBuffer() && Buffer.isBuffer(data)) {
         return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
       }
     }
     if (supportsBuffer()) {
-      return data instanceof Buffer ? data : Buffer.from(data);
+      return Buffer.isBuffer(data) ? data : Buffer.from(data);
     }
     return data;
   }
   if (contentType && textRelatedTypes.some((type) => contentType.includes(type))) {
     if (typeof data === "string")
       return data;
-    if (supportsBuffer() && data instanceof Buffer) {
+    if (supportsBuffer() && Buffer.isBuffer(data)) {
       return data.toString("utf-8");
     }
     if (data instanceof ArrayBuffer) {
@@ -221,7 +236,7 @@ function parseResponseBody(data, contentType, responseType) {
     return String(data);
   }
   if (supportsBuffer()) {
-    return data instanceof Buffer ? data : Buffer.from(data);
+    return Buffer.isBuffer(data) ? data : Buffer.from(data);
   }
   if (supportsArrayBuffer()) {
     if (data instanceof ArrayBuffer)
@@ -240,7 +255,7 @@ function parseJsonData(body) {
       if (body.length < 3)
         return body;
       jsonString = body;
-    } else if (supportsBuffer() && body instanceof Buffer) {
+    } else if (supportsBuffer() && Buffer.isBuffer(body)) {
       jsonString = body.toString("utf-8");
     } else if (body instanceof ArrayBuffer) {
       jsonString = new TextDecoder().decode(body);
@@ -248,6 +263,9 @@ function parseJsonData(body) {
       jsonString = String(body);
     }
     jsonString = jsonString.trim();
+    if (hasXssiPrefix(jsonString)) {
+      return parseXssiJson(jsonString);
+    }
     if (jsonString.includes(`
 `) && !jsonString.startsWith("[") && !jsonString.startsWith("{")) {
       const lines = jsonString.split(`
@@ -270,7 +288,7 @@ function parseJsonData(body) {
     } catch {
       if (typeof body === "string")
         return body;
-      if (supportsBuffer() && body instanceof Buffer) {
+      if (supportsBuffer() && Buffer.isBuffer(body)) {
         return body.toString("utf-8");
       }
       if (body instanceof ArrayBuffer) {
@@ -333,7 +351,6 @@ function buildResponse(params) {
       serialized: [],
       netscape: `# Netscape HTTP Cookie File
 # This file was generated by Rezo HTTP client
-# Based on uniqhtt cookie implementation
 `,
       string: "",
       setCookiesString: []
@@ -341,8 +358,25 @@ function buildResponse(params) {
   }
   config.status = statusCode;
   config.statusText = statusMessage;
+  const parseStart = performance.now();
+  let parsedData = body != null ? formatResponse(body, config, rezoHeaders) : null;
+  const parseDuration = performance.now() - parseStart;
+  if (config.hooks?.afterParse && config.hooks.afterParse.length > 0) {
+    for (const hook of config.hooks.afterParse) {
+      const result = hook({
+        data: parsedData,
+        rawData: body,
+        contentType: contentType || "",
+        parseDuration,
+        timestamp: Date.now()
+      }, config);
+      if (result !== undefined && result !== null) {
+        parsedData = result;
+      }
+    }
+  }
   return {
-    data: formatResponse(body, config, rezoHeaders),
+    data: parsedData,
     status: statusCode,
     statusText: statusMessage,
     finalUrl,

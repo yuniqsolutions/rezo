@@ -1,6 +1,6 @@
 import { LRUCache } from './lru-cache.js';
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import path from "node:path";
 const fsPromises = fs.promises;
 const DEFAULT_TTL = 3000000;
 const DEFAULT_MAX_ENTRIES = 500;

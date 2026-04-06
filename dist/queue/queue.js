@@ -8,6 +8,7 @@ export class RezoQueue {
   isPausedFlag = false;
   intervalId;
   intervalCount = 0;
+  name;
   intervalStart = 0;
   eventHandlers = new Map;
   statsData = {
@@ -25,16 +26,20 @@ export class RezoQueue {
   throughputWindowSize = 60;
   idlePromise;
   emptyPromise;
+  hasEverBeenActive = false;
   config;
   constructor(config = {}) {
+    this.name = config.name ?? `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
     this.config = {
+      name: this.name,
       concurrency: config.concurrency ?? 1 / 0,
       autoStart: config.autoStart ?? true,
       timeout: config.timeout ?? 0,
       throwOnTimeout: config.throwOnTimeout ?? true,
       interval: config.interval ?? 0,
       intervalCap: config.intervalCap ?? 1 / 0,
-      carryoverConcurrencyCount: config.carryoverConcurrencyCount ?? false
+      carryoverConcurrencyCount: config.carryoverConcurrencyCount ?? false,
+      rejectOnError: config.rejectOnError ?? true
     };
     if (!this.config.autoStart) {
       this.isPausedFlag = true;
@@ -87,12 +92,20 @@ export class RezoQueue {
         reject(new Error("Task was cancelled before starting"));
         return;
       }
-      options.signal?.addEventListener("abort", () => {
-        this.cancel(task.id);
-      });
+      let abortHandler;
+      if (options.signal) {
+        abortHandler = () => this.cancel(task.id);
+        options.signal.addEventListener("abort", abortHandler, { once: true });
+        task._abortHandler = abortHandler;
+        task._signal = options.signal;
+      }
       this.insertByPriority(task);
       this.statsData.added++;
+      this.hasEverBeenActive = true;
       this.emit("add", { id: task.id, priority: task.priority });
+      if (this.config.interval > 0 && !this.intervalId) {
+        this.startInterval();
+      }
       if (this.config.autoStart && !this.isPausedFlag) {
         this.tryRunNext();
       }
@@ -118,17 +131,29 @@ export class RezoQueue {
     const tasks = [...this.queue];
     this.queue = [];
     for (const task of tasks) {
-      task.reject(new Error("Queue was cleared"));
+      if (this.config.rejectOnError) {
+        task.reject(new Error("Queue was cleared"));
+      } else {
+        task.resolve(undefined);
+      }
       this.statsData.cancelled++;
       this.emit("cancelled", { id: task.id });
     }
+    this.clearIntervalTimer();
     this.checkEmpty();
+    if (this.pendingCount === 0) {
+      this.checkIdle();
+    }
   }
   cancel(id) {
     const index = this.queue.findIndex((t) => t.id === id);
     if (index !== -1) {
       const [task] = this.queue.splice(index, 1);
-      task.reject(new Error("Task was cancelled"));
+      if (this.config.rejectOnError) {
+        task.reject(new Error("Task was cancelled"));
+      } else {
+        task.resolve(undefined);
+      }
       this.statsData.cancelled++;
       this.emit("cancelled", { id });
       this.checkEmpty();
@@ -141,7 +166,11 @@ export class RezoQueue {
     const remaining = [];
     for (const task of this.queue) {
       if (predicate({ id: task.id, priority: task.priority })) {
-        task.reject(new Error("Task was cancelled"));
+        if (this.config.rejectOnError) {
+          task.reject(new Error("Task was cancelled"));
+        } else {
+          task.resolve(undefined);
+        }
         this.statsData.cancelled++;
         this.emit("cancelled", { id: task.id });
         count++;
@@ -156,7 +185,7 @@ export class RezoQueue {
     return count;
   }
   onIdle() {
-    if (this.state.isIdle) {
+    if (this.hasEverBeenActive && this.state.isIdle) {
       return Promise.resolve();
     }
     if (!this.idlePromise) {
@@ -181,42 +210,62 @@ export class RezoQueue {
     }
     return this.emptyPromise.promise;
   }
-  onSizeLessThan(limit) {
+  onSizeLessThan(limit, timeoutMs = 0) {
     if (this.queue.length < limit) {
       return Promise.resolve();
     }
     return new Promise((resolve) => {
+      let timeoutId;
+      const cleanup = () => {
+        this.off("completed", check);
+        this.off("cancelled", check);
+        this.off("error", check);
+        this.off("empty", check);
+        if (timeoutId)
+          clearTimeout(timeoutId);
+      };
       const check = () => {
         if (this.queue.length < limit) {
-          this.off("completed", check);
-          this.off("cancelled", check);
-          this.off("error", check);
+          cleanup();
           resolve();
         }
       };
       this.on("completed", check);
       this.on("cancelled", check);
       this.on("error", check);
+      this.on("empty", check);
+      if (timeoutMs > 0) {
+        timeoutId = setTimeout(() => {
+          cleanup();
+          resolve();
+        }, timeoutMs);
+      }
     });
   }
+  static MAX_HANDLERS_WARNING = 100;
   on(event, handler) {
     if (!this.eventHandlers.has(event)) {
       this.eventHandlers.set(event, new Set);
     }
-    this.eventHandlers.get(event).add(handler);
+    const handlers = this.eventHandlers.get(event);
+    handlers.add(handler);
+    if (handlers.size === RezoQueue.MAX_HANDLERS_WARNING) {
+      console.warn(`[RezoQueue] Warning: ${handlers.size} handlers registered for '${String(event)}' event. ` + `This may indicate a memory leak. Consider using off() to remove handlers when done.`);
+    }
   }
   off(event, handler) {
     this.eventHandlers.get(event)?.delete(handler);
   }
   destroy() {
     this.clear();
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = undefined;
-    }
+    this.clearIntervalTimer();
     this.eventHandlers.clear();
   }
   insertByPriority(task) {
+    if (task.priority === 0 && (this.queue.length === 0 || this.queue[this.queue.length - 1].priority >= 0)) {
+      this.queue.push(task);
+      return;
+    }
     let insertIndex = this.queue.length;
     for (let i = 0;i < this.queue.length; i++) {
       if (task.priority > this.queue[i].priority) {
@@ -228,19 +277,32 @@ export class RezoQueue {
   }
   tryRunNext() {
     if (this.isPausedFlag)
-      return;
-    if (this.queue.length === 0)
-      return;
+      return false;
+    if (this.queue.length === 0) {
+      this.clearIntervalTimer();
+      this.checkEmpty();
+      if (this.pendingCount === 0) {
+        this.checkIdle();
+      }
+      return false;
+    }
     if (this.pendingCount >= this.config.concurrency)
-      return;
+      return false;
     if (this.config.interval > 0) {
       if (this.intervalCount >= this.config.intervalCap)
-        return;
+        return false;
       this.intervalCount++;
     }
     const task = this.queue.shift();
     this.runTask(task);
     this.tryRunNext();
+    return true;
+  }
+  clearIntervalTimer() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = undefined;
+    }
   }
   async runTask(task) {
     this.pendingCount++;
@@ -250,7 +312,6 @@ export class RezoQueue {
       this.emit("active", undefined);
     }
     this.emit("start", { id: task.id });
-    this.emit("next", undefined);
     const startTime = Date.now();
     let timeoutId;
     try {
@@ -283,12 +344,22 @@ export class RezoQueue {
         clearTimeout(timeoutId);
       this.statsData.failed++;
       this.emit("error", { id: task.id, error });
-      task.reject(error);
+      if (this.config.rejectOnError) {
+        task.reject(error);
+      } else {
+        task.resolve(undefined);
+      }
     } finally {
-      this.pendingCount--;
-      this.checkEmpty();
-      this.checkIdle();
-      this.tryRunNext();
+      if (task._abortHandler && task._signal) {
+        task._signal.removeEventListener("abort", task._abortHandler);
+        delete task._abortHandler;
+        delete task._signal;
+      }
+      queueMicrotask(() => {
+        this.pendingCount--;
+        this.tryRunNext();
+        this.emit("next", undefined);
+      });
     }
   }
   recordDuration(duration) {

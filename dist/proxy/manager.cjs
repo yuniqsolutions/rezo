@@ -1,15 +1,28 @@
-const { parseProxyString } = require('./index.cjs');
+const { parseProxyString } = require('./parse.cjs');
+const { RezoError } = require('../errors/rezo-error.cjs');
 function generateProxyId() {
   return `proxy_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
+function ensureId(proxy) {
+  if (!proxy.id)
+    proxy.id = generateProxyId();
+  return proxy;
+}
 
 class ProxyManager {
-  config;
+  _config;
+  get config() {
+    return this._config;
+  }
   states = new Map;
-  currentIndex = 0;
+  currentSequentialId = null;
   currentProxyRequests = 0;
   lastSelectedProxy = null;
   cooldownTimers = new Map;
+  lastCooldownCheck = 0;
+  pendingWaiters = [];
+  pendingRejecters = [];
+  debug = false;
   _totalRequests = 0;
   _totalSuccesses = 0;
   _totalFailures = 0;
@@ -22,6 +35,7 @@ class ProxyManager {
     afterProxyDisable: [],
     afterProxyRotate: [],
     afterProxyEnable: [],
+    afterProxySuccess: [],
     onNoProxiesAvailable: []
   };
   constructor(config) {
@@ -36,20 +50,49 @@ class ProxyManager {
         parsedProxies.push(proxy);
       }
     }
-    this.config = {
+    let cooldown = config.cooldown;
+    if (config.cooldownPeriod && !cooldown) {
+      cooldown = { enabled: true, durationMs: config.cooldownPeriod };
+    }
+    this._config = {
       failWithoutProxy: true,
       autoDisableDeadProxies: false,
       maxFailures: 3,
       retryWithNextProxy: false,
       maxProxyRetries: 3,
       ...config,
+      cooldown,
       proxies: parsedProxies
     };
-    for (const proxy of this.config.proxies) {
+    this.debug = !!config.debug;
+    for (const proxy of this._config.proxies) {
       if (!proxy.id) {
         proxy.id = generateProxyId();
       }
       this.states.set(proxy.id, this.createInitialState(proxy));
+    }
+    if (config.hooks) {
+      const h = config.hooks;
+      if (h.beforeProxySelect)
+        this.hooks.beforeProxySelect.push(...h.beforeProxySelect);
+      if (h.afterProxySelect)
+        this.hooks.afterProxySelect.push(...h.afterProxySelect);
+      if (h.beforeProxyError)
+        this.hooks.beforeProxyError.push(...h.beforeProxyError);
+      if (h.afterProxyError)
+        this.hooks.afterProxyError.push(...h.afterProxyError);
+      if (h.beforeProxyDisable)
+        this.hooks.beforeProxyDisable.push(...h.beforeProxyDisable);
+      if (h.afterProxyDisable)
+        this.hooks.afterProxyDisable.push(...h.afterProxyDisable);
+      if (h.afterProxyRotate)
+        this.hooks.afterProxyRotate.push(...h.afterProxyRotate);
+      if (h.afterProxyEnable)
+        this.hooks.afterProxyEnable.push(...h.afterProxyEnable);
+      if (h.afterProxySuccess)
+        this.hooks.afterProxySuccess.push(...h.afterProxySuccess);
+      if (h.onNoProxiesAvailable)
+        this.hooks.onNoProxiesAvailable.push(...h.onNoProxiesAvailable);
     }
   }
   createInitialState(proxy) {
@@ -63,7 +106,7 @@ class ProxyManager {
     };
   }
   shouldProxy(url) {
-    const { whitelist, blacklist } = this.config;
+    const { whitelist, blacklist } = this._config;
     if (whitelist && whitelist.length > 0) {
       const matches = whitelist.some((pattern) => this.matchPattern(pattern, url));
       if (!matches) {
@@ -103,18 +146,30 @@ class ProxyManager {
     }
   }
   getActive() {
+    return this.getActiveInternal();
+  }
+  getActiveInternal() {
     this.processExpiredCooldowns();
     return Array.from(this.states.values()).filter((state) => state.isActive).map((state) => state.proxy);
   }
   getDisabled() {
+    this.processExpiredCooldowns();
     return Array.from(this.states.values()).filter((state) => !state.isActive && !state.reenableAt).map((state) => state.proxy);
   }
   getCooldown() {
+    this.processExpiredCooldowns();
     const now = Date.now();
     return Array.from(this.states.values()).filter((state) => !state.isActive && state.reenableAt && state.reenableAt > now).map((state) => state.proxy);
   }
+  getAll() {
+    this.processExpiredCooldowns();
+    return Array.from(this.states.values());
+  }
   processExpiredCooldowns() {
     const now = Date.now();
+    if (now - this.lastCooldownCheck < 1000)
+      return;
+    this.lastCooldownCheck = now;
     for (const state of this.states.values()) {
       if (!state.isActive && state.reenableAt && state.reenableAt <= now) {
         this.enableProxy(state.proxy, "cooldown-expired");
@@ -122,44 +177,57 @@ class ProxyManager {
     }
   }
   next(url) {
-    this._totalRequests++;
-    const activeProxies = this.getActive();
-    this.runBeforeProxySelectHooksSync({
+    return this.select(url).proxy;
+  }
+  select(url) {
+    const activeProxies = this.getActiveInternal();
+    const hookOverride = this.runBeforeProxySelectHooks({
       url,
       proxies: activeProxies,
       isRetry: false,
       retryCount: 0
     });
+    if (hookOverride) {
+      const identified = ensureId(hookOverride);
+      this._totalRequests++;
+      const overrideState = this.states.get(identified.id);
+      if (overrideState) {
+        overrideState.requestCount++;
+        if (this._config.rotation === "per-proxy-limit") {
+          const limit = this._config.limit;
+          if (overrideState.requestCount >= limit) {
+            this.disableProxy(hookOverride, "limit-reached");
+          }
+        }
+      }
+      this.lastSelectedProxy = hookOverride;
+      this.runHooks("afterProxySelect", this.hooks.afterProxySelect, { url, proxy: hookOverride, reason: "selected" });
+      return { proxy: hookOverride, reason: "selected" };
+    }
     if (!this.shouldProxy(url)) {
-      this.runAfterProxySelectHooksSync({
-        url,
-        proxy: null,
-        reason: this.config.blacklist?.some((p) => this.matchPattern(p, url)) ? "blacklist-match" : "whitelist-no-match"
-      });
-      return null;
+      const reason = this._config.blacklist?.some((p) => this.matchPattern(p, url)) ? "blacklist-match" : "whitelist-no-match";
+      this.runHooks("afterProxySelect", this.hooks.afterProxySelect, { url, proxy: null, reason });
+      return { proxy: null, reason };
     }
     if (activeProxies.length === 0) {
-      this.runAfterProxySelectHooksSync({
-        url,
-        proxy: null,
-        reason: "no-proxies-available"
-      });
-      return null;
+      this.runHooks("afterProxySelect", this.hooks.afterProxySelect, { url, proxy: null, reason: "no-proxies-available" });
+      return { proxy: null, reason: "no-proxies-available" };
     }
+    this._totalRequests++;
     const selected = this.selectProxy(activeProxies);
     if (selected) {
       const state = this.states.get(selected.id);
       if (state) {
         state.requestCount++;
-        if (this.config.rotation === "per-proxy-limit") {
-          const limit = this.config.limit;
+        if (this._config.rotation === "per-proxy-limit") {
+          const limit = this._config.limit;
           if (state.requestCount >= limit) {
             this.disableProxy(selected, "limit-reached");
           }
         }
       }
       if (this.lastSelectedProxy && this.lastSelectedProxy.id !== selected.id) {
-        this.runAfterProxyRotateHooks({
+        this.runHooks("afterProxyRotate", this.hooks.afterProxyRotate, {
           from: this.lastSelectedProxy,
           to: selected,
           reason: "scheduled"
@@ -167,61 +235,34 @@ class ProxyManager {
       }
       this.lastSelectedProxy = selected;
     }
-    this.runAfterProxySelectHooksSync({
-      url,
-      proxy: selected,
-      reason: selected ? "selected" : "no-proxies-available"
-    });
-    return selected;
-  }
-  select(url) {
-    this._totalRequests++;
-    if (!this.shouldProxy(url)) {
-      const { whitelist, blacklist } = this.config;
-      const reason = blacklist?.some((p) => this.matchPattern(p, url)) ? "blacklist-match" : "whitelist-no-match";
-      return { proxy: null, reason };
-    }
-    const activeProxies = this.getActive();
-    if (activeProxies.length === 0) {
-      return { proxy: null, reason: "no-proxies-available" };
-    }
-    const selected = this.selectProxy(activeProxies);
-    if (selected) {
-      const state = this.states.get(selected.id);
-      if (state) {
-        state.requestCount++;
-        if (this.config.rotation === "per-proxy-limit") {
-          const limit = this.config.limit;
-          if (state.requestCount >= limit) {
-            this.disableProxy(selected, "limit-reached");
-          }
-        }
-      }
-      this.lastSelectedProxy = selected;
-      return { proxy: selected, reason: "selected" };
-    }
-    return { proxy: null, reason: "no-proxies-available" };
+    const reason = selected ? "selected" : "no-proxies-available";
+    this.runHooks("afterProxySelect", this.hooks.afterProxySelect, { url, proxy: selected, reason });
+    return { proxy: selected, reason };
   }
   selectProxy(activeProxies) {
     if (activeProxies.length === 0) {
       return null;
     }
-    const rotation = this.config.rotation;
+    const rotation = this._config.rotation;
     if (rotation === "random") {
       const index = Math.floor(Math.random() * activeProxies.length);
       return activeProxies[index];
     }
     if (rotation === "sequential") {
-      const requestsPerProxy = this.config.requestsPerProxy ?? 1;
-      if (this.currentProxyRequests >= requestsPerProxy) {
-        this.currentIndex = (this.currentIndex + 1) % activeProxies.length;
+      const requestsPerProxy = this._config.requestsPerProxy ?? 1;
+      let currentIdx = this.currentSequentialId ? activeProxies.findIndex((p) => p.id === this.currentSequentialId) : -1;
+      if (currentIdx === -1) {
+        currentIdx = 0;
         this.currentProxyRequests = 0;
       }
-      if (this.currentIndex >= activeProxies.length) {
-        this.currentIndex = 0;
+      if (this.currentProxyRequests >= requestsPerProxy) {
+        currentIdx = (currentIdx + 1) % activeProxies.length;
+        this.currentProxyRequests = 0;
       }
       this.currentProxyRequests++;
-      return activeProxies[this.currentIndex];
+      const selected = activeProxies[currentIdx];
+      this.currentSequentialId = selected.id;
+      return selected;
     }
     if (rotation === "per-proxy-limit") {
       for (const proxy of activeProxies) {
@@ -235,21 +276,24 @@ class ProxyManager {
     return activeProxies[0];
   }
   reportSuccess(proxy) {
+    const id = ensureId(proxy).id;
     this._totalSuccesses++;
-    const state = this.states.get(proxy.id);
+    const state = this.states.get(id);
     if (state) {
       state.successCount++;
       state.failureCount = 0;
       state.lastSuccessAt = Date.now();
+      this.runHooks("afterProxySuccess", this.hooks.afterProxySuccess, { proxy, state });
     }
   }
   reportFailure(proxy, error, url) {
+    const id = ensureId(proxy).id;
     this._totalFailures++;
-    const state = this.states.get(proxy.id);
+    const state = this.states.get(id);
     if (!state)
       return;
-    const willBeDisabled = !!(this.config.autoDisableDeadProxies && state.failureCount + 1 >= (this.config.maxFailures ?? 3));
-    this.runBeforeProxyErrorHooksSync({
+    const willBeDisabled = !!(this._config.autoDisableDeadProxies && state.failureCount + 1 >= (this._config.maxFailures ?? 3));
+    this.runHooks("beforeProxyError", this.hooks.beforeProxyError, {
       proxy,
       error,
       url: url || "",
@@ -261,27 +305,43 @@ class ProxyManager {
     state.lastFailureAt = Date.now();
     state.lastError = error.message;
     let action = "continue";
-    if (this.config.autoDisableDeadProxies) {
-      const maxFailures = this.config.maxFailures ?? 3;
+    if (this._config.autoDisableDeadProxies) {
+      const maxFailures = this._config.maxFailures ?? 3;
       if (state.failureCount >= maxFailures) {
         this.disableProxy(proxy, "dead");
         action = "disabled";
       }
     }
-    this.runAfterProxyErrorHooksSync({
+    this.runHooks("afterProxyError", this.hooks.afterProxyError, {
       proxy,
       error,
       action
     });
   }
+  reportError(proxy, error, url) {
+    this.reportFailure(proxy, error, url);
+  }
   disableProxy(proxy, reason = "manual") {
-    const state = this.states.get(proxy.id);
+    const id = ensureId(proxy).id;
+    const state = this.states.get(id);
     if (!state || !state.isActive)
       return;
+    if (this.hooks.beforeProxyDisable && this.hooks.beforeProxyDisable.length > 0) {
+      for (const hook of this.hooks.beforeProxyDisable) {
+        try {
+          const result = hook({ proxy, reason, state });
+          if (result === false)
+            return;
+        } catch (error) {
+          if (this.debug)
+            console.error("[ProxyManager] beforeProxyDisable hook error:", error);
+        }
+      }
+    }
     state.isActive = false;
     state.disabledReason = reason;
     state.disabledAt = Date.now();
-    const { cooldown } = this.config;
+    const { cooldown } = this._config;
     let hasCooldown = false;
     let reenableAt;
     if (cooldown?.enabled && cooldown.durationMs > 0) {
@@ -290,11 +350,11 @@ class ProxyManager {
       state.reenableAt = reenableAt;
       const timerId = setTimeout(() => {
         this.enableProxy(proxy, "cooldown-expired");
-        this.cooldownTimers.delete(proxy.id);
+        this.cooldownTimers.delete(id);
       }, cooldown.durationMs);
-      this.cooldownTimers.set(proxy.id, timerId);
+      this.cooldownTimers.set(id, timerId);
     }
-    this.runAfterProxyDisableHooks({
+    this.runHooks("afterProxyDisable", this.hooks.afterProxyDisable, {
       proxy,
       reason,
       hasCooldown,
@@ -302,7 +362,8 @@ class ProxyManager {
     });
   }
   enableProxy(proxy, reason = "manual") {
-    const state = this.states.get(proxy.id);
+    const id = ensureId(proxy).id;
+    const state = this.states.get(id);
     if (!state || state.isActive)
       return;
     state.isActive = true;
@@ -310,43 +371,58 @@ class ProxyManager {
     state.disabledReason = undefined;
     state.disabledAt = undefined;
     state.reenableAt = undefined;
-    const timerId = this.cooldownTimers.get(proxy.id);
+    const timerId = this.cooldownTimers.get(id);
     if (timerId) {
       clearTimeout(timerId);
-      this.cooldownTimers.delete(proxy.id);
+      this.cooldownTimers.delete(id);
     }
-    this.runAfterProxyEnableHooks({
+    this.runHooks("afterProxyEnable", this.hooks.afterProxyEnable, {
       proxy,
       reason
     });
+    if (this.pendingWaiters.length > 0) {
+      this.pendingWaiters.shift()(proxy);
+      this.pendingRejecters.shift();
+    }
   }
   add(proxies) {
-    const toAdd = Array.isArray(proxies) ? proxies : [proxies];
-    for (const proxy of toAdd) {
+    const raw = Array.isArray(proxies) ? proxies : [proxies];
+    for (const entry of raw) {
+      const proxy = typeof entry === "string" ? parseProxyString(entry) : entry;
+      if (!proxy)
+        continue;
       if (!proxy.id) {
         proxy.id = generateProxyId();
       }
       if (!this.states.has(proxy.id)) {
         this.states.set(proxy.id, this.createInitialState(proxy));
-        this.config.proxies.push(proxy);
+        this._config.proxies.push(proxy);
+        if (this.pendingWaiters.length > 0) {
+          this.pendingWaiters.shift()(proxy);
+          this.pendingRejecters.shift();
+        }
       }
     }
   }
   remove(proxies) {
     const toRemove = Array.isArray(proxies) ? proxies : [proxies];
     for (const proxy of toRemove) {
-      if (proxy.id) {
-        const timerId = this.cooldownTimers.get(proxy.id);
-        if (timerId) {
-          clearTimeout(timerId);
-          this.cooldownTimers.delete(proxy.id);
-        }
-        this.states.delete(proxy.id);
-        const index = this.config.proxies.findIndex((p) => p.id === proxy.id);
-        if (index !== -1) {
-          this.config.proxies.splice(index, 1);
-        }
-      }
+      if (proxy.id)
+        this.removeById(proxy.id);
+    }
+  }
+  removeById(id) {
+    if (!this.states.has(id))
+      return;
+    const timerId = this.cooldownTimers.get(id);
+    if (timerId) {
+      clearTimeout(timerId);
+      this.cooldownTimers.delete(id);
+    }
+    this.states.delete(id);
+    const index = this._config.proxies.findIndex((p) => p.id === id);
+    if (index !== -1) {
+      this._config.proxies.splice(index, 1);
     }
   }
   reset() {
@@ -357,14 +433,53 @@ class ProxyManager {
     for (const state of this.states.values()) {
       state.requestCount = 0;
       state.failureCount = 0;
+      state.successCount = 0;
+      state.totalFailures = 0;
       state.isActive = true;
       state.disabledReason = undefined;
       state.disabledAt = undefined;
       state.reenableAt = undefined;
+      state.lastSuccessAt = undefined;
+      state.lastFailureAt = undefined;
+      state.lastError = undefined;
     }
-    this.currentIndex = 0;
+    this.currentSequentialId = null;
     this.currentProxyRequests = 0;
     this.lastSelectedProxy = null;
+    this._totalRequests = 0;
+    this._totalSuccesses = 0;
+    this._totalFailures = 0;
+    if (this.pendingWaiters.length > 0) {
+      const active = this.getActive();
+      for (const proxy of active) {
+        if (this.pendingWaiters.length === 0)
+          break;
+        this.pendingWaiters.shift()(proxy);
+        this.pendingRejecters.shift();
+      }
+    }
+  }
+  clear() {
+    for (const timerId of this.cooldownTimers.values()) {
+      clearTimeout(timerId);
+    }
+    this.cooldownTimers.clear();
+    this.states.clear();
+    this._config.proxies.length = 0;
+    this.currentSequentialId = null;
+    this.currentProxyRequests = 0;
+    this.lastSelectedProxy = null;
+    this._totalRequests = 0;
+    this._totalSuccesses = 0;
+    this._totalFailures = 0;
+    if (this.pendingRejecters.length > 0) {
+      const err = this.createError("Proxy pool cleared");
+      for (const reject of this.pendingRejecters) {
+        reject(err);
+      }
+    }
+    this.pendingWaiters.length = 0;
+    this.pendingRejecters.length = 0;
   }
   getStatus() {
     this.processExpiredCooldowns();
@@ -373,17 +488,60 @@ class ProxyManager {
       disabled: this.getDisabled(),
       cooldown: this.getCooldown(),
       total: this.states.size,
-      rotation: this.config.rotation,
+      rotation: this._config.rotation,
       totalRequests: this._totalRequests,
       totalSuccesses: this._totalSuccesses,
       totalFailures: this._totalFailures
     };
   }
+  get size() {
+    return this.states.size;
+  }
+  get totalRequests() {
+    return this._totalRequests;
+  }
+  get totalSuccesses() {
+    return this._totalSuccesses;
+  }
+  get totalFailures() {
+    return this._totalFailures;
+  }
   getProxyState(proxy) {
-    return this.states.get(proxy.id);
+    return this.states.get(ensureId(proxy).id);
+  }
+  has(proxy) {
+    return this.states.has(ensureId(proxy).id);
   }
   hasAvailableProxies() {
     return this.getActive().length > 0;
+  }
+  isCoolingDown() {
+    return this.getCooldown().length > 0;
+  }
+  nextCooldownMs() {
+    if (this.hasAvailableProxies())
+      return 0;
+    const now = Date.now();
+    let earliest = 1 / 0;
+    for (const state of this.states.values()) {
+      if (!state.isActive && state.reenableAt && state.reenableAt > now) {
+        earliest = Math.min(earliest, state.reenableAt - now);
+      }
+    }
+    return earliest === 1 / 0 ? -1 : earliest;
+  }
+  waitForProxy() {
+    const active = this.getActive();
+    if (active.length > 0) {
+      return Promise.resolve(active[0]);
+    }
+    if (!this.isCoolingDown()) {
+      return Promise.reject(this.createError("No proxies in cooldown — pool is permanently exhausted"));
+    }
+    return new Promise((resolve, reject) => {
+      this.pendingWaiters.push(resolve);
+      this.pendingRejecters.push(reject);
+    });
   }
   destroy() {
     for (const timerId of this.cooldownTimers.values()) {
@@ -391,87 +549,47 @@ class ProxyManager {
     }
     this.cooldownTimers.clear();
     this.states.clear();
+    if (this.pendingRejecters.length > 0) {
+      const err = this.createError("ProxyManager destroyed");
+      for (const reject of this.pendingRejecters) {
+        reject(err);
+      }
+    }
+    this.pendingWaiters.length = 0;
+    this.pendingRejecters.length = 0;
   }
-  runBeforeProxySelectHooksSync(context) {
+  createError(message) {
+    return new RezoError(message, null, "REZ_NO_PROXY_AVAILABLE");
+  }
+  runHooks(name, hooks, context) {
+    for (const hook of hooks) {
+      try {
+        const result = hook(context);
+        if (result && typeof result === "object" && typeof result.catch === "function") {
+          result.catch((err) => {
+            if (this.debug)
+              console.error(`[ProxyManager] ${name} async hook error:`, err);
+          });
+        }
+      } catch (error) {
+        if (this.debug)
+          console.error(`[ProxyManager] ${name} hook error:`, error);
+      }
+    }
+  }
+  runBeforeProxySelectHooks(context) {
     for (const hook of this.hooks.beforeProxySelect) {
       try {
-        hook(context);
+        const result = hook(context);
+        if (result && typeof result === "object" && "host" in result && "port" in result) {
+          return result;
+        }
       } catch (error) {
-        console.error("[ProxyManager] beforeProxySelect hook error:", error);
+        if (this.debug)
+          console.error("[ProxyManager] beforeProxySelect hook error:", error);
       }
     }
-  }
-  runAfterProxySelectHooksSync(context) {
-    for (const hook of this.hooks.afterProxySelect) {
-      try {
-        hook(context);
-      } catch (error) {
-        console.error("[ProxyManager] afterProxySelect hook error:", error);
-      }
-    }
-  }
-  runBeforeProxyErrorHooksSync(context) {
-    for (const hook of this.hooks.beforeProxyError) {
-      try {
-        hook(context);
-      } catch (error) {
-        console.error("[ProxyManager] beforeProxyError hook error:", error);
-      }
-    }
-  }
-  runAfterProxyErrorHooksSync(context) {
-    for (const hook of this.hooks.afterProxyError) {
-      try {
-        hook(context);
-      } catch (error) {
-        console.error("[ProxyManager] afterProxyError hook error:", error);
-      }
-    }
-  }
-  runAfterProxyRotateHooks(context) {
-    for (const hook of this.hooks.afterProxyRotate) {
-      try {
-        hook(context);
-      } catch (error) {
-        console.error("[ProxyManager] afterProxyRotate hook error:", error);
-      }
-    }
-  }
-  runAfterProxyDisableHooks(context) {
-    for (const hook of this.hooks.afterProxyDisable) {
-      try {
-        hook(context);
-      } catch (error) {
-        console.error("[ProxyManager] afterProxyDisable hook error:", error);
-      }
-    }
-  }
-  runAfterProxyEnableHooks(context) {
-    for (const hook of this.hooks.afterProxyEnable) {
-      try {
-        hook(context);
-      } catch (error) {
-        console.error("[ProxyManager] afterProxyEnable hook error:", error);
-      }
-    }
-  }
-  runOnNoProxiesAvailableHooksSync(context) {
-    for (const hook of this.hooks.onNoProxiesAvailable) {
-      try {
-        hook(context);
-      } catch (error) {
-        console.error("[ProxyManager] onNoProxiesAvailable hook error:", error);
-      }
-    }
-  }
-  async runOnNoProxiesAvailableHooks(context) {
-    for (const hook of this.hooks.onNoProxiesAvailable) {
-      try {
-        await hook(context);
-      } catch (error) {
-        console.error("[ProxyManager] onNoProxiesAvailable hook error:", error);
-      }
-    }
+    return null;
   }
   notifyNoProxiesAvailable(url, error) {
     const allProxies = Array.from(this.states.values());
@@ -493,7 +611,7 @@ class ProxyManager {
       disabledReasons,
       timestamp: Date.now()
     };
-    this.runOnNoProxiesAvailableHooksSync(context);
+    this.runHooks("onNoProxiesAvailable", this.hooks.onNoProxiesAvailable, context);
     return context;
   }
 }

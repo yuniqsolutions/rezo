@@ -7,15 +7,262 @@ import { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
 import { RezoError } from '../errors/rezo-error.js';
 import { buildSmartError, builErrorFromResponse } from '../responses/buildError.js';
-import { RezoCookieJar, Cookie } from '../utils/cookies.js';
+import { RezoCookieJar, Cookie } from '../cookies/cookie-jar.js';
 import RezoFormData from '../utils/form-data.js';
 import { existsSync } from "node:fs";
-import { getDefaultConfig, prepareHTTPOptions } from '../utils/http-config.js';
+import { getDefaultConfig, prepareHTTPOptions, calculateRetryDelay, shouldRetry } from '../utils/http-config.js';
+import { handleRateLimitWait, shouldWaitOnStatus } from '../utils/rate-limit-wait.js';
 import { RezoHeaders } from '../utils/headers.js';
 import { StreamResponse } from '../responses/stream.js';
 import { DownloadResponse } from '../responses/download.js';
 import { UploadResponse } from '../responses/upload.js';
 import { RezoPerformance } from '../utils/tools.js';
+import { ResponseCache } from '../cache/response-cache.js';
+const debugLog = {
+  requestStart: (config, url, method) => {
+    if (config.debug) {
+      console.log(`
+[Rezo Debug] ─────────────────────────────────────`);
+      console.log(`[Rezo Debug] ${method} ${url}`);
+      console.log(`[Rezo Debug] Request ID: ${config.requestId}`);
+      if (config.originalRequest?.headers) {
+        const headers = config.originalRequest.headers instanceof RezoHeaders ? config.originalRequest.headers.toObject() : config.originalRequest.headers;
+        console.log(`[Rezo Debug] Request Headers:`, JSON.stringify(headers, null, 2));
+      }
+      if (config.proxy && typeof config.proxy === "object") {
+        console.log(`[Rezo Debug] Proxy: ${config.proxy.protocol}://${config.proxy.host}:${config.proxy.port}`);
+      } else if (config.proxy && typeof config.proxy === "string") {
+        console.log(`[Rezo Debug] Proxy: ${config.proxy}`);
+      }
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track] → ${method} ${url}`);
+    }
+  },
+  redirect: (config, fromUrl, toUrl, statusCode, method) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Redirect ${statusCode}: ${fromUrl}`);
+      console.log(`[Rezo Debug]        → ${toUrl} (${method})`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ↳ ${statusCode} → ${toUrl}`);
+    }
+  },
+  retry: (config, attempt, maxRetries, statusCode, delay) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Retry ${attempt}/${maxRetries} after status ${statusCode}${delay > 0 ? ` (waiting ${delay}ms)` : ""}`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ⟳ Retry ${attempt}/${maxRetries} (status ${statusCode})`);
+    }
+  },
+  maxRetries: (config, maxRetries) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Max retries (${maxRetries}) reached, throwing error`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ✗ Max retries reached`);
+    }
+  },
+  response: (config, status, statusText, duration) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Response: ${status} ${statusText} (${duration.toFixed(2)}ms)`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track] ✓ ${status} ${statusText}`);
+    }
+  },
+  responseHeaders: (config, headers) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Response Headers:`, JSON.stringify(headers, null, 2));
+    }
+  },
+  cookies: (config, cookieCount) => {
+    if (config.debug && cookieCount > 0) {
+      console.log(`[Rezo Debug] Cookies received: ${cookieCount}`);
+    }
+  },
+  timing: (config, timing) => {
+    if (config.debug) {
+      const parts = [];
+      if (timing.dns)
+        parts.push(`DNS: ${timing.dns.toFixed(2)}ms`);
+      if (timing.connect)
+        parts.push(`Connect: ${timing.connect.toFixed(2)}ms`);
+      if (timing.tls)
+        parts.push(`TLS: ${timing.tls.toFixed(2)}ms`);
+      if (timing.ttfb)
+        parts.push(`TTFB: ${timing.ttfb.toFixed(2)}ms`);
+      if (timing.total)
+        parts.push(`Total: ${timing.total.toFixed(2)}ms`);
+      if (parts.length > 0) {
+        console.log(`[Rezo Debug] Timing: ${parts.join(" | ")}`);
+      }
+    }
+  },
+  complete: (config, finalUrl, redirectCount, duration) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Complete: ${finalUrl}`);
+      if (redirectCount > 0) {
+        console.log(`[Rezo Debug] Redirects: ${redirectCount}`);
+      }
+      console.log(`[Rezo Debug] Total Duration: ${duration.toFixed(2)}ms`);
+      console.log(`[Rezo Debug] ─────────────────────────────────────
+`);
+    }
+  }
+};
+const responseCacheInstances = new Map;
+function getCacheConfigKey(option) {
+  if (option === true)
+    return "default";
+  if (option === false)
+    return "disabled";
+  const cfg = option;
+  return JSON.stringify({
+    cacheDir: cfg.cacheDir || null,
+    ttl: cfg.ttl || 300000,
+    maxEntries: cfg.maxEntries || 500,
+    methods: cfg.methods || ["GET", "HEAD"],
+    respectHeaders: cfg.respectHeaders !== false
+  });
+}
+function getResponseCache(option) {
+  const key = getCacheConfigKey(option);
+  let cache = responseCacheInstances.get(key);
+  if (!cache) {
+    cache = new ResponseCache(option);
+    const existing = responseCacheInstances.get(key);
+    if (existing) {
+      return existing;
+    }
+    responseCacheInstances.set(key, cache);
+  }
+  return cache;
+}
+function parseCacheControlFromHeaders(headers) {
+  const cacheControl = headers["cache-control"] || "";
+  return {
+    noCache: cacheControl.includes("no-cache"),
+    mustRevalidate: cacheControl.includes("must-revalidate")
+  };
+}
+function buildCachedRezoResponse(cached, config) {
+  const headers = new RezoHeaders(cached.headers);
+  return {
+    data: cached.data,
+    status: cached.status,
+    statusText: cached.statusText,
+    headers,
+    finalUrl: cached.url,
+    urls: [cached.url],
+    contentType: cached.headers["content-type"],
+    contentLength: parseInt(cached.headers["content-length"] || "0", 10) || 0,
+    cookies: {
+      array: [],
+      serialized: [],
+      netscape: "",
+      string: "",
+      setCookiesString: []
+    },
+    config: {
+      ...config,
+      url: cached.url,
+      method: "GET",
+      headers,
+      adapterUsed: "curl",
+      fromCache: true
+    }
+  };
+}
+function buildUrlTree(config, finalUrl) {
+  const urls = [];
+  if (config.rawUrl) {
+    urls.push(config.rawUrl);
+  } else if (config.url) {
+    const urlStr = typeof config.url === "string" ? config.url : config.url.toString();
+    urls.push(urlStr);
+  }
+  if (config.redirectHistory && config.redirectHistory.length > 0) {
+    for (const redirect of config.redirectHistory) {
+      const redirectUrl = typeof redirect.url === "string" ? redirect.url : redirect.url?.toString?.() || "";
+      if (redirectUrl && urls[urls.length - 1] !== redirectUrl) {
+        urls.push(redirectUrl);
+      }
+    }
+  }
+  if (finalUrl && (urls.length === 0 || urls[urls.length - 1] !== finalUrl)) {
+    urls.push(finalUrl);
+  }
+  return urls.length > 0 ? urls : [finalUrl];
+}
+async function updateCookies(config, cookieStrings, url, rootJar) {
+  if (!cookieStrings || cookieStrings.length === 0)
+    return;
+  const tempJar = new RezoCookieJar;
+  tempJar.setCookiesSync(cookieStrings, url);
+  const parsedCookies = tempJar.cookies();
+  const acceptedCookies = [];
+  let hookError = null;
+  if (config.hooks?.beforeCookie && config.hooks.beforeCookie.length > 0) {
+    for (const cookie of parsedCookies.array) {
+      let shouldAccept = true;
+      for (const hook of config.hooks.beforeCookie) {
+        try {
+          const result = await hook({
+            cookie,
+            source: "response",
+            url,
+            isValid: true
+          }, config);
+          if (result === false) {
+            shouldAccept = false;
+            break;
+          }
+        } catch (err) {
+          hookError = err;
+          if (config.debug) {
+            console.log("[Rezo Debug] beforeCookie hook error:", err);
+          }
+        }
+      }
+      if (shouldAccept) {
+        acceptedCookies.push(cookie);
+      }
+    }
+  } else {
+    acceptedCookies.push(...parsedCookies.array);
+  }
+  const acceptedCookieStrings = acceptedCookies.map((c) => c.toSetCookieString());
+  const jarToUpdate = rootJar || config.jar;
+  if (!config.disableJar && jarToUpdate) {
+    jarToUpdate.setCookiesSync(acceptedCookieStrings, url);
+  }
+  if (config.useCookies) {
+    const existingArray = config.responseCookies?.array || [];
+    for (const cookie of acceptedCookies) {
+      const existingIndex = existingArray.findIndex((c) => c.key === cookie.key && c.domain === cookie.domain);
+      if (existingIndex >= 0) {
+        existingArray[existingIndex] = cookie;
+      } else {
+        existingArray.push(cookie);
+      }
+    }
+    const mergedJar = new RezoCookieJar(existingArray, url);
+    config.responseCookies = mergedJar.cookies();
+  }
+  if (!hookError && config.hooks?.afterCookie && config.hooks.afterCookie.length > 0) {
+    for (const hook of config.hooks.afterCookie) {
+      try {
+        await hook(acceptedCookies, config);
+      } catch (err) {
+        if (config.debug) {
+          console.log("[Rezo Debug] afterCookie hook error:", err);
+        }
+      }
+    }
+  }
+}
 function mergeRequestAndResponseCookies(requestCookies, responseCookies) {
   if (!requestCookies || requestCookies.length === 0) {
     return responseCookies;
@@ -33,6 +280,35 @@ function mergeRequestAndResponseCookies(requestCookies, responseCookies) {
     cookieMap.set(key, cookie);
   }
   return Array.from(cookieMap.values());
+}
+function buildTimingFromCurlStats(stats, startTime) {
+  const timeNamelookup = parseFloat(stats["time_namelookup"]) * 1000 || 0;
+  const timeConnect = parseFloat(stats["time_connect"]) * 1000 || 0;
+  const timeAppconnect = parseFloat(stats["time_appconnect"]) * 1000 || 0;
+  const timeStarttransfer = parseFloat(stats["time_starttransfer"]) * 1000 || 0;
+  const timeTotal = parseFloat(stats["time_total"]) * 1000 || 0;
+  return {
+    startTime,
+    domainLookupStart: startTime,
+    domainLookupEnd: startTime + timeNamelookup,
+    connectStart: startTime + timeNamelookup,
+    secureConnectionStart: timeAppconnect > timeConnect ? startTime + timeConnect : 0,
+    connectEnd: startTime + (timeAppconnect > 0 ? timeAppconnect : timeConnect),
+    requestStart: startTime + (timeAppconnect > 0 ? timeAppconnect : timeConnect),
+    responseStart: startTime + timeStarttransfer,
+    responseEnd: startTime + timeTotal
+  };
+}
+function getTimingDurations(config) {
+  const t = config.timing;
+  return {
+    total: t.responseEnd - t.startTime,
+    dns: t.domainLookupEnd - t.domainLookupStart,
+    tcp: t.secureConnectionStart > 0 ? t.secureConnectionStart - t.connectStart : t.connectEnd - t.connectStart,
+    tls: t.secureConnectionStart > 0 ? t.connectEnd - t.secureConnectionStart : undefined,
+    firstByte: t.responseStart - t.startTime,
+    download: t.responseEnd - t.responseStart
+  };
 }
 
 class CurlCapabilities {
@@ -277,7 +553,7 @@ class CurlCommandBuilder {
     }
     this.buildConnectionOptions(config, originalRequest);
     this.buildDownloadOptions(config, originalRequest, createdTempFiles);
-    this.buildHeaders(config);
+    this.buildHeaders(config, originalRequest);
     this.buildRedirectOptions(config, originalRequest);
     this.buildRequestBody(config, originalRequest, createdTempFiles);
     if (originalRequest.onUploadProgress || originalRequest.onDownloadProgress) {
@@ -1129,9 +1405,11 @@ class CurlCommandBuilder {
       case "oauth1":
       case "aws4":
       case "custom":
-        if (auth.custom) {
+        if (auth?.custom && typeof auth.custom === "object") {
           for (const [key, value] of Object.entries(auth.custom)) {
-            this.addArg("-H", `${key}: ${value}`);
+            if (key && value !== undefined) {
+              this.addArg("-H", `${key}: ${value}`);
+            }
           }
         }
         break;
@@ -1208,14 +1486,15 @@ class CurlCommandBuilder {
       case "socks5h":
         this.addArg("--socks5", hostPort);
         if (auth) {
-          this.addArg("--socks5-user", auth);
+          this.addArg("--socks5-basic");
+          this.addArg("--proxy-user", auth);
         }
         break;
       case "socks4":
       case "socks4a":
         this.addArg("--socks4", hostPort);
         if (username) {
-          this.addArg("--socks4-user", username);
+          this.addArg("--proxy-user", username);
         }
         break;
       case "http":
@@ -1251,17 +1530,12 @@ class CurlCommandBuilder {
     }
   }
   buildCookieConfig(config) {
-    if (!config.enableCookieJar) {
+    if (config.disableJar) {
       return;
     }
     const cookieJarFile = this.tempFiles.createTempFile("cookies", ".txt");
     fs.writeFileSync(cookieJarFile, "");
-    this.addArg("-b", cookieJarFile);
     this.addArg("-c", cookieJarFile);
-    if (config.requestCookies && config.requestCookies.length > 0) {
-      const cookieString = config.requestCookies.map((c) => `${c.key}=${c.value}`).join("; ");
-      this.addArg("-b", cookieString);
-    }
     return cookieJarFile;
   }
   buildConnectionOptions(config, originalRequest) {
@@ -1274,16 +1548,17 @@ class CurlCommandBuilder {
   buildDownloadOptions(config, originalRequest, tempFiles) {
     const saveTo = originalRequest.saveTo || config.fileName;
     if (saveTo) {
+      this.addArg("--create-dirs");
       this.addArg("-o", saveTo);
     }
   }
-  buildHeaders(config) {
-    if (!config.headers) {
+  buildHeaders(config, originalRequest) {
+    const headers = originalRequest?.headers || config.headers;
+    if (!headers) {
       return;
     }
-    const headers = config.headers;
     if (headers instanceof RezoHeaders) {
-      for (const [key, value] of headers.entries()) {
+      for (const [key, value] of headers.toEntries()) {
         if (value !== undefined && value !== null) {
           this.addArg("-H", `${key}: ${value}`);
         }
@@ -1322,17 +1597,15 @@ class CurlCommandBuilder {
       this.addArg("--data-binary", `@${dataFile}`);
     } else if (data instanceof RezoFormData) {
       const formData = data;
-      const formDataFile = this.tempFiles.createTempFile("formdata", ".txt");
-      const formBuffer = formData.getBuffer?.();
-      if (formBuffer) {
-        fs.writeFileSync(formDataFile, formBuffer);
-        tempFiles.push(formDataFile);
-        this.addArg("--data-binary", `@${formDataFile}`);
-        const boundary = formData.getBoundary?.();
-        if (boundary) {
-          this.addArg("-H", `Content-Type: multipart/form-data; boundary=${boundary}`);
+      for (const [key, value] of formData.entries()) {
+        if (typeof value === "string") {
+          this.addArg("-F", `${key}=${value}`);
+        } else {
+          const filename = value.name || "file";
+          const formFile = this.tempFiles.createTempFile(key, `.${filename.split(".").pop() || "bin"}`);
+          tempFiles.push(formFile);
+          this.addArg("-F", `${key}=@${formFile};filename=${filename}`);
         }
-        this.addArg("-H", `Content-Length: ${formBuffer.length}`);
       }
     } else if (data instanceof Readable) {
       this.addArg("-d", "@-");
@@ -1360,6 +1633,7 @@ class CurlCommandBuilder {
       "local_ip:%{local_ip}",
       "local_port:%{local_port}",
       "redirect_url:%{redirect_url}",
+      "url_effective:%{url_effective}",
       "ssl_verify_result:%{ssl_verify_result}",
       "content_type:%{content_type}",
       "---CURL_STATS_END---"
@@ -1381,27 +1655,68 @@ class CurlResponseParser {
       body = stdout.slice(0, statsStart);
       for (const line of statsSection.split(`
 `)) {
-        const [key, value] = line.split(":");
-        if (key && value !== undefined) {
-          stats[key.trim()] = value.trim();
+        const colonIndex = line.indexOf(":");
+        if (colonIndex !== -1) {
+          const key = line.slice(0, colonIndex).trim();
+          const value = line.slice(colonIndex + 1).trim();
+          if (key && value !== undefined) {
+            stats[key] = value;
+          }
         }
       }
     }
-    const headerBodySplit = body.indexOf(`\r
-\r
-`);
-    let headerSection = "";
-    let responseBody = body;
-    if (headerBodySplit !== -1) {
-      headerSection = body.slice(0, headerBodySplit);
-      responseBody = body.slice(headerBodySplit + 4);
+    const allResponses = this.parseAllHttpResponses(body);
+    const finalResponse = allResponses[allResponses.length - 1] || { headers: "", body };
+    let headerSection = finalResponse.headers;
+    let responseBody = finalResponse.body;
+    const allSetCookies = [];
+    for (const resp of allResponses) {
+      const respHeaders = this.parseHeaders(resp.headers);
+      const setCookieHeader = respHeaders["set-cookie"];
+      if (setCookieHeader) {
+        if (Array.isArray(setCookieHeader)) {
+          allSetCookies.push(...setCookieHeader);
+        } else {
+          allSetCookies.push(setCookieHeader);
+        }
+      }
+    }
+    if (allResponses.length > 1) {
+      config.redirectHistory = config.redirectHistory || [];
+      let currentUrl = config.url || "";
+      for (let i = 0;i < allResponses.length - 1; i++) {
+        const resp = allResponses[i];
+        const respHeaders = this.parseHeaders(resp.headers);
+        const statusMatch = resp.headers.match(/HTTP\/[\d.]+ (\d+)/);
+        const statusCode = statusMatch ? parseInt(statusMatch[1]) : 0;
+        const locationHeader = respHeaders["location"] || "";
+        config.redirectHistory.push({
+          url: currentUrl,
+          statusCode,
+          statusText: this.getStatusText(statusCode),
+          headers: new RezoHeaders(respHeaders),
+          method: config.method || "GET",
+          cookies: [],
+          duration: 0,
+          request: originalRequest
+        });
+        if (locationHeader) {
+          try {
+            currentUrl = new URL(locationHeader, currentUrl).toString();
+          } catch {
+            currentUrl = locationHeader;
+          }
+        }
+      }
+      config.redirectCount = allResponses.length - 1;
     }
     const statusMatch = headerSection.match(/HTTP\/[\d.]+ (\d+)/);
     const status = statusMatch ? parseInt(statusMatch[1]) : parseInt(stats["http_code"]) || 200;
     const statusText = this.getStatusText(status);
     const headers = this.parseHeaders(headerSection);
     const rezoHeaders = new RezoHeaders(headers);
-    const responseCookies = this.parseCookies(headers);
+    rezoHeaders.delete("set-cookie");
+    const responseCookies = this.parseCookiesFromStrings(allSetCookies, config.url || "");
     const mergedCookieArray = mergeRequestAndResponseCookies(config.requestCookies, responseCookies.array);
     let cookies;
     if (mergedCookieArray.length > 0) {
@@ -1413,7 +1728,6 @@ class CurlResponseParser {
         serialized: [],
         netscape: `# Netscape HTTP Cookie File
 # This file was generated by Rezo HTTP client
-# Based on uniqhtt cookie implementation
 `,
         string: "",
         setCookiesString: []
@@ -1433,24 +1747,14 @@ class CurlResponseParser {
     } else {
       data = responseBody;
     }
-    const totalMs = parseFloat(stats["time_total"]) * 1000 || 0;
-    const timing = {
-      startTimestamp: config.timing?.startTimestamp || Date.now(),
-      endTimestamp: Date.now(),
-      dnsMs: parseFloat(stats["time_namelookup"]) * 1000 || 0,
-      tcpMs: (parseFloat(stats["time_connect"]) - parseFloat(stats["time_namelookup"])) * 1000 || 0,
-      tlsMs: (parseFloat(stats["time_appconnect"]) - parseFloat(stats["time_connect"])) * 1000 || 0,
-      ttfbMs: parseFloat(stats["time_starttransfer"]) * 1000 || 0,
-      transferMs: (parseFloat(stats["time_total"]) - parseFloat(stats["time_starttransfer"])) * 1000 || 0,
-      durationMs: totalMs
-    };
-    config.timing = timing;
+    const startTime = config.timing?.startTime || performance.now();
+    config.timing = buildTimingFromCurlStats(stats, startTime);
     config.status = status;
     config.statusText = statusText;
     const isSecure = config.url?.startsWith("https") || false;
     config.adapterUsed = "curl";
     config.isSecure = isSecure;
-    config.finalUrl = stats["redirect_url"] || config.url || "";
+    config.finalUrl = stats["url_effective"] || config.url || "";
     if (!config.network) {
       config.network = {};
     }
@@ -1464,10 +1768,18 @@ class CurlResponseParser {
     config.transfer.bodySize = responseBody.length;
     config.transfer.headerSize = headerSection.length;
     config.responseCookies = cookies;
-    const urls = [config.url];
-    if (stats["redirect_url"]) {
-      urls.push(stats["redirect_url"]);
-    }
+    const finalUrl = stats["url_effective"] || config.url || "";
+    const urls = buildUrlTree(config, finalUrl);
+    const timingDurations = getTimingDurations(config);
+    debugLog.responseHeaders(config, headers);
+    debugLog.timing(config, {
+      dns: timingDurations.dns,
+      connect: timingDurations.tcp,
+      tls: timingDurations.tls,
+      ttfb: timingDurations.firstByte,
+      total: timingDurations.total
+    });
+    debugLog.cookies(config, cookies.array?.length || 0);
     return {
       data,
       status,
@@ -1477,7 +1789,7 @@ class CurlResponseParser {
       config,
       contentType: contentType || undefined,
       contentLength: parseInt(stats["size_download"]) || responseBody.length,
-      finalUrl: stats["redirect_url"] || config.url,
+      finalUrl,
       urls
     };
   }
@@ -1539,6 +1851,55 @@ class CurlResponseParser {
       string: parsedCookies.map((c) => `${c.key}=${c.value}`).join("; "),
       setCookiesString: cookieArray
     };
+  }
+  static parseAllHttpResponses(output) {
+    const responses = [];
+    const httpPattern = /HTTP\/[\d.]+ \d+/g;
+    const matches = [];
+    let match;
+    while ((match = httpPattern.exec(output)) !== null) {
+      matches.push(match.index);
+    }
+    if (matches.length === 0) {
+      return [{ headers: "", body: output }];
+    }
+    for (let i = 0;i < matches.length; i++) {
+      const start = matches[i];
+      const end = i < matches.length - 1 ? matches[i + 1] : output.length;
+      const segment = output.slice(start, end);
+      const separator = segment.indexOf(`\r
+\r
+`);
+      if (separator !== -1) {
+        const headers = segment.slice(0, separator);
+        const body = segment.slice(separator + 4);
+        responses.push({ headers, body });
+      } else {
+        responses.push({ headers: segment.trim(), body: "" });
+      }
+    }
+    if (responses.length > 1) {
+      const lastBody = responses[responses.length - 1].body;
+      for (let i = 0;i < responses.length - 1; i++) {
+        responses[i].body = "";
+      }
+      responses[responses.length - 1].body = lastBody;
+    }
+    return responses;
+  }
+  static parseCookiesFromStrings(setCookieStrings, url) {
+    if (setCookieStrings.length === 0) {
+      return {
+        array: [],
+        serialized: [],
+        netscape: "",
+        string: "",
+        setCookiesString: []
+      };
+    }
+    const jar = new RezoCookieJar;
+    jar.setCookiesSync(setCookieStrings, url);
+    return jar.cookies();
   }
 }
 
@@ -1682,18 +2043,12 @@ class CurlExecutor {
               finalUrl: response.finalUrl,
               cookies: response.cookies,
               urls: response.urls,
-              timing: {
-                total: performance.now() - startTime,
-                firstByte: config.timing?.ttfbMs,
-                dns: config.timing?.dnsMs,
-                tcp: config.timing?.tcpMs,
-                tls: config.timing?.tlsMs,
-                download: config.timing?.transferMs
-              },
+              timing: getTimingDurations(config),
               config
             };
             streamResult.emit("finish", finishEvent);
             streamResult.emit("done", finishEvent);
+            streamResult.emit("complete", finishEvent);
             resolve(streamResult);
             return;
           }
@@ -1712,18 +2067,15 @@ class CurlExecutor {
               fileName,
               fileSize,
               timing: {
-                total: performance.now() - startTime,
-                firstByte: config.timing?.ttfbMs,
-                dns: config.timing?.dnsMs,
-                tcp: config.timing?.tcpMs,
-                tls: config.timing?.tlsMs,
-                download: performance.now() - startTime
+                ...getTimingDurations(config),
+                download: getTimingDurations(config).download || 0
               },
-              averageSpeed: fileSize / ((performance.now() - startTime) / 1000),
+              averageSpeed: getTimingDurations(config).download ? fileSize / getTimingDurations(config).download * 1000 : 0,
               config
             };
             downloadResult.emit("finish", finishEvent);
             downloadResult.emit("done", finishEvent);
+            downloadResult.emit("complete", finishEvent);
             resolve(downloadResult);
             return;
           }
@@ -1742,18 +2094,16 @@ class CurlExecutor {
               urls: response.urls,
               uploadSize: config.transfer?.requestSize || 0,
               timing: {
-                total: performance.now() - startTime,
-                dns: config.timing?.dnsMs,
-                tcp: config.timing?.tcpMs,
-                tls: config.timing?.tlsMs,
-                upload: performance.now() - startTime,
-                waiting: 0
+                ...getTimingDurations(config),
+                upload: getTimingDurations(config).firstByte || 0,
+                waiting: getTimingDurations(config).download > 0 && getTimingDurations(config).firstByte > 0 ? getTimingDurations(config).download - getTimingDurations(config).firstByte : 0
               },
-              averageUploadSpeed: (config.transfer?.requestSize || 0) / ((performance.now() - startTime) / 1000),
+              averageUploadSpeed: getTimingDurations(config).firstByte && config.transfer?.requestSize ? config.transfer.requestSize / getTimingDurations(config).firstByte * 1000 : 0,
               config
             };
             uploadResult.emit("finish", finishEvent);
             uploadResult.emit("done", finishEvent);
+            uploadResult.emit("complete", finishEvent);
             resolve(uploadResult);
             return;
           }
@@ -1850,25 +2200,68 @@ export async function executeRequest(options, defaultOptions, jar) {
         port: selectedProxy.port,
         auth: selectedProxy.auth
       };
-    } else if (proxyManager.config.failWithoutProxy) {
-      throw new RezoError("No proxy available: All proxies exhausted or URL did not match whitelist/blacklist", config, "UNQ_NO_PROXY_AVAILABLE", originalRequest);
+    } else if (proxyManager.shouldProxy(requestUrl) && !proxyManager.hasAvailableProxies() && proxyManager.config.failWithoutProxy) {
+      const noProxyError = new RezoError("No proxy available: All proxies in the pool are exhausted, disabled, or in cooldown", config, "REZ_NO_PROXY_AVAILABLE", originalRequest);
+      proxyManager.notifyNoProxiesAvailable(requestUrl, noProxyError);
+      throw noProxyError;
     }
   }
-  const isStream = options._isStream;
-  const isDownload = options._isDownload || !!options.fileName || !!options.saveTo;
-  const isUpload = options._isUpload;
+  const cacheOption = options.cache;
+  const method = (options.method || "GET").toUpperCase();
+  const requestUrl = typeof originalRequest.url === "string" ? originalRequest.url : originalRequest.url?.toString() || "";
+  let cache;
+  let requestHeaders;
+  let cachedEntry;
+  let needsRevalidation = false;
+  const isStream = options._isStream || options.responseType === "stream";
+  const isDownload = options._isDownload || !!options.fileName || !!options.saveTo || options.responseType === "download";
+  const isUpload = options._isUpload || options.responseType === "upload";
+  if (cacheOption && !isStream && !isDownload && !isUpload) {
+    cache = getResponseCache(cacheOption);
+    requestHeaders = originalRequest.headers instanceof RezoHeaders ? Object.fromEntries(originalRequest.headers.entries()) : originalRequest.headers;
+    cachedEntry = cache.get(method, requestUrl, requestHeaders);
+    if (cachedEntry) {
+      const cacheControl = parseCacheControlFromHeaders(cachedEntry.headers);
+      if (cacheControl.noCache || cacheControl.mustRevalidate) {
+        needsRevalidation = true;
+      } else {
+        return buildCachedRezoResponse(cachedEntry, config);
+      }
+    }
+    const conditionalHeaders = cache.getConditionalHeaders(method, requestUrl, requestHeaders);
+    if (conditionalHeaders) {
+      if (originalRequest.headers instanceof RezoHeaders) {
+        for (const [key, value] of Object.entries(conditionalHeaders)) {
+          originalRequest.headers.set(key, value);
+        }
+      } else {
+        originalRequest.headers = {
+          ...originalRequest.headers,
+          ...conditionalHeaders
+        };
+      }
+    }
+  }
+  if (!config.requestId) {
+    config.requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+  }
+  debugLog.requestStart(config, requestUrl, method);
   let streamResponse;
   let downloadResponse;
   let uploadResponse;
   if (isStream) {
-    streamResponse = new StreamResponse;
+    streamResponse = options._streamResponse || new StreamResponse;
   } else if (isDownload) {
-    const fileName = options.fileName || options.saveTo || "";
-    const url = typeof originalRequest.url === "string" ? originalRequest.url : originalRequest.url.toString();
-    downloadResponse = new DownloadResponse(fileName, url);
+    downloadResponse = options._downloadResponse || (() => {
+      const fileName = options.fileName || options.saveTo || "";
+      const url = typeof originalRequest.url === "string" ? originalRequest.url : originalRequest.url.toString();
+      return new DownloadResponse(fileName, url);
+    })();
   } else if (isUpload) {
-    const url = typeof originalRequest.url === "string" ? originalRequest.url : originalRequest.url.toString();
-    uploadResponse = new UploadResponse(url);
+    uploadResponse = options._uploadResponse || (() => {
+      const url = typeof originalRequest.url === "string" ? originalRequest.url : originalRequest.url.toString();
+      return new UploadResponse(url);
+    })();
   }
   const eventEmitter = streamResponse || downloadResponse || uploadResponse;
   if (eventEmitter) {
@@ -1899,41 +2292,180 @@ export async function executeRequest(options, defaultOptions, jar) {
     }
   }
   const executor = new CurlExecutor;
-  try {
-    const result = await executor.execute(config, originalRequest, streamResponse, downloadResponse, uploadResponse);
-    if (!streamResponse && !downloadResponse && !uploadResponse) {
+  const retryConfig = config.retry;
+  let retryAttempt = 0;
+  const ABSOLUTE_MAX_ATTEMPTS = 50;
+  let totalAttempts = 0;
+  while (true) {
+    totalAttempts++;
+    if (totalAttempts > ABSOLUTE_MAX_ATTEMPTS) {
+      throw new RezoError(`Absolute maximum attempts (${ABSOLUTE_MAX_ATTEMPTS}) exceeded. This prevents infinite loops from retries and redirects.`, config, "ERR_MAX_ATTEMPTS", originalRequest);
+    }
+    try {
+      const result = await executor.execute(config, originalRequest, streamResponse, downloadResponse, uploadResponse);
+      if (streamResponse || downloadResponse || uploadResponse) {
+        return result;
+      }
       const response = result;
       if (proxyManager && selectedProxy) {
         proxyManager.reportSuccess(selectedProxy);
       }
-      if (response.status >= 400) {
-        const httpError = builErrorFromResponse(`Request failed with status code ${response.status}`, response, config, originalRequest);
-        if (config.retry) {
-          const maxRetries = config.retry.maxRetries || 0;
-          const statusCodes = config.retry.statusCodes || [408, 429, 500, 502, 503, 504];
-          if (config.retryAttempts < maxRetries && statusCodes.includes(response.status)) {
-            const retryDelay = config.retry.retryDelay || 0;
-            const incrementDelay = config.retry.incrementDelay || false;
-            const delay = incrementDelay ? retryDelay * (config.retryAttempts + 1) : retryDelay;
-            if (delay > 0) {
-              await new Promise((resolve) => setTimeout(resolve, delay));
-            }
-            config.retryAttempts++;
-            return executeRequest(options, defaultOptions, jar);
+      const duration = perform.now();
+      debugLog.response(config, response.status, response.statusText, duration);
+      debugLog.cookies(config, response.cookies?.array?.length || 0);
+      if (response.cookies?.setCookiesString?.length > 0 && jar) {
+        try {
+          jar.setCookiesSync(response.cookies.setCookiesString, response.finalUrl || requestUrl);
+        } catch (e) {}
+      }
+      if (cache) {
+        if (response.status === 304 && cachedEntry) {
+          const responseHeaders = response.headers instanceof RezoHeaders ? Object.fromEntries(response.headers.entries()) : response.headers;
+          const updatedCached = cache.updateRevalidated(method, requestUrl, responseHeaders, requestHeaders);
+          if (updatedCached) {
+            return buildCachedRezoResponse(updatedCached, config);
           }
+          return buildCachedRezoResponse(cachedEntry, config);
+        }
+        if (response.status >= 200 && response.status < 300) {
+          cache.set(method, requestUrl, response, requestHeaders);
+        }
+      }
+      debugLog.complete(config, response.finalUrl || requestUrl, config.redirectHistory?.length || 0, duration);
+      const _validateStatus = originalRequest.validateStatus ?? ((s) => s >= 200 && s < 300);
+      if (originalRequest.validateStatus !== null && !_validateStatus(response.status)) {
+        if (shouldWaitOnStatus(response.status, options.waitOnStatus)) {
+          const rateLimitWaitAttempt = config._rateLimitWaitAttempt || 0;
+          const waitResult = await handleRateLimitWait({
+            status: response.status,
+            headers: response.headers,
+            data: response.data,
+            url: requestUrl,
+            method,
+            config,
+            options,
+            currentWaitAttempt: rateLimitWaitAttempt
+          });
+          if (waitResult.shouldRetry) {
+            config._rateLimitWaitAttempt = waitResult.waitAttempt;
+            continue;
+          }
+        }
+        const httpError = builErrorFromResponse(`Request failed with status code ${response.status}`, response, config, originalRequest);
+        if (retryConfig) {
+          retryAttempt++;
+          if (retryConfig.condition) {
+            const shouldContinue = await retryConfig.condition(httpError, retryAttempt);
+            if (shouldContinue === false) {
+              if (retryConfig.onRetryExhausted) {
+                await retryConfig.onRetryExhausted(httpError, retryAttempt);
+              }
+              throw httpError;
+            }
+          } else {
+            const canRetry = shouldRetry(httpError, retryAttempt, method, retryConfig);
+            if (!canRetry) {
+              if (retryAttempt > retryConfig.maxRetries) {
+                debugLog.maxRetries(config, retryConfig.maxRetries);
+                if (retryConfig.onRetryExhausted) {
+                  await retryConfig.onRetryExhausted(httpError, retryAttempt);
+                }
+              }
+              throw httpError;
+            }
+          }
+          if (!config.errors)
+            config.errors = [];
+          config.errors.push({
+            attempt: retryAttempt,
+            error: httpError,
+            duration: perform.now()
+          });
+          perform.reset();
+          const currentDelay = calculateRetryDelay(retryAttempt, retryConfig.retryDelay, retryConfig.backoff, retryConfig.maxDelay);
+          debugLog.retry(config, retryAttempt, retryConfig.maxRetries, response.status, currentDelay);
+          if (retryConfig.onRetry) {
+            const shouldProceed = await retryConfig.onRetry(httpError, retryAttempt, currentDelay);
+            if (shouldProceed === false) {
+              throw httpError;
+            }
+          }
+          if (config.hooks?.beforeRetry && config.hooks.beforeRetry.length > 0) {
+            for (const hook of config.hooks.beforeRetry) {
+              await hook(config, httpError, retryAttempt);
+            }
+          }
+          if (currentDelay > 0) {
+            await new Promise((resolve) => setTimeout(resolve, currentDelay));
+          }
+          config.retryAttempts++;
+          continue;
         }
         throw httpError;
       }
+      return result;
+    } catch (error) {
+      if (error instanceof RezoError) {
+        if (retryConfig && !retryConfig.condition) {
+          const errorCode = error.code ?? error.cause?.code;
+          const isRetryableError = errorCode && shouldRetry(error, retryAttempt + 1, method, retryConfig);
+          if (isRetryableError) {
+            retryAttempt++;
+            if (!config.errors)
+              config.errors = [];
+            config.errors.push({
+              attempt: retryAttempt,
+              error,
+              duration: perform.now()
+            });
+            perform.reset();
+            const currentDelay = calculateRetryDelay(retryAttempt, retryConfig.retryDelay, retryConfig.backoff, retryConfig.maxDelay);
+            debugLog.retry(config, retryAttempt, retryConfig.maxRetries, 0, currentDelay);
+            if (retryConfig.onRetry) {
+              const shouldProceed = await retryConfig.onRetry(error, retryAttempt, currentDelay);
+              if (shouldProceed === false)
+                throw error;
+            }
+            if (config.hooks?.beforeRetry && config.hooks.beforeRetry.length > 0) {
+              for (const hook of config.hooks.beforeRetry) {
+                await hook(config, error, retryAttempt);
+              }
+            }
+            if (currentDelay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, currentDelay));
+            }
+            config.retryAttempts++;
+            continue;
+          }
+        }
+        if (proxyManager && selectedProxy) {
+          proxyManager.reportFailure(selectedProxy, error);
+          if (proxyManager.config.retryWithNextProxy) {
+            const maxProxyRetries = proxyManager.config.maxProxyRetries ?? 3;
+            const proxyAttempt = (config._proxyRetryCount ?? 0) + 1;
+            if (proxyAttempt <= maxProxyRetries) {
+              config._proxyRetryCount = proxyAttempt;
+              const retryUrl = typeof originalRequest.url === "string" ? originalRequest.url : originalRequest.url?.toString() || "";
+              const nextProxy = proxyManager.next(retryUrl);
+              if (nextProxy) {
+                originalRequest.proxy = {
+                  protocol: nextProxy.protocol,
+                  host: nextProxy.host,
+                  port: nextProxy.port,
+                  auth: nextProxy.auth
+                };
+                continue;
+              }
+            }
+          }
+        }
+        throw error;
+      }
+      if (proxyManager && selectedProxy) {
+        proxyManager.reportFailure(selectedProxy, error);
+      }
+      throw buildSmartError(config, originalRequest, error);
     }
-    return result;
-  } catch (error) {
-    if (proxyManager && selectedProxy) {
-      proxyManager.reportFailure(selectedProxy, error);
-    }
-    if (error instanceof RezoError) {
-      throw error;
-    }
-    throw buildSmartError(config, originalRequest, error);
   }
 }
 

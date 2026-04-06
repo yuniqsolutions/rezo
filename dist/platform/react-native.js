@@ -3,10 +3,16 @@ import { setGlobalAdapter, createRezoInstance, Rezo } from '../core/rezo.js';
 import { RezoError, RezoErrorCode } from '../errors/rezo-error.js';
 import { RezoHeaders } from '../utils/headers.js';
 import { RezoFormData } from '../utils/form-data.js';
-import { RezoCookieJar, Cookie } from '../utils/cookies.js';
+import { RezoCookieJar, Cookie } from '../cookies/cookie-jar.js';
 import { createDefaultHooks, mergeHooks } from '../core/hooks.js';
-import packageJson from "../../package.json" with { type: 'json' };
-
+import { VERSION } from '../version.js';
+export {
+  createFetchStreamTransport,
+  createExpoFileSystemAdapter,
+  createReactNativeFsAdapter,
+  createNetInfoProvider,
+  createExpoBackgroundTaskProvider
+} from './react-native-providers.js';
 export { Rezo };
 export { RezoError };
 export { RezoErrorCode };
@@ -23,7 +29,8 @@ export const isCancel = (error) => {
 };
 export const all = Promise.all.bind(Promise);
 export const spread = (callback) => (array) => callback(...array);
-export const VERSION = packageJson.version;
+
+export { VERSION };
 setGlobalAdapter(executeRequest);
 const rezo = createRezoInstance(executeRequest);
 export default rezo;

@@ -1,12 +1,9 @@
-import NodeFormData from 'form-data';
 import { Blob as Blob$1 } from 'node:buffer';
-import { EventEmitter } from 'node:events';
 import { Agent as HttpAgent, OutgoingHttpHeaders } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import { Socket } from 'node:net';
-import { Readable, Writable, WritableOptions } from 'node:stream';
 import { SecureContext, TLSSocket } from 'node:tls';
-import { Cookie as TouchCookie, CookieJar as TouchCookieJar, CreateCookieOptions } from 'tough-cookie';
+import { Cookie as TouchCookie, CookieJar as TouchCookieJar, CreateCookieJarOptions, CreateCookieOptions, Nullable, Store } from 'tough-cookie';
 
 export interface RezoHttpHeaders {
 	accept?: string | undefined;
@@ -66,6 +63,14 @@ export interface RezoHttpHeaders {
 	"sec-websocket-key"?: string | undefined;
 	"sec-websocket-protocol"?: string | undefined;
 	"sec-websocket-version"?: string | undefined;
+	"sec-ch-ua"?: string | undefined;
+	"sec-ch-ua-mobile"?: string | undefined;
+	"sec-ch-ua-platform"?: string | undefined;
+	"sec-ch-ua-full-version-list"?: string | undefined;
+	"sec-ch-ua-arch"?: string | undefined;
+	"sec-ch-ua-bitness"?: string | undefined;
+	"sec-ch-ua-model"?: string | undefined;
+	"sec-ch-ua-platform-version"?: string | undefined;
 	"strict-transport-security"?: string | undefined;
 	tk?: string | undefined;
 	trailer?: string | undefined;
@@ -102,6 +107,7 @@ export type RezoHeadersInit = [
 	string
 ][] | Record<string, string> | Headers | RezoHttpHeaders | RezoHeaders | OutgoingHttpHeaders;
 export declare class RezoHeaders extends Headers {
+	[key: string]: any;
 	constructor(init?: RezoHeadersInit);
 	getAll(name: "set-cookie" | "Set-Cookie"): string[];
 	getSetCookie(): string[];
@@ -126,6 +132,12 @@ export declare class RezoHeaders extends Headers {
 		key: string;
 		value: string;
 	}[];
+	/**
+	 * Returns headers as a plain object with keys in the specified order.
+	 * Keys present in `order` come first (in that order), remaining keys appended at end.
+	 * Used by stealth adapters to match browser header ordering.
+	 */
+	toOrderedObject(order: string[]): Record<string, string | string[]>;
 	toObject(omit?: Array<keyof RezoHttpHeaders> | keyof RezoHttpHeaders): Record<string, string | string[]>;
 	toString(): string;
 	set(name: keyof RezoHttpHeaders, value: string): void;
@@ -136,25 +148,11 @@ export declare class RezoHeaders extends Headers {
 	get(name: string): string | null;
 	has(name: keyof RezoHttpHeaders): boolean;
 	has(name: string): boolean;
-	[Symbol.iterator](): ArrayIterator<[
+	[Symbol.iterator](): HeadersIterator<[
 		string,
-		string | string[]
+		string
 	]>;
-	[util.inspect.custom](_depth: number, options: util.InspectOptionsStylized): string;
 	get [Symbol.toStringTag](): string;
-}
-export interface SerializedCookie {
-	key: string;
-	value: string;
-	expires?: string;
-	maxAge?: number | "Infinity" | "-Infinity";
-	domain?: string;
-	path?: string;
-	secure?: boolean;
-	hostOnly?: boolean;
-	creation?: string;
-	lastAccessed?: string;
-	[key: string]: unknown;
 }
 export declare class Cookie extends TouchCookie {
 	constructor(options?: CreateCookieOptions);
@@ -191,12 +189,43 @@ export declare class Cookie extends TouchCookie {
 	 */
 	static isCookie(cookie: any): cookie is Cookie;
 }
+export interface SerializedCookie {
+	key: string;
+	value: string;
+	expires?: string;
+	maxAge?: number | "Infinity" | "-Infinity";
+	domain?: string;
+	path?: string;
+	secure?: boolean;
+	hostOnly?: boolean;
+	creation?: string;
+	lastAccessed?: string;
+	[key: string]: unknown;
+}
+export interface Cookies {
+	array: Cookie[];
+	serialized: SerializedCookie[];
+	netscape: string;
+	string: string;
+	setCookiesString: string[];
+}
 export declare class RezoCookieJar extends TouchCookieJar {
 	constructor();
 	constructor(cookies: Cookie[]);
 	constructor(cookies: Cookie[], url: string);
+	constructor(store: Nullable<Store>, options?: CreateCookieJarOptions | boolean);
 	private generateCookies;
-	cookies(): Cookies;
+	/**
+	 * Get all cookies from the cookie jar.
+	 *
+	 * This method synchronously returns all cookies stored in the jar,
+	 * including both regular and touch cookies.
+	 *
+	 * @returns {Cookies} An object containing arrays of all cookies,
+	 * serialized representations, Netscape format strings, and set-cookie strings
+	 * @see {@link getCookiesForRequest} - Get cookies for a specific request URL
+	 */
+	cookies(url?: string): Cookies;
 	parseResponseCookies(cookies: Cookie[]): Cookies;
 	static toNetscapeCookie(cookies: Cookie[] | SerializedCookie[]): string;
 	static toCookieString(cookies: Cookie[] | SerializedCookie[]): string;
@@ -205,6 +234,51 @@ export declare class RezoCookieJar extends TouchCookieJar {
 	toArray(): Cookie[];
 	toSetCookies(): string[];
 	toSerializedCookies(): SerializedCookie[];
+	/**
+	 * Get cookies for a request URL with proper browser-like matching.
+	 * This method properly handles:
+	 * - Domain matching (exact or parent domain)
+	 * - Path matching (cookie path must be prefix of request path)
+	 * - Secure flag (secure cookies only over HTTPS)
+	 * - Expiry (expired cookies not returned)
+	 *
+	 * @param requestUrl - The full request URL including path (e.g., 'https://example.com/api/users')
+	 * @returns Array of Cookie objects that should be sent with the request
+	 */
+	getCookiesForRequest(requestUrl: string | URL): Cookie[];
+	/**
+	 * Get the Cookie header value for a request URL with proper browser-like matching.
+	 * Returns cookies in the format: "key1=value1; key2=value2"
+	 *
+	 * This is the browser-accurate way to build the Cookie header, properly filtering
+	 * cookies by domain, path, secure flag, and expiry.
+	 *
+	 * @param requestUrl - The full request URL including path (e.g., 'https://example.com/api/users')
+	 * @returns Cookie header string in "key=value; key=value" format
+	 */
+	getCookieHeader(requestUrl: string | URL): string;
+	/**
+	 * Debug method to show which cookies would be sent for a given URL.
+	 * Useful for troubleshooting cookie matching issues.
+	 *
+	 * @param requestUrl - The full request URL including path
+	 * @returns Object with matching cookies and the Cookie header that would be sent
+	 */
+	debugCookiesForRequest(requestUrl: string | URL): {
+		url: string;
+		matchingCookies: Array<{
+			key: string;
+			value: string;
+			domain: string;
+			path: string;
+		}>;
+		cookieHeader: string;
+		allCookies: Array<{
+			key: string;
+			domain: string;
+			path: string;
+		}>;
+	};
 	setCookiesSync(setCookieArray: string[]): Cookies;
 	setCookiesSync(setCookieArray: string[], url: string): Cookies;
 	setCookiesSync(cookiesString: string): Cookies;
@@ -258,89 +332,137 @@ export declare class RezoCookieJar extends TouchCookieJar {
 	 */
 	static fromFile(filePath: string, defaultUrl?: string): RezoCookieJar;
 }
-export interface Cookies {
-	array: Cookie[];
-	serialized: SerializedCookie[];
-	netscape: string;
-	string: string;
-	setCookiesString: string[];
-}
-export interface ReadableOptions {
-	highWaterMark?: number;
-	encoding?: string;
-	objectMode?: boolean;
-	read?(this: Readable, size: number): void;
-	destroy?(this: Readable, error: Error | null, callback: (error: Error | null) => void): void;
-	autoDestroy?: boolean;
-}
-export interface Options extends ReadableOptions {
-	writable?: boolean;
-	readable?: boolean;
-	dataSize?: number;
-	maxDataSize?: number;
-	pauseStreams?: boolean;
-}
-export declare class RezoFormData extends NodeFormData {
-	constructor(options?: Options);
+/**
+ * Universal FormData wrapper using native FormData API
+ * Works in Node.js 18+, Bun, Deno, browsers, CF Workers, edge runtimes
+ *
+ * @module utils/form-data
+ */
+export declare class RezoFormData {
+	private _fd;
+	private _cachedContentType;
+	private _cachedBuffer;
+	private _boundary;
+	constructor();
 	/**
-	 * Get field entries as array of [name, value] pairs
-	 * @returns {Promise<Array<[string, any]>>} Array of field entries
+	 * Append a field to the form data
+	 * @param name - Field name
+	 * @param value - Field value (string, Blob, or Buffer)
+	 * @param filename - Optional filename for file uploads
+	 * @warning Buffer is only available in Node.js/Bun/Deno. Use Blob for browser/React Native.
 	 */
-	getFieldEntries(): Promise<Array<[
+	append(name: string, value: string | Blob | Buffer, filename?: string): void;
+	/**
+	 * Set a field in the form data (replaces existing)
+	 * @param name - Field name
+	 * @param value - Field value (string, Blob, or Buffer)
+	 * @param filename - Optional filename for file uploads
+	 * @warning Buffer is only available in Node.js/Bun/Deno. Use Blob for browser/React Native.
+	 */
+	set(name: string, value: string | Blob | Buffer, filename?: string): void;
+	get(name: string): FormDataEntryValue | null;
+	getAll(name: string): FormDataEntryValue[];
+	has(name: string): boolean;
+	delete(name: string): void;
+	entries(): IterableIterator<[
 		string,
-		any
-	]>>;
+		FormDataEntryValue
+	]>;
+	keys(): IterableIterator<string>;
+	values(): IterableIterator<FormDataEntryValue>;
+	forEach(callback: (value: FormDataEntryValue, key: string, parent: FormData) => void): void;
+	[Symbol.iterator](): IterableIterator<[
+		string,
+		FormDataEntryValue
+	]>;
 	/**
-	 * Convert to native FormData
-	 * @returns {Promise<FormData | null>}
+	 * Get the underlying native FormData
 	 */
-	toNativeFormData(): Promise<FormData | null>;
+	toNativeFormData(): FormData;
 	/**
-	 * Create RezoFormData from native FormData
-	 * @param {FormData} formData - Native FormData object
-	 * @param {Options} options - Optional RezoFormData options
-	 * @returns {Promise<RezoFormData>}
+	 * Invalidate cached values when form data changes
 	 */
-	static fromNativeFormData(formData: FormData, options?: Options): Promise<RezoFormData>;
+	private _invalidateCache;
 	/**
-	 * Get the content type header for this form data
-	 * @returns {string} Content type with boundary
+	 * Build and cache the Response for extracting headers and body
+	 */
+	private _buildResponse;
+	/**
+	 * Get boundary extracted from Content-Type header
+	 * Must be called after getContentTypeAsync() to get accurate value
+	 */
+	getBoundary(): string;
+	/**
+	 * Get content type with boundary
+	 * Returns cached value if available, otherwise returns a generated boundary
 	 */
 	getContentType(): string;
 	/**
-	 * Convert form data to Buffer
-	 * @returns {Buffer} Form data as buffer
+	 * Get content type asynchronously with proper boundary
 	 */
-	toBuffer(): Buffer;
+	getContentTypeAsync(): Promise<string>;
 	/**
-	 * Create RezoFormData from object
-	 * Properly handles nested objects by JSON.stringify-ing them
-	 * @param {Record<string, any>} obj - Object to convert
-	 * @param {Options} options - Optional RezoFormData options
-	 * @returns {RezoFormData}
+	 * Get headers for HTTP request
+	 * Use getHeadersAsync() for complete headers with boundary
 	 */
-	static fromObject(obj: Record<string, any>, options?: Options): RezoFormData;
+	getHeaders(): Record<string, string>;
 	/**
-	 * Helper to append a value to FormData with proper type handling
-	 * @param {RezoFormData} formData - The form data to append to
-	 * @param {string} key - The field name
-	 * @param {any} value - The value to append
+	 * Get headers asynchronously with proper Content-Type and boundary
 	 */
-	private static appendValue;
+	getHeadersAsync(): Promise<Record<string, string>>;
 	/**
-	 * Convert to URL query string
-	 * Warning: File, Blob, and binary data will be omitted
-	 * @param {boolean} convertBinaryToBase64 - Convert binary data to base64 strings
-	 * @returns {Promise<string>} URL query string
+	 * Get length synchronously - returns cached value if available
+	 * Use getLength() for guaranteed result
 	 */
-	toUrlQueryString(convertBinaryToBase64?: boolean): Promise<string>;
+	getLengthSync(): number | undefined;
 	/**
-	 * Convert to URLSearchParams object
-	 * Warning: File, Blob, and binary data will be omitted
-	 * @param {boolean} convertBinaryToBase64 - Convert binary data to base64 strings
-	 * @returns {Promise<URLSearchParams>} URLSearchParams object
+	 * Get length asynchronously (works in all environments)
 	 */
-	toURLSearchParams(convertBinaryToBase64?: boolean): Promise<URLSearchParams>;
+	getLength(): Promise<number>;
+	/**
+	 * Get buffer synchronously - returns cached value if available
+	 * Use toBuffer() for guaranteed result
+	 * @warning Only works in Node.js/Bun/Deno. Returns null in browser/React Native.
+	 */
+	getBuffer(): Buffer | null;
+	/**
+	 * Convert to Buffer asynchronously
+	 * @warning Only works in Node.js/Bun/Deno. Use toArrayBuffer() for browser/React Native.
+	 */
+	toBuffer(): Promise<Buffer>;
+	/**
+	 * Convert to ArrayBuffer asynchronously (works in all environments)
+	 */
+	toArrayBuffer(): Promise<ArrayBuffer>;
+	/**
+	 * Convert to Uint8Array asynchronously (works in all environments)
+	 */
+	toUint8Array(): Promise<Uint8Array>;
+	/**
+	 * Create RezoFormData from object.
+	 * By default, nested objects/arrays are JSON-encoded as string values.
+	 * Pass `nestedKeys: true` to flatten with bracket notation instead.
+	 */
+	static fromObject(obj: Record<string, unknown>, options?: {
+		nestedKeys?: boolean;
+	}): RezoFormData;
+	/**
+	 * Create a URL-encoded string from a plain object (application/x-www-form-urlencoded).
+	 * Spaces are encoded as `+`, suitable for form POST bodies.
+	 */
+	static createUrlEncoded(data: Record<string, string | number | boolean>): string;
+	/**
+	 * Create RezoFormData from native FormData
+	 */
+	static fromNativeFormData(formData: FormData): RezoFormData;
+	/**
+	 * Convert to URL query string (only string values, binary data omitted)
+	 */
+	toUrlQueryString(): string;
+	/**
+	 * Convert to URLSearchParams (only string values, binary data omitted)
+	 */
+	toURLSearchParams(): URLSearchParams;
 }
 /**
  * Emitted when request is initiated
@@ -586,112 +708,84 @@ export type SanitizedRezoConfig = Omit<RezoConfig, "data"> & {
 	data?: never;
 };
 /**
- * Event map for StreamResponse - defines all available events and their signatures
+ * Standard RezoResponse for non-streaming requests
+ * Contains response data, status, headers, cookies, and execution metadata
  */
-export interface StreamResponseEvents {
-	close: [
-	];
-	drain: [
-	];
-	error: [
-		err: RezoError
-	];
-	finish: [
-		info: StreamFinishEvent
-	];
-	done: [
-		info: StreamFinishEvent
-	];
-	start: [
-		info: RequestStartEvent
-	];
-	initiated: [
-	];
-	headers: [
-		info: ResponseHeadersEvent
-	];
-	cookies: [
-		cookies: Cookie[]
-	];
-	status: [
-		status: number,
-		statusText: string
-	];
-	redirect: [
-		info: RedirectEvent
-	];
-	progress: [
-		progress: ProgressEvent$1
-	];
-	data: [
-		chunk: Buffer | string
-	];
-	pipe: [
-		src: Readable
-	];
-	unpipe: [
-		src: Readable
-	];
+export interface RezoResponse<T = any> {
+	data: T;
+	status: number;
+	statusText: string;
+	finalUrl: string;
+	cookies: Cookies;
+	headers: RezoHeaders;
+	contentType: string | undefined;
+	contentLength: number;
+	urls: string[];
+	config: RezoConfig;
 }
 /**
- * Complete type-safe event method overrides for StreamResponse
- * All event listener methods return 'this' for chaining
+ * Platform-agnostic base interface for event-emitting responses
+ * Can be implemented by both Node.js EventEmitter and browser-safe implementations
  */
-export interface StreamResponseEventOverrides {
-	on<K extends keyof StreamResponseEvents>(event: K, listener: (...args: StreamResponseEvents[K]) => void): this;
-	on(event: string | symbol, listener: (...args: any[]) => void): this;
-	once<K extends keyof StreamResponseEvents>(event: K, listener: (...args: StreamResponseEvents[K]) => void): this;
-	once(event: string | symbol, listener: (...args: any[]) => void): this;
-	addListener<K extends keyof StreamResponseEvents>(event: K, listener: (...args: StreamResponseEvents[K]) => void): this;
-	addListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependListener<K extends keyof StreamResponseEvents>(event: K, listener: (...args: StreamResponseEvents[K]) => void): this;
-	prependListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependOnceListener<K extends keyof StreamResponseEvents>(event: K, listener: (...args: StreamResponseEvents[K]) => void): this;
-	prependOnceListener(event: string | symbol, listener: (...args: any[]) => void): this;
-}
-declare class StreamResponse extends Writable implements StreamResponseEventOverrides {
-	private _finished;
-	private _encoding?;
-	constructor(opts?: WritableOptions);
-	/**
-	 * Set encoding for string chunks
-	 * @param encoding - Buffer encoding (utf8, ascii, etc.)
-	 * @returns this for chaining
-	 */
-	setEncoding(encoding: BufferEncoding): this;
-	/**
-	 * Get current encoding
-	 */
-	getEncoding(): BufferEncoding | undefined;
-	/**
-	 * Check if stream has finished
-	 */
-	isFinished(): boolean;
-	/**
-	 * Mark stream as finished (internal use)
-	 * @internal
-	 */
-	_markFinished(): void;
-	/**
-	 * Internal write implementation required by Writable
-	 * Emits 'data' event for each chunk received
-	 * @internal
-	 */
-	_write(chunk: any, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void;
+export interface BaseEventEmitter {
 	on(event: string | symbol, listener: (...args: any[]) => void): this;
 	once(event: string | symbol, listener: (...args: any[]) => void): this;
-	addListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependOnceListener(event: string | symbol, listener: (...args: any[]) => void): this;
 	off(event: string | symbol, listener: (...args: any[]) => void): this;
+	emit(event: string | symbol, ...args: any[]): boolean;
 	removeListener(event: string | symbol, listener: (...args: any[]) => void): this;
 	removeAllListeners(event?: string | symbol): this;
+	addListener(event: string | symbol, listener: (...args: any[]) => void): this;
 }
 /**
- * Complete type-safe event method overrides for DownloadResponse
- * All event listener methods return 'this' for chaining
+ * RezoStreamResponse - For responseType: 'stream'
+ * Platform-agnostic interface for streaming responses
+ * Emits 'data' events for response body chunks
  */
-export interface DownloadResponseEventOverrides {
+export interface RezoStreamResponse extends BaseEventEmitter {
+	/** Pipe stream data to a writable destination (file stream, stdout, etc.) */
+	pipe<T extends NodeJS.WritableStream>(destination: T, options?: {
+		end?: boolean;
+	}): T;
+	/** Pipe stream data to a file path (creates directories automatically) */
+	pipeTo(filePath: string): this;
+	on(event: "data", listener: (chunk: Uint8Array | string) => void): this;
+	on(event: "error", listener: (err: RezoError) => void): this;
+	on(event: "finish", listener: (info: StreamFinishEvent) => void): this;
+	on(event: "done", listener: (info: StreamFinishEvent) => void): this;
+	on(event: "start", listener: (info: RequestStartEvent) => void): this;
+	on(event: "initiated", listener: () => void): this;
+	on(event: "headers", listener: (info: ResponseHeadersEvent) => void): this;
+	on(event: "cookies", listener: (cookies: Cookie[]) => void): this;
+	on(event: "status", listener: (status: number, statusText: string) => void): this;
+	on(event: "redirect", listener: (info: RedirectEvent) => void): this;
+	on(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
+	on(event: string | symbol, listener: (...args: any[]) => void): this;
+	once(event: "data", listener: (chunk: Uint8Array | string) => void): this;
+	once(event: "error", listener: (err: RezoError) => void): this;
+	once(event: "finish", listener: (info: StreamFinishEvent) => void): this;
+	once(event: "done", listener: (info: StreamFinishEvent) => void): this;
+	once(event: "start", listener: (info: RequestStartEvent) => void): this;
+	once(event: "initiated", listener: () => void): this;
+	once(event: "headers", listener: (info: ResponseHeadersEvent) => void): this;
+	once(event: "cookies", listener: (cookies: Cookie[]) => void): this;
+	once(event: "status", listener: (status: number, statusText: string) => void): this;
+	once(event: "redirect", listener: (info: RedirectEvent) => void): this;
+	once(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
+	once(event: string | symbol, listener: (...args: any[]) => void): this;
+	isFinished(): boolean;
+	setEncoding?(encoding: string): this;
+	getEncoding?(): string | undefined;
+}
+/**
+ * RezoDownloadResponse - For fileName/saveTo options
+ * Platform-agnostic interface for file downloads
+ * Streams response body directly to file
+ */
+export interface RezoDownloadResponse extends BaseEventEmitter {
+	fileName: string;
+	url: string;
+	status?: number;
+	statusText?: string;
 	on(event: "error", listener: (err: RezoError) => void): this;
 	on(event: "finish", listener: (info: DownloadFinishEvent) => void): this;
 	on(event: "done", listener: (info: DownloadFinishEvent) => void): this;
@@ -714,74 +808,18 @@ export interface DownloadResponseEventOverrides {
 	once(event: "redirect", listener: (info: RedirectEvent) => void): this;
 	once(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
 	once(event: string | symbol, listener: (...args: any[]) => void): this;
-	addListener(event: "error", listener: (err: RezoError) => void): this;
-	addListener(event: "finish", listener: (info: DownloadFinishEvent) => void): this;
-	addListener(event: "done", listener: (info: DownloadFinishEvent) => void): this;
-	addListener(event: "start", listener: (info: RequestStartEvent) => void): this;
-	addListener(event: "initiated", listener: () => void): this;
-	addListener(event: "headers", listener: (info: ResponseHeadersEvent) => void): this;
-	addListener(event: "cookies", listener: (cookies: Cookie[]) => void): this;
-	addListener(event: "status", listener: (status: number, statusText: string) => void): this;
-	addListener(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	addListener(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
-	addListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependListener(event: "error", listener: (err: RezoError) => void): this;
-	prependListener(event: "finish", listener: (info: DownloadFinishEvent) => void): this;
-	prependListener(event: "done", listener: (info: DownloadFinishEvent) => void): this;
-	prependListener(event: "start", listener: (info: RequestStartEvent) => void): this;
-	prependListener(event: "initiated", listener: () => void): this;
-	prependListener(event: "headers", listener: (info: ResponseHeadersEvent) => void): this;
-	prependListener(event: "cookies", listener: (cookies: Cookie[]) => void): this;
-	prependListener(event: "status", listener: (status: number, statusText: string) => void): this;
-	prependListener(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	prependListener(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
-	prependListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependOnceListener(event: "error", listener: (err: RezoError) => void): this;
-	prependOnceListener(event: "finish", listener: (info: DownloadFinishEvent) => void): this;
-	prependOnceListener(event: "done", listener: (info: DownloadFinishEvent) => void): this;
-	prependOnceListener(event: "start", listener: (info: RequestStartEvent) => void): this;
-	prependOnceListener(event: "initiated", listener: () => void): this;
-	prependOnceListener(event: "headers", listener: (info: ResponseHeadersEvent) => void): this;
-	prependOnceListener(event: "cookies", listener: (cookies: Cookie[]) => void): this;
-	prependOnceListener(event: "status", listener: (status: number, statusText: string) => void): this;
-	prependOnceListener(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	prependOnceListener(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
-	prependOnceListener(event: string | symbol, listener: (...args: any[]) => void): this;
-}
-declare class DownloadResponse extends EventEmitter implements DownloadResponseEventOverrides {
-	/** File name (basename or fullname) */
-	fileName: string;
-	/** Target URL */
-	url: string;
-	/** HTTP status code (set when headers received) */
-	status?: number;
-	/** HTTP status text (set when headers received) */
-	statusText?: string;
-	private _finished;
-	constructor(fileName: string, url: string);
-	/**
-	 * Check if download has finished
-	 */
 	isFinished(): boolean;
-	/**
-	 * Mark download as finished (internal use)
-	 * @internal
-	 */
-	_markFinished(): void;
-	on(event: string | symbol, listener: (...args: any[]) => void): this;
-	once(event: string | symbol, listener: (...args: any[]) => void): this;
-	addListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependOnceListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	off(event: string | symbol, listener: (...args: any[]) => void): this;
-	removeListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	removeAllListeners(event?: string | symbol): this;
 }
 /**
- * Complete type-safe event method overrides for UploadResponse
- * All event listener methods return 'this' for chaining
+ * RezoUploadResponse - For responseType: 'upload'
+ * Platform-agnostic interface for file uploads
+ * Tracks upload progress and includes server response body
  */
-export interface UploadResponseEventOverrides {
+export interface RezoUploadResponse extends BaseEventEmitter {
+	url: string;
+	fileName?: string;
+	status?: number;
+	statusText?: string;
 	on(event: "error", listener: (err: RezoError) => void): this;
 	on(event: "finish", listener: (info: UploadFinishEvent) => void): this;
 	on(event: "done", listener: (info: UploadFinishEvent) => void): this;
@@ -804,105 +842,7 @@ export interface UploadResponseEventOverrides {
 	once(event: "redirect", listener: (info: RedirectEvent) => void): this;
 	once(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
 	once(event: string | symbol, listener: (...args: any[]) => void): this;
-	addListener(event: "error", listener: (err: RezoError) => void): this;
-	addListener(event: "finish", listener: (info: UploadFinishEvent) => void): this;
-	addListener(event: "done", listener: (info: UploadFinishEvent) => void): this;
-	addListener(event: "start", listener: (info: RequestStartEvent) => void): this;
-	addListener(event: "initiated", listener: () => void): this;
-	addListener(event: "headers", listener: (info: ResponseHeadersEvent) => void): this;
-	addListener(event: "cookies", listener: (cookies: Cookie[]) => void): this;
-	addListener(event: "status", listener: (status: number, statusText: string) => void): this;
-	addListener(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	addListener(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
-	addListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependListener(event: "error", listener: (err: RezoError) => void): this;
-	prependListener(event: "finish", listener: (info: UploadFinishEvent) => void): this;
-	prependListener(event: "done", listener: (info: UploadFinishEvent) => void): this;
-	prependListener(event: "start", listener: (info: RequestStartEvent) => void): this;
-	prependListener(event: "initiated", listener: () => void): this;
-	prependListener(event: "headers", listener: (info: ResponseHeadersEvent) => void): this;
-	prependListener(event: "cookies", listener: (cookies: Cookie[]) => void): this;
-	prependListener(event: "status", listener: (status: number, statusText: string) => void): this;
-	prependListener(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	prependListener(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
-	prependListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependOnceListener(event: "error", listener: (err: RezoError) => void): this;
-	prependOnceListener(event: "finish", listener: (info: UploadFinishEvent) => void): this;
-	prependOnceListener(event: "done", listener: (info: UploadFinishEvent) => void): this;
-	prependOnceListener(event: "start", listener: (info: RequestStartEvent) => void): this;
-	prependOnceListener(event: "initiated", listener: () => void): this;
-	prependOnceListener(event: "headers", listener: (info: ResponseHeadersEvent) => void): this;
-	prependOnceListener(event: "cookies", listener: (cookies: Cookie[]) => void): this;
-	prependOnceListener(event: "status", listener: (status: number, statusText: string) => void): this;
-	prependOnceListener(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	prependOnceListener(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
-	prependOnceListener(event: string | symbol, listener: (...args: any[]) => void): this;
-}
-declare class UploadResponse extends EventEmitter implements UploadResponseEventOverrides {
-	/** Target URL */
-	url: string;
-	/** File name if uploading a file */
-	fileName?: string;
-	/** HTTP status code (set when headers received) */
-	status?: number;
-	/** HTTP status text (set when headers received) */
-	statusText?: string;
-	private _finished;
-	constructor(url: string, fileName?: string);
-	/**
-	 * Check if upload has finished
-	 */
 	isFinished(): boolean;
-	/**
-	 * Mark upload as finished (internal use)
-	 * @internal
-	 */
-	_markFinished(): void;
-	on(event: string | symbol, listener: (...args: any[]) => void): this;
-	once(event: string | symbol, listener: (...args: any[]) => void): this;
-	addListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	prependOnceListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	off(event: string | symbol, listener: (...args: any[]) => void): this;
-	removeListener(event: string | symbol, listener: (...args: any[]) => void): this;
-	removeAllListeners(event?: string | symbol): this;
-}
-/**
- * Standard RezoResponse for non-streaming requests
- * Contains response data, status, headers, cookies, and execution metadata
- */
-export interface RezoResponse<T = any> {
-	data: T;
-	status: number;
-	statusText: string;
-	finalUrl: string;
-	cookies: Cookies;
-	headers: RezoHeaders;
-	contentType: string | undefined;
-	contentLength: number;
-	urls: string[];
-	config: RezoConfig;
-}
-/**
- * RezoStreamResponse - For responseType: 'stream'
- * Extends StreamResponse class (EventEmitter)
- * Emits 'data' events for response body chunks
- */
-export interface RezoStreamResponse extends StreamResponse {
-}
-/**
- * RezoDownloadResponse - For fileName/saveTo options
- * Extends DownloadResponse class (EventEmitter)
- * Streams response body directly to file
- */
-export interface RezoDownloadResponse extends DownloadResponse {
-}
-/**
- * RezoUploadResponse - For responseType: 'upload'
- * Extends UploadResponse class (EventEmitter)
- * Tracks upload progress and includes server response body
- */
-export interface RezoUploadResponse extends UploadResponse {
 }
 /**
  * Rezo ProxyManager Types
@@ -1019,6 +959,11 @@ export interface ProxyManagerBaseConfig {
 	 */
 	cooldown?: ProxyCooldownConfig;
 	/**
+	 * Shorthand for cooldown duration in milliseconds
+	 * Equivalent to: cooldown: { enabled: true, durationMs: cooldownPeriod }
+	 */
+	cooldownPeriod?: number;
+	/**
 	 * Whether to throw error when no proxy is available
 	 * - true (default): Throw RezoError when no proxies available
 	 * - false: Proceed with direct connection (no proxy)
@@ -1035,6 +980,27 @@ export interface ProxyManagerBaseConfig {
 	 * @default 3
 	 */
 	maxProxyRetries?: number;
+	/**
+	 * Enable debug logging for hook errors and internal warnings
+	 * @default false
+	 */
+	debug?: boolean;
+	/**
+	 * Event hooks for proxy lifecycle events
+	 * Alternative to setting hooks after construction
+	 */
+	hooks?: {
+		beforeProxySelect?: ((context: BeforeProxySelectContext) => ProxyInfo | void)[];
+		afterProxySelect?: ((context: AfterProxySelectContext) => void | Promise<void>)[];
+		beforeProxyError?: ((context: BeforeProxyErrorContext) => void | Promise<void>)[];
+		afterProxyError?: ((context: AfterProxyErrorContext) => void | Promise<void>)[];
+		beforeProxyDisable?: ((context: BeforeProxyDisableContext) => boolean | void)[];
+		afterProxyDisable?: ((context: AfterProxyDisableContext) => void | Promise<void>)[];
+		afterProxyRotate?: ((context: AfterProxyRotateContext) => void | Promise<void>)[];
+		afterProxyEnable?: ((context: AfterProxyEnableContext) => void | Promise<void>)[];
+		afterProxySuccess?: ((context: AfterProxySuccessContext) => void | Promise<void>)[];
+		onNoProxiesAvailable?: ((context: OnNoProxiesAvailableContext) => void | Promise<void>)[];
+	};
 }
 /**
  * Full proxy manager configuration
@@ -1198,6 +1164,16 @@ export interface AfterProxyEnableContext {
 	proxy: ProxyInfo;
 	/** Reason for enabling */
 	reason: "cooldown-expired" | "manual";
+}
+/**
+ * Context for afterProxySuccess hook
+ * Triggered when a request succeeds through a proxy
+ */
+export interface AfterProxySuccessContext {
+	/** The proxy that succeeded */
+	proxy: ProxyInfo;
+	/** Current proxy state after success */
+	state: ProxyState;
 }
 /**
  * Context for onNoProxiesAvailable hook
@@ -1432,10 +1408,36 @@ export type InitHook = (plainOptions: Partial<RezoRequestConfig>, options: RezoR
  */
 export type BeforeRequestHook = (config: RezoConfig, context: BeforeRequestContext) => void | Response | Promise<void | Response>;
 /**
+ * Context provided to beforeRedirect hook
+ * Contains full request and redirect details
+ */
+export interface BeforeRedirectContext {
+	/** The URL being redirected to */
+	redirectUrl: URL;
+	/** The URL being redirected from */
+	fromUrl: string;
+	/** HTTP status code that triggered the redirect (301, 302, 303, 307, 308) */
+	status: number;
+	/** Response headers from the redirect response */
+	headers: RezoHeaders;
+	/** Whether the redirect stays on the same domain */
+	sameDomain: boolean;
+	/** HTTP method of the current request */
+	method: string;
+	/** The original request body */
+	body?: any;
+	/** The full request configuration */
+	request: RezoRequestConfig;
+	/** Number of redirects followed so far */
+	redirectCount: number;
+	/** Timestamp */
+	timestamp: number;
+}
+/**
  * Hook called before following a redirect
  * Use to inspect/modify redirect behavior
  */
-export type BeforeRedirectHook = (config: RezoConfig, response: RezoResponse) => void | Promise<void>;
+export type BeforeRedirectHook = (context: BeforeRedirectContext, config: RezoConfig, response: RezoResponse) => void | Promise<void>;
 /**
  * Hook called before a retry attempt
  * Use for custom backoff logic, logging
@@ -1506,6 +1508,35 @@ export type OnTimeoutHook = (event: TimeoutEvent, config: RezoConfig) => void;
  * Use for cleanup, logging
  */
 export type OnAbortHook = (event: AbortEvent, config: RezoConfig) => void;
+/**
+ * Rate limit wait event data - fired when waiting due to rate limiting
+ */
+export interface RateLimitWaitEvent {
+	/** HTTP status code that triggered the wait (e.g., 429, 503) */
+	status: number;
+	/** Time to wait in milliseconds */
+	waitTime: number;
+	/** Current wait attempt number (1-indexed) */
+	attempt: number;
+	/** Maximum wait attempts configured */
+	maxAttempts: number;
+	/** Where the wait time was extracted from */
+	source: "header" | "body" | "function" | "default";
+	/** The header or body path used (if applicable) */
+	sourcePath?: string;
+	/** URL being requested */
+	url: string;
+	/** HTTP method of the request */
+	method: string;
+	/** Timestamp when the wait started */
+	timestamp: number;
+}
+/**
+ * Hook called when rate limit wait occurs
+ * Informational only - cannot abort the wait
+ * Use for logging, monitoring, alerting
+ */
+export type OnRateLimitWaitHook = (event: RateLimitWaitEvent, config: RezoConfig) => void | Promise<void>;
 /**
  * Hook called before a proxy is selected
  * Can return a specific proxy to override selection
@@ -1586,6 +1617,7 @@ export interface RezoHooks {
 	onTls: OnTlsHook[];
 	onTimeout: OnTimeoutHook[];
 	onAbort: OnAbortHook[];
+	onRateLimitWait: OnRateLimitWaitHook[];
 }
 /**
  * Create empty hooks object with all arrays initialized
@@ -1596,6 +1628,1518 @@ export declare function createDefaultHooks(): RezoHooks;
  * Overrides are appended to base hooks (base runs first)
  */
 export declare function mergeHooks(base: RezoHooks, overrides?: Partial<RezoHooks>): RezoHooks;
+export interface DNSCacheOptions {
+	enable?: boolean;
+	ttl?: number;
+	maxEntries?: number;
+}
+declare class DNSCache {
+	private cache;
+	private enabled;
+	constructor(options?: DNSCacheOptions);
+	private makeKey;
+	lookup(hostname: string, family?: 4 | 6): Promise<{
+		address: string;
+		family: 4 | 6;
+	} | undefined>;
+	lookupAll(hostname: string, family?: 4 | 6): Promise<Array<{
+		address: string;
+		family: 4 | 6;
+	}>>;
+	private resolveDNS;
+	private resolveAllDNS;
+	invalidate(hostname: string): void;
+	clear(): void;
+	get size(): number;
+	get isEnabled(): boolean;
+	setEnabled(enabled: boolean): void;
+}
+export interface ResponseCacheConfig {
+	enable?: boolean;
+	cacheDir?: string;
+	networkCheck?: boolean;
+	ttl?: number;
+	maxEntries?: number;
+	methods?: string[];
+	respectHeaders?: boolean;
+}
+export type ResponseCacheOption = boolean | ResponseCacheConfig;
+export interface CachedResponse {
+	status: number;
+	statusText: string;
+	headers: Record<string, string>;
+	data: unknown;
+	url: string;
+	timestamp: number;
+	ttl: number;
+	etag?: string;
+	lastModified?: string;
+}
+declare class ResponseCache {
+	private memoryCache;
+	private config;
+	private persistenceEnabled;
+	private initialized;
+	constructor(options?: ResponseCacheOption);
+	private initializePersistence;
+	private initializePersistenceAsync;
+	private getCacheFilePath;
+	private persistToDisk;
+	private loadFromDiskAsync;
+	private generateKey;
+	private parseCacheControl;
+	isCacheable(method: string, status: number, headers?: Record<string, string>): boolean;
+	get(method: string, url: string, headers?: Record<string, string>): CachedResponse | undefined;
+	private loadSingleFromDisk;
+	set(method: string, url: string, response: RezoResponse, requestHeaders?: Record<string, string>): void;
+	private normalizeHeaders;
+	getConditionalHeaders(method: string, url: string, requestHeaders?: Record<string, string>): Record<string, string> | undefined;
+	updateRevalidated(method: string, url: string, newHeaders: Record<string, string>, requestHeaders?: Record<string, string>): CachedResponse | undefined;
+	invalidate(url: string, method?: string): void;
+	clear(): void;
+	get size(): number;
+	get isEnabled(): boolean;
+	get isPersistent(): boolean;
+	getConfig(): ResponseCacheConfig;
+}
+type BeforeProxySelectHook$1 = (context: BeforeProxySelectContext) => ProxyInfo | void;
+type AfterProxySelectHook$1 = (context: AfterProxySelectContext) => void | Promise<void>;
+type BeforeProxyErrorHook$1 = (context: BeforeProxyErrorContext) => void | Promise<void>;
+type AfterProxyErrorHook$1 = (context: AfterProxyErrorContext) => void | Promise<void>;
+type BeforeProxyDisableHook$1 = (context: BeforeProxyDisableContext) => boolean | void;
+type AfterProxyDisableHook$1 = (context: AfterProxyDisableContext) => void | Promise<void>;
+type AfterProxyRotateHook$1 = (context: AfterProxyRotateContext) => void | Promise<void>;
+type AfterProxyEnableHook$1 = (context: AfterProxyEnableContext) => void | Promise<void>;
+export type AfterProxySuccessHook = (context: AfterProxySuccessContext) => void | Promise<void>;
+type OnNoProxiesAvailableHook$1 = (context: OnNoProxiesAvailableContext) => void | Promise<void>;
+/**
+ * Proxy hooks collection for ProxyManager events
+ */
+export interface ProxyHooks {
+	beforeProxySelect: BeforeProxySelectHook$1[];
+	afterProxySelect: AfterProxySelectHook$1[];
+	beforeProxyError: BeforeProxyErrorHook$1[];
+	afterProxyError: AfterProxyErrorHook$1[];
+	beforeProxyDisable: BeforeProxyDisableHook$1[];
+	afterProxyDisable: AfterProxyDisableHook$1[];
+	afterProxyRotate: AfterProxyRotateHook$1[];
+	afterProxyEnable: AfterProxyEnableHook$1[];
+	/** Hook triggered when a request succeeds through a proxy */
+	afterProxySuccess: AfterProxySuccessHook[];
+	/** Hook triggered when no proxies are available */
+	onNoProxiesAvailable: OnNoProxiesAvailableHook$1[];
+}
+declare class ProxyManager {
+	/** Internal configuration (use getter for external access) */
+	private _config;
+	/** Read-only access to the proxy manager configuration */
+	get config(): Readonly<ProxyManagerConfig>;
+	/** Internal proxy states map (proxyId -> state) */
+	private states;
+	/** Current proxy id for sequential rotation (identity-based, not index-based) */
+	private currentSequentialId;
+	/** Request counter for current proxy (sequential rotation) */
+	private currentProxyRequests;
+	/** Last selected proxy (for rotation tracking) */
+	private lastSelectedProxy;
+	/** Cooldown timers map (proxyId -> timerId) */
+	private cooldownTimers;
+	/** Last time processExpiredCooldowns ran (debounce) */
+	private lastCooldownCheck;
+	/** Pending resolvers for waitForProxy() callers */
+	private pendingWaiters;
+	/** Pending rejecters paired with pendingWaiters */
+	private pendingRejecters;
+	/** Whether to log hook errors and internal warnings */
+	private debug;
+	/** Total requests through manager */
+	private _totalRequests;
+	/** Total successful requests */
+	private _totalSuccesses;
+	/** Total failed requests */
+	private _totalFailures;
+	/** Proxy hooks */
+	hooks: ProxyHooks;
+	/**
+	 * Create a new ProxyManager instance
+	 * @param config - Proxy manager configuration
+	 */
+	constructor(config: ProxyManagerConfig);
+	/**
+	 * Create initial state for a proxy
+	 */
+	private createInitialState;
+	/**
+	 * Check if a URL should use proxy based on whitelist/blacklist
+	 * @param url - The request URL to check
+	 * @returns true if URL should use proxy, false if should go direct
+	 */
+	shouldProxy(url: string): boolean;
+	/**
+	 * Match a URL against a pattern
+	 */
+	private matchPattern;
+	/**
+	 * Get active proxies (not disabled)
+	 */
+	getActive(): ProxyInfo[];
+	/**
+	 * Internal: get active proxies with guaranteed ids
+	 */
+	private getActiveInternal;
+	/**
+	 * Get disabled proxies
+	 */
+	getDisabled(): ProxyInfo[];
+	/**
+	 * Get proxies in cooldown
+	 */
+	getCooldown(): ProxyInfo[];
+	/**
+	 * Get all proxy states regardless of status
+	 * Returns the full internal state for every proxy in the pool
+	 */
+	getAll(): ProxyState[];
+	/**
+	 * Process expired cooldowns and re-enable proxies
+	 */
+	private processExpiredCooldowns;
+	/**
+	 * Get next proxy based on rotation strategy (convenience alias for select().proxy)
+	 * @param url - The request URL (for whitelist/blacklist checking)
+	 * @returns Selected proxy or null if should go direct
+	 */
+	next(url: string): ProxyInfo | null;
+	/**
+	 * Select a proxy with detailed reason
+	 * Core selection method — fires all hooks, applies rotation, updates state
+	 * @param url - The request URL
+	 * @returns Selection result with proxy and reason
+	 */
+	select(url: string): ProxySelectionResult;
+	/**
+	 * Select proxy based on rotation strategy
+	 * All proxies in activeProxies have guaranteed ids (assigned on construction/add)
+	 */
+	private selectProxy;
+	/**
+	 * Report a successful request through a proxy
+	 * @param proxy - The proxy that succeeded
+	 */
+	reportSuccess(proxy: ProxyInfo): void;
+	/**
+	 * Report a failed request through a proxy
+	 * @param proxy - The proxy that failed
+	 * @param error - The error that occurred
+	 * @param url - Optional URL for hook context
+	 */
+	reportFailure(proxy: ProxyInfo, error: Error, url?: string): void;
+	/**
+	 * Alias for reportFailure - report an error for a proxy
+	 * @param proxy - The proxy that had an error
+	 * @param error - The error that occurred
+	 * @param url - Optional URL for hook context
+	 */
+	reportError(proxy: ProxyInfo, error: Error, url?: string): void;
+	/**
+	 * Disable a proxy from the pool
+	 * @param proxy - The proxy to disable
+	 * @param reason - Reason for disabling
+	 */
+	disableProxy(proxy: ProxyInfo, reason?: "dead" | "limit-reached" | "manual"): void;
+	/**
+	 * Enable a previously disabled proxy
+	 * @param proxy - The proxy to enable
+	 * @param reason - Reason for enabling
+	 */
+	enableProxy(proxy: ProxyInfo, reason?: "cooldown-expired" | "manual"): void;
+	/**
+	 * Add proxies to the pool
+	 * @param proxies - Proxies to add
+	 */
+	add(proxies: string | ProxyInfo | (string | ProxyInfo)[]): void;
+	/**
+	 * Remove proxies from the pool
+	 * @param proxies - Proxies to remove
+	 */
+	remove(proxies: ProxyInfo | ProxyInfo[]): void;
+	/**
+	 * Remove a proxy from the pool by its id
+	 * @param id - The proxy id to remove
+	 */
+	removeById(id: string): void;
+	/**
+	 * Reset all proxies - re-enable all and reset counters
+	 */
+	reset(): void;
+	/**
+	 * Remove all proxies and reset counters
+	 * Unlike reset() which re-enables existing proxies, this empties the pool entirely.
+	 * Unlike destroy() which tears down the instance, the manager remains usable after clear().
+	 */
+	clear(): void;
+	/**
+	 * Get current status of all proxies
+	 */
+	getStatus(): ProxyManagerStatus;
+	/**
+	 * Total number of proxies in the pool (active + disabled + cooldown)
+	 */
+	get size(): number;
+	/** Total requests routed through the manager */
+	get totalRequests(): number;
+	/** Total successful requests */
+	get totalSuccesses(): number;
+	/** Total failed requests */
+	get totalFailures(): number;
+	/**
+	 * Get state for a specific proxy
+	 * @param proxy - The proxy to get state for
+	 */
+	getProxyState(proxy: ProxyInfo): ProxyState | undefined;
+	/**
+	 * Check if a proxy exists in the pool (any state)
+	 * @param proxy - The proxy to check
+	 */
+	has(proxy: ProxyInfo): boolean;
+	/**
+	 * Check if any proxies are available (active and ready to use)
+	 */
+	hasAvailableProxies(): boolean;
+	/**
+	 * Check if any proxies are currently in cooldown and will become available
+	 * Useful for standalone pool usage to know if waiting is worthwhile
+	 *
+	 * @returns true if at least one proxy is in cooldown (will re-enable automatically)
+	 *
+	 * @example
+	 * ```typescript
+	 * if (!pool.hasAvailableProxies() && pool.isCoolingDown()) {
+	 *     const proxy = await pool.waitForProxy();
+	 * }
+	 * ```
+	 */
+	isCoolingDown(): boolean;
+	/**
+	 * Get the number of milliseconds until the next proxy exits cooldown
+	 * Returns 0 if a proxy is already available, -1 if no proxies are in cooldown
+	 *
+	 * @returns Milliseconds until next proxy becomes available
+	 *
+	 * @example
+	 * ```typescript
+	 * const ms = pool.nextCooldownMs();
+	 * if (ms > 0) console.log(`Next proxy available in ${ms}ms`);
+	 * if (ms === -1) console.log('No proxies recovering — pool is dead');
+	 * ```
+	 */
+	nextCooldownMs(): number;
+	/**
+	 * Wait for the next proxy to become available
+	 * Resolves immediately if a proxy is already active.
+	 * If proxies are in cooldown, resolves when the first one re-enables.
+	 * Rejects if no proxies are in cooldown (pool is permanently exhausted).
+	 *
+	 * @returns Promise that resolves with the first available proxy
+	 * @throws {Error} If no proxies are in cooldown and none are active
+	 *
+	 * @example
+	 * ```typescript
+	 * // Standalone pool usage
+	 * const proxy = pool.next(url);
+	 * if (!proxy && pool.isCoolingDown()) {
+	 *     const recovered = await pool.waitForProxy();
+	 *     // use recovered proxy
+	 * }
+	 * ```
+	 */
+	waitForProxy(): Promise<ProxyInfo>;
+	/**
+	 * Destroy the manager and cleanup timers
+	 */
+	destroy(): void;
+	/**
+	 * Create a RezoError for ProxyManager context (no request config available)
+	 */
+	private createError;
+	/**
+	 * Run hooks array with safe error handling.
+	 * Sync hooks execute inline; async hooks fire-and-forget with rejection caught.
+	 */
+	private runHooks;
+	private runBeforeProxySelectHooks;
+	/**
+	 * Notify that no proxies are available and trigger hooks
+	 * This method is called when proxy selection fails due to pool exhaustion
+	 *
+	 * @param url - The request URL that needed a proxy
+	 * @param error - The error that will be thrown
+	 * @returns The context object with detailed information about the proxy pool state
+	 *
+	 * @example
+	 * ```typescript
+	 * manager.hooks.onNoProxiesAvailable.push((context) => {
+	 *     console.error(`No proxies available for ${context.url}`);
+	 *     console.log(`Dead: ${context.disabledReasons.dead}, Limit: ${context.disabledReasons.limitReached}`);
+	 *     // Trigger external alert or proxy refresh
+	 *     alertSystem.notify('Proxy pool exhausted', context);
+	 * });
+	 *
+	 * // Called internally or by adapters when no proxies are available
+	 * const context = manager.notifyNoProxiesAvailable('https://api.example.com', new Error('No proxies'));
+	 * ```
+	 */
+	notifyNoProxiesAvailable(url: string, error: Error): OnNoProxiesAvailableContext;
+}
+/**
+ * Queue configuration options
+ */
+export interface QueueConfig {
+	/** Name of the queue - useful for debugging and logging */
+	name?: string;
+	/** Maximum concurrent tasks (default: Infinity) */
+	concurrency?: number;
+	/** Auto-start processing when tasks are added (default: true) */
+	autoStart?: boolean;
+	/** Timeout per task in milliseconds (default: none) */
+	timeout?: number;
+	/** Throw on timeout vs silently fail (default: true) */
+	throwOnTimeout?: boolean;
+	/** Interval between task starts in ms for rate limiting */
+	interval?: number;
+	/** Max tasks to start per interval (default: Infinity) */
+	intervalCap?: number;
+	/** Carry over unused interval capacity to next interval */
+	carryoverConcurrencyCount?: boolean;
+	/**
+	 * Reject the task promise when an error occurs (default: false)
+	 * When false, errors are swallowed and task.resolve(undefined) is called.
+	 * This prevents unhandled promise rejections but makes error handling harder.
+	 * When true, task.reject(error) is called, allowing proper try/catch handling.
+	 */
+	rejectOnError?: boolean;
+}
+/**
+ * HTTP-specific queue configuration
+ */
+export interface HttpQueueConfig extends QueueConfig {
+	/** Per-domain concurrency limits */
+	domainConcurrency?: number | Record<string, number>;
+	/** Global requests per second limit */
+	requestsPerSecond?: number;
+	/** Respect Retry-After headers automatically */
+	respectRetryAfter?: boolean;
+	/** Respect X-RateLimit-* headers automatically */
+	respectRateLimitHeaders?: boolean;
+	/** Retry failed tasks automatically */
+	autoRetry?: boolean;
+	/**
+	 * Alias for autoRetry - automatically retry on rate limit (429) responses
+	 * @alias autoRetry
+	 */
+	retryOnRateLimit?: boolean;
+	/** Max retry attempts for auto-retry */
+	maxRetries?: number;
+	/** Delay between retries (supports backoff function) */
+	retryDelay?: number | ((attempt: number) => number);
+	/** Status codes that trigger retry */
+	retryStatusCodes?: number[];
+}
+/**
+ * Task options when adding to queue
+ */
+export interface TaskOptions {
+	/** Task priority (higher runs first, default: 0) */
+	priority?: number;
+	/** Task-specific timeout (overrides queue default) */
+	timeout?: number;
+	/** Unique ID for tracking/cancellation */
+	id?: string;
+	/** Signal for external cancellation */
+	signal?: AbortSignal;
+}
+/**
+ * HTTP-specific task options
+ */
+export interface HttpTaskOptions extends TaskOptions {
+	/** Domain for per-domain limiting (auto-extracted if not provided) */
+	domain?: string;
+	/** HTTP method for method-based priority */
+	method?: string;
+	/** Retry this specific task on failure */
+	retry?: boolean | number;
+	/** Custom retry delay for this task */
+	retryDelay?: number;
+}
+/**
+ * Current queue state
+ */
+export interface QueueState {
+	/** Number of tasks currently running */
+	pending: number;
+	/** Number of tasks waiting in queue */
+	size: number;
+	/** Total tasks (pending + size) */
+	total: number;
+	/** Is queue paused */
+	isPaused: boolean;
+	/** Is queue idle (no tasks) */
+	isIdle: boolean;
+}
+/**
+ * Queue statistics
+ */
+export interface QueueStats {
+	/** Total tasks added since creation */
+	added: number;
+	/** Total tasks processed (started) */
+	processed: number;
+	/** Total successful completions */
+	completed: number;
+	/** Total failures */
+	failed: number;
+	/** Total timeouts */
+	timedOut: number;
+	/** Total cancellations */
+	cancelled: number;
+	/** Average task duration (ms) */
+	averageDuration: number;
+	/** Tasks per second (rolling average) */
+	throughput: number;
+}
+/**
+ * HTTP-specific statistics
+ */
+export interface HttpQueueStats extends QueueStats {
+	/** Stats per domain */
+	byDomain: Record<string, {
+		pending: number;
+		completed: number;
+		failed: number;
+		rateLimited: number;
+	}>;
+	/** Total retries performed */
+	retries: number;
+	/** Rate limit events */
+	rateLimitHits: number;
+}
+/**
+ * Domain-specific state
+ */
+export interface DomainState {
+	/** Number of tasks currently running for domain */
+	pending: number;
+	/** Number of tasks waiting for domain */
+	size: number;
+	/** Is domain paused */
+	isPaused: boolean;
+	/** Rate limit until timestamp (if rate limited) */
+	rateLimitedUntil?: number;
+}
+/**
+ * Queue event types
+ */
+export interface QueueEvents {
+	/** Task added to queue */
+	add: {
+		id: string;
+		priority: number;
+	};
+	/** Task started executing */
+	start: {
+		id: string;
+	};
+	/** Task completed successfully */
+	completed: {
+		id: string;
+		result: any;
+		duration: number;
+	};
+	/** Task failed with error */
+	error: {
+		id: string;
+		error: Error;
+	};
+	/** Task timed out */
+	timeout: {
+		id: string;
+	};
+	/** Task cancelled */
+	cancelled: {
+		id: string;
+	};
+	/** Queue became active (was idle, now processing) */
+	active: undefined;
+	/** Queue became idle (all tasks done) */
+	idle: undefined;
+	/** Queue was paused */
+	paused: undefined;
+	/** Queue was resumed */
+	resumed: undefined;
+	/** Next task about to run */
+	next: undefined;
+	/** Queue was emptied (no pending tasks) */
+	empty: undefined;
+}
+/**
+ * HTTP-specific events
+ */
+export interface HttpQueueEvents extends QueueEvents {
+	/** Rate limit hit for a domain */
+	rateLimited: {
+		domain: string;
+		retryAfter: number;
+	};
+	/** Domain queue became available */
+	domainAvailable: {
+		domain: string;
+	};
+	/** Task being retried */
+	retry: {
+		id: string;
+		attempt: number;
+		error: Error;
+	};
+}
+/**
+ * Event handler type
+ */
+export type EventHandler<T> = (data: T) => void;
+/**
+ * Task function type
+ */
+export type TaskFunction<T> = () => Promise<T>;
+declare class RezoQueue<T = any> {
+	private queue;
+	private pendingCount;
+	private isPausedFlag;
+	private intervalId?;
+	private intervalCount;
+	readonly name: string;
+	private intervalStart;
+	private eventHandlers;
+	private statsData;
+	private totalDuration;
+	private throughputWindow;
+	private readonly throughputWindowSize;
+	private idlePromise?;
+	private emptyPromise?;
+	/** Tracks if queue has ever had work added - ensures onIdle waits for first task */
+	private hasEverBeenActive;
+	readonly config: Required<QueueConfig>;
+	/**
+	 * Create a new RezoQueue
+	 * @param config - Queue configuration options
+	 */
+	constructor(config?: QueueConfig);
+	/**
+	 * Get current queue state
+	 */
+	get state(): QueueState;
+	/**
+	 * Get queue statistics
+	 */
+	get stats(): QueueStats;
+	/**
+	 * Get/set concurrency limit
+	 */
+	get concurrency(): number;
+	set concurrency(value: number);
+	/**
+	 * Number of pending (running) tasks
+	 */
+	get pending(): number;
+	/**
+	 * Number of tasks waiting in queue
+	 */
+	get size(): number;
+	/**
+	 * Check if queue is paused
+	 */
+	get isPaused(): boolean;
+	/**
+	 * Add a task to the queue
+	 * @param fn - Async function to execute
+	 * @param options - Task options
+	 * @returns Promise resolving to task result
+	 */
+	add<R = T>(fn: TaskFunction<R>, options?: TaskOptions): Promise<R>;
+	/**
+	 * Add multiple tasks to the queue
+	 * @param fns - Array of async functions
+	 * @param options - Task options (applied to all)
+	 * @returns Promise resolving to array of results
+	 */
+	addAll<R = T>(fns: TaskFunction<R>[], options?: TaskOptions): Promise<R[]>;
+	/**
+	 * Pause queue processing (running tasks continue)
+	 */
+	pause(): void;
+	/**
+	 * Resume queue processing
+	 */
+	start(): void;
+	/**
+	 * Clear all pending tasks from queue
+	 */
+	clear(): void;
+	/**
+	 * Cancel a specific task by ID
+	 * @param id - Task ID to cancel
+	 * @returns true if task was found and cancelled
+	 */
+	cancel(id: string): boolean;
+	/**
+	 * Cancel all tasks matching a predicate
+	 * @param predicate - Function to test each task
+	 * @returns Number of tasks cancelled
+	 */
+	cancelBy(predicate: (task: {
+		id: string;
+		priority: number;
+	}) => boolean): number;
+	/**
+	 * Wait for queue to become idle (no running or pending tasks)
+	 *
+	 * Unlike a simple "isIdle" check, this properly waits for work to be added
+	 * and completed if called before any tasks are queued (matches p-queue behavior).
+	 */
+	onIdle(): Promise<void>;
+	/**
+	 * Wait for queue to be empty (no pending tasks, but may have running)
+	 */
+	onEmpty(): Promise<void>;
+	/**
+	 * Wait for queue size to be less than limit
+	 * @param limit - Size threshold
+	 * @param timeoutMs - Optional timeout in milliseconds (default: 0 = no timeout)
+	 *                    If timeout occurs, promise resolves (not rejects) to prevent blocking
+	 */
+	onSizeLessThan(limit: number, timeoutMs?: number): Promise<void>;
+	/** Maximum recommended handlers per event before warning */
+	private static readonly MAX_HANDLERS_WARNING;
+	/**
+	 * Register an event handler
+	 * @param event - Event name
+	 * @param handler - Handler function
+	 */
+	on<E extends keyof QueueEvents>(event: E, handler: EventHandler<QueueEvents[E]>): void;
+	/**
+	 * Remove an event handler
+	 * @param event - Event name
+	 * @param handler - Handler function to remove
+	 */
+	off<E extends keyof QueueEvents>(event: E, handler: EventHandler<QueueEvents[E]>): void;
+	/**
+	 * Destroy the queue and cleanup resources
+	 */
+	destroy(): void;
+	/**
+	 * Insert task into queue maintaining priority order (highest first)
+	 * Fast path: priority 0 (default) appends directly — O(1) instead of O(n) scan
+	 */
+	private insertByPriority;
+	/**
+	 * Try to run next task if capacity available.
+	 *
+	 * Like p-queue's #tryToStartAnother(), this method handles idle/empty
+	 * checks INSIDE itself — only after confirming there's nothing left to
+	 * dequeue. This prevents the false-idle race where idle fires while
+	 * tasks are still in the queue waiting to be shifted.
+	 */
+	private tryRunNext;
+	/**
+	 * Clear the interval timer (called when queue empties).
+	 * The interval will be re-created when new tasks are added.
+	 */
+	private clearIntervalTimer;
+	/**
+	 * Execute a task
+	 */
+	private runTask;
+	/**
+	 * Record task duration for statistics
+	 */
+	private recordDuration;
+	/**
+	 * Start interval-based rate limiting
+	 */
+	private startInterval;
+	/**
+	 * Emit an event
+	 */
+	protected emit<E extends keyof QueueEvents>(event: E, data: QueueEvents[E]): void;
+	/**
+	 * Check if queue became empty
+	 */
+	private checkEmpty;
+	/**
+	 * Check if queue became idle
+	 */
+	private checkIdle;
+}
+declare class HttpQueue extends RezoQueue<any> {
+	private domainQueues;
+	private domainPending;
+	private domainPaused;
+	private domainRateLimited;
+	private domainConcurrencyLimits;
+	private httpStatsData;
+	private httpEventHandlers;
+	readonly httpConfig: Required<HttpQueueConfig>;
+	/**
+	 * Create a new HttpQueue
+	 * @param config - HTTP queue configuration
+	 */
+	constructor(config?: HttpQueueConfig);
+	/**
+	 * Resume queue processing (overrides base to also process HTTP tasks)
+	 */
+	start(): void;
+	/**
+	 * Get HTTP-specific statistics
+	 */
+	get httpStats(): HttpQueueStats;
+	/**
+	 * Add an HTTP task to the queue
+	 * @param fn - Async function to execute
+	 * @param options - HTTP task options
+	 * @returns Promise resolving to task result
+	 */
+	addHttp<R = any>(fn: TaskFunction<R>, options?: HttpTaskOptions): Promise<R>;
+	/**
+	 * Pause requests to specific domain
+	 * @param domain - Domain to pause
+	 */
+	pauseDomain(domain: string): void;
+	/**
+	 * Resume requests to specific domain
+	 * @param domain - Domain to resume
+	 */
+	resumeDomain(domain: string): void;
+	/**
+	 * Set per-domain concurrency limit
+	 * @param domain - Domain to configure
+	 * @param limit - Concurrency limit
+	 */
+	setDomainConcurrency(domain: string, limit: number): void;
+	/**
+	 * Get domain-specific state
+	 * @param domain - Domain to query
+	 */
+	getDomainState(domain: string): DomainState;
+	/**
+	 * Handle rate limit response
+	 * @param domain - Domain that was rate limited
+	 * @param retryAfter - Seconds until retry is allowed
+	 */
+	handleRateLimit(domain: string, retryAfter: number): void;
+	/**
+	 * Cancel an HTTP task by ID
+	 * @param id - Task ID to cancel
+	 * @returns true if task was found and cancelled
+	 */
+	cancelHttp(id: string): boolean;
+	/**
+	 * Register an event handler (supports both base and HTTP-specific events)
+	 * @param event - Event name
+	 * @param handler - Handler function
+	 */
+	on<E extends keyof HttpQueueEvents>(event: E, handler: EventHandler<HttpQueueEvents[E]>): void;
+	/**
+	 * Remove an event handler (supports both base and HTTP-specific events)
+	 * @param event - Event name
+	 * @param handler - Handler function to remove
+	 */
+	off<E extends keyof HttpQueueEvents>(event: E, handler: EventHandler<HttpQueueEvents[E]>): void;
+	/**
+	 * Register an HTTP event handler
+	 * @param event - Event name
+	 * @param handler - Handler function
+	 * @deprecated Use on() instead
+	 */
+	onHttp<E extends keyof HttpQueueEvents>(event: E, handler: EventHandler<HttpQueueEvents[E]>): void;
+	/**
+	 * Remove an HTTP event handler
+	 * @param event - Event name
+	 * @param handler - Handler function to remove
+	 * @deprecated Use off() instead
+	 */
+	offHttp<E extends keyof HttpQueueEvents>(event: E, handler: EventHandler<HttpQueueEvents[E]>): void;
+	/**
+	 * Clear all HTTP tasks
+	 */
+	clearHttp(): void;
+	/**
+	 * Destroy the queue and cleanup resources
+	 */
+	destroy(): void;
+	/**
+	 * Insert HTTP task maintaining priority order
+	 */
+	private insertHttpTask;
+	/**
+	 * Get domain concurrency limit
+	 */
+	private getDomainLimit;
+	/**
+	 * Check if domain can accept more tasks
+	 */
+	private canRunDomain;
+	/**
+	 * Try to run next HTTP task
+	 */
+	private tryRunHttpNext;
+	/**
+	 * Execute an HTTP task
+	 */
+	private runHttpTask;
+	/**
+	 * Calculate retry delay for task
+	 */
+	private getRetryDelay;
+	/**
+	 * Ensure domain stats exist
+	 */
+	private ensureDomainStats;
+	/**
+	 * Emit an HTTP event
+	 */
+	private emitHttp;
+}
+/**
+ * Browser profile types for RezoStealth
+ *
+ * Defines the shape of a complete browser fingerprint profile including
+ * TLS parameters, HTTP/2 settings, header ordering, and client hints.
+ *
+ * @module stealth/profiles/types
+ */
+export interface TlsFingerprint {
+	/** TLS cipher suites in exact browser order, OpenSSL names, colon-separated */
+	ciphers: string;
+	/** Signature algorithms in exact browser order, colon-separated */
+	sigalgs: string;
+	/** ECDH curves / supported groups in exact browser order */
+	ecdhCurve: string;
+	/** Minimum TLS version */
+	minVersion: "TLSv1.2" | "TLSv1.3";
+	/** Maximum TLS version */
+	maxVersion: "TLSv1.2" | "TLSv1.3";
+	/** ALPN protocols in browser order */
+	alpnProtocols: string[];
+	/** TLS session timeout in seconds */
+	sessionTimeout: number;
+}
+export interface Http2Settings {
+	/** SETTINGS_HEADER_TABLE_SIZE (0x01) */
+	headerTableSize: number;
+	/** SETTINGS_ENABLE_PUSH (0x02) */
+	enablePush: boolean;
+	/** SETTINGS_MAX_CONCURRENT_STREAMS (0x03) — 0 = not sent (use server default) */
+	maxConcurrentStreams: number;
+	/** SETTINGS_INITIAL_WINDOW_SIZE (0x04) */
+	initialWindowSize: number;
+	/** SETTINGS_MAX_FRAME_SIZE (0x05) */
+	maxFrameSize: number;
+	/** SETTINGS_MAX_HEADER_LIST_SIZE (0x06) — 0 = not sent */
+	maxHeaderListSize: number;
+	/** WINDOW_UPDATE on connection level sent after SETTINGS */
+	connectionWindowSize: number;
+}
+export interface ClientHints {
+	/** sec-ch-ua header value (brand list). null for non-Chromium browsers. */
+	secChUa: string | null;
+	/** sec-ch-ua-mobile — '?0' or '?1'. null for non-Chromium. */
+	secChUaMobile: string | null;
+	/** sec-ch-ua-platform — e.g., '"Windows"'. null for non-Chromium. */
+	secChUaPlatform: string | null;
+	/** sec-ch-ua-full-version-list (optional, only on request) */
+	secChUaFullVersionList?: string;
+	/** sec-ch-ua-arch */
+	secChUaArch?: string;
+	/** sec-ch-ua-bitness */
+	secChUaBitness?: string;
+	/** sec-ch-ua-model (mobile only) */
+	secChUaModel?: string;
+	/** sec-ch-ua-platform-version */
+	secChUaPlatformVersion?: string;
+}
+export interface NavigatorProperties {
+	/** navigator.platform value */
+	platform: string;
+	/** Number of logical processors */
+	hardwareConcurrency: number;
+	/** Device memory in GB */
+	deviceMemory: number;
+	/** Max touch points (0 for desktop, 5+ for mobile) */
+	maxTouchPoints: number;
+}
+export interface BrowserProfile {
+	/** Unique profile identifier (e.g., 'chrome-131', 'firefox-133') */
+	id: string;
+	/** Browser family */
+	family: "chrome" | "firefox" | "safari" | "edge" | "opera" | "brave";
+	/** Browser engine */
+	engine: "blink" | "gecko" | "webkit";
+	/** Full version string */
+	version: string;
+	/** Major version number */
+	majorVersion: number;
+	/** Device type */
+	device: "desktop" | "mobile";
+	/** TLS fingerprint parameters */
+	tls: TlsFingerprint;
+	/** HTTP/2 SETTINGS frame values */
+	h2Settings: Http2Settings;
+	/**
+	 * HTTP/2 pseudo-header order as shorthand.
+	 * m = :method, a = :authority, s = :scheme, p = :path
+	 * Chrome: 'masp', Firefox: 'mpas', Safari: 'mspa'
+	 */
+	pseudoHeaderOrder: string;
+	/** Regular header names in exact browser send order (lowercase) */
+	headerOrder: string[];
+	/** User-Agent strings per platform */
+	userAgents: {
+		windows: string;
+		macos: string;
+		linux: string;
+		android?: string;
+		ios?: string;
+	};
+	/** Default Accept header for navigation requests */
+	accept: string;
+	/** Default Accept-Encoding header */
+	acceptEncoding: string;
+	/** Default Accept-Language header */
+	acceptLanguage: string;
+	/** Client hints (Chromium-based only; all null for Firefox/Safari) */
+	clientHints: ClientHints;
+	/** Navigator properties */
+	navigator: NavigatorProperties;
+}
+/**
+ * Union type of all built-in browser profile IDs.
+ * Provides full autocomplete in IDEs.
+ */
+export type BrowserProfileName = "chrome-120" | "chrome-124" | "chrome-128" | "chrome-131" | "chrome-131-android" | "firefox-115" | "firefox-121" | "firefox-128" | "firefox-133" | "safari-16.6" | "safari-17.4" | "safari-18.2" | "safari-17-ios" | "safari-18-ios" | "edge-120" | "edge-131" | "opera-115" | "brave-1.73";
+/**
+ * Configuration options for RezoStealth.
+ *
+ * Can override specific parts of a profile while keeping the rest intact.
+ */
+export interface RezoStealthOptions {
+	/** Profile to use — name string or full BrowserProfile object */
+	profile?: BrowserProfileName | BrowserProfile;
+	/** Pick a random profile from this browser family (ignored if `profile` is set) */
+	family?: BrowserProfile["family"];
+	/** Rotate identity on every request — fresh profile each time, no caching */
+	rotate?: boolean;
+	/** Override specific headers (user-set headers always take priority) */
+	headers?: Record<string, string>;
+	/** Override header order */
+	headerOrder?: string[];
+	/** Override TLS parameters */
+	tls?: Partial<TlsFingerprint>;
+	/** Override HTTP/2 SETTINGS */
+	h2Settings?: Partial<Http2Settings>;
+	/** Override Accept-Language */
+	language?: string;
+	/** Override platform for User-Agent selection ('windows' | 'macos' | 'linux' | 'android' | 'ios') */
+	platform?: "windows" | "macos" | "linux" | "android" | "ios";
+}
+/**
+ * Fully resolved stealth profile ready for use by adapters.
+ *
+ * Created once by the resolver and cached — adapters read values directly.
+ */
+export interface ResolvedStealthProfile {
+	/** The underlying browser profile */
+	profile: BrowserProfile;
+	/** Profile ID */
+	profileId: string;
+	/** Resolved TLS fingerprint (profile + overrides) */
+	tls: TlsFingerprint;
+	/** Resolved HTTP/2 SETTINGS (profile + overrides) */
+	h2Settings: Http2Settings;
+	/** Resolved header order */
+	headerOrder: string[];
+	/** HTTP/2 pseudo-header order as full strings */
+	pseudoHeaderOrder: string[];
+	/** Default headers to apply (User-Agent, Accept, etc.) — lowercase keys */
+	defaultHeaders: Record<string, string>;
+	/** Navigator properties for JS environment emulation */
+	navigator: BrowserProfile["navigator"];
+}
+export declare class RezoStealth {
+	private readonly _input;
+	private _resolved;
+	/** True when constructed with no args — profile will be detected from request headers */
+	private readonly _autoDetect;
+	/** True when rotate mode is enabled — fresh identity per resolve() call */
+	private readonly _rotate;
+	/**
+	 * Create a RezoStealth instance.
+	 *
+	 * @param input Profile name, BrowserProfile object, or RezoStealthOptions. Omit for auto-detect.
+	 *
+	 * @example
+	 * new RezoStealth()                                    // auto-detect from UA header
+	 * new RezoStealth('chrome-131')                        // specific profile
+	 * new RezoStealth({ family: 'brave' })                 // random Brave profile
+	 * new RezoStealth({ family: 'chrome', platform: 'windows' })  // random Chrome, Windows UA
+	 * new RezoStealth({ rotate: true })                    // fresh random identity per request
+	 * new RezoStealth({ rotate: true, family: 'firefox' }) // rotate within Firefox family
+	 */
+	constructor(input?: BrowserProfileName | BrowserProfile | RezoStealthOptions);
+	/** Whether this instance uses auto-detection from request headers */
+	get isAutoDetect(): boolean;
+	/** Whether this instance rotates identity per request */
+	get isRotate(): boolean;
+	/**
+	 * Resolve the stealth profile.
+	 *
+	 * When `rotate: true`, returns a fresh identity every call.
+	 * Otherwise, caches after the first call.
+	 *
+	 * @param userAgent Optional user-agent string for auto-detect mode.
+	 */
+	resolve(userAgent?: string): ResolvedStealthProfile;
+	/** The resolved profile ID */
+	get profileName(): string;
+	/** The resolved browser profile */
+	get profile(): BrowserProfile;
+	/**
+	 * Create a new RezoStealth with merged overrides.
+	 * The original instance is not modified.
+	 */
+	withOverrides(overrides: Partial<RezoStealthOptions>): RezoStealth;
+	/** Create stealth with a specific profile by name */
+	static from(name: BrowserProfileName): RezoStealth;
+	/** Create stealth with a random Chrome profile */
+	static chrome(): RezoStealth;
+	/** Create stealth with a random Firefox profile */
+	static firefox(): RezoStealth;
+	/** Create stealth with a random Safari profile */
+	static safari(): RezoStealth;
+	/** Create stealth with a random Edge profile */
+	static edge(): RezoStealth;
+	/** Create stealth with a random profile from any browser family */
+	static random(): RezoStealth;
+	/**
+	 * Auto-detect a browser profile from a User-Agent string.
+	 *
+	 * Parses the UA and finds the closest matching browser profile.
+	 * Falls back to random Chrome if no match found.
+	 *
+	 * @param userAgent User-Agent string to match
+	 */
+	static fromUserAgent(userAgent: string): RezoStealth;
+}
+export interface RezoReactNativeFileDownloadHeadersEvent {
+	status: number;
+	statusText?: string;
+	headers?: Record<string, string>;
+	finalUrl?: string;
+	contentType?: string;
+	contentLength?: number;
+}
+export interface RezoReactNativeFileDownloadProgressEvent {
+	loaded: number;
+	total?: number;
+	speed?: number;
+	averageSpeed?: number;
+	estimatedTime?: number;
+}
+export interface RezoReactNativeFileDownloadRequest {
+	url: string;
+	destination: string;
+	method: string;
+	headers: Record<string, string>;
+	body?: unknown;
+	timeout?: number | null;
+	signal?: AbortSignal | null;
+	onHeaders?: (event: RezoReactNativeFileDownloadHeadersEvent) => void | Promise<void>;
+	onProgress?: (event: RezoReactNativeFileDownloadProgressEvent) => void | Promise<void>;
+}
+export interface RezoReactNativeFileDownloadResult {
+	status: number;
+	statusText?: string;
+	headers?: Record<string, string>;
+	finalUrl?: string;
+	contentType?: string;
+	contentLength?: number;
+	filePath: string;
+	fileSize?: number;
+}
+export interface RezoReactNativeFileUploadSource {
+	uri: string;
+	name?: string;
+	type?: string;
+	fieldName?: string;
+	size?: number;
+}
+export interface RezoReactNativeFileUploadProgressEvent {
+	loaded: number;
+	total?: number;
+	speed?: number;
+	averageSpeed?: number;
+	estimatedTime?: number;
+}
+export interface RezoReactNativeFileUploadRequest {
+	url: string;
+	method: string;
+	headers: Record<string, string>;
+	file: RezoReactNativeFileUploadSource;
+	fields?: Record<string, string>;
+	binaryStreamOnly?: boolean;
+	timeout?: number | null;
+	signal?: AbortSignal | null;
+	onHeaders?: (event: RezoReactNativeFileDownloadHeadersEvent) => void | Promise<void>;
+	onProgress?: (event: RezoReactNativeFileUploadProgressEvent) => void | Promise<void>;
+}
+export interface RezoReactNativeFileUploadResult {
+	status: number;
+	statusText?: string;
+	headers?: Record<string, string>;
+	finalUrl?: string;
+	contentType?: string;
+	contentLength?: number;
+	body?: unknown;
+	uploadSize?: number;
+	fileName?: string;
+}
+export interface RezoReactNativeStreamHeadersEvent {
+	status: number;
+	statusText?: string;
+	headers?: Record<string, string>;
+	finalUrl?: string;
+	contentType?: string;
+	contentLength?: number;
+}
+export interface RezoReactNativeStreamProgressEvent {
+	loaded: number;
+	total?: number;
+	speed?: number;
+	averageSpeed?: number;
+	estimatedTime?: number;
+}
+export interface RezoReactNativeStreamRequest {
+	url: string;
+	method: string;
+	headers: Record<string, string>;
+	body?: unknown;
+	timeout?: number | null;
+	signal?: AbortSignal | null;
+	onHeaders?: (event: RezoReactNativeStreamHeadersEvent) => void | Promise<void>;
+	onChunk?: (chunk: Uint8Array | string) => void | Promise<void>;
+	onProgress?: (event: RezoReactNativeStreamProgressEvent) => void | Promise<void>;
+}
+export interface RezoReactNativeStreamResult {
+	status: number;
+	statusText?: string;
+	headers?: Record<string, string>;
+	finalUrl?: string;
+	contentType?: string;
+	contentLength?: number;
+}
+export interface RezoReactNativeUploadConfig extends RezoReactNativeFileUploadSource {
+	enabled?: boolean;
+	fields?: Record<string, string>;
+	binaryStreamOnly?: boolean;
+}
+export interface RezoReactNativeFileSystemAdapterCapabilities {
+	fileDownload?: boolean;
+	downloadProgress?: boolean;
+	uploadFromFile?: boolean;
+	uploadProgress?: boolean;
+	backgroundTasks?: boolean;
+}
+export interface RezoReactNativeFileSystemAdapter {
+	name: string;
+	capabilities?: RezoReactNativeFileSystemAdapterCapabilities;
+	downloadFile?: (request: RezoReactNativeFileDownloadRequest) => Promise<RezoReactNativeFileDownloadResult>;
+	uploadFile?: (request: RezoReactNativeFileUploadRequest) => Promise<RezoReactNativeFileUploadResult>;
+}
+export interface RezoReactNativeStreamTransport {
+	name: string;
+	stream(request: RezoReactNativeStreamRequest): Promise<RezoReactNativeStreamResult>;
+}
+export interface RezoReactNativeNetworkState {
+	type?: string;
+	isConnected: boolean | null;
+	isInternetReachable: boolean | null;
+	isExpensive?: boolean;
+	details?: Record<string, any>;
+}
+export interface RezoReactNativeNetworkInfoProvider {
+	fetch(): Promise<RezoReactNativeNetworkState>;
+	subscribe?(listener: (state: RezoReactNativeNetworkState) => void): (() => void) | Promise<() => void>;
+}
+export interface RezoReactNativeBackgroundTaskDefinition {
+	name: string;
+	minimumInterval?: number;
+	metadata?: Record<string, any>;
+}
+export interface RezoReactNativeBackgroundTaskConfig {
+	enabled?: boolean;
+	name: string;
+	minimumInterval?: number;
+	metadata?: Record<string, any>;
+	keepRegistered?: boolean;
+}
+export interface RezoReactNativeBackgroundTaskProvider {
+	registerTask(task: RezoReactNativeBackgroundTaskDefinition): Promise<void>;
+	unregisterTask(name: string): Promise<void>;
+	isTaskRegistered?(name: string): Promise<boolean>;
+}
+export interface RezoReactNativeOptions {
+	fileSystemAdapter?: RezoReactNativeFileSystemAdapter;
+	streamTransport?: RezoReactNativeStreamTransport;
+	networkInfoProvider?: RezoReactNativeNetworkInfoProvider;
+	backgroundTaskProvider?: RezoReactNativeBackgroundTaskProvider;
+	backgroundTask?: RezoReactNativeBackgroundTaskConfig | null;
+	upload?: RezoReactNativeUploadConfig | null;
+}
+export type queueOptions = QueueConfig;
+export interface CacheConfig {
+	/** Response cache configuration */
+	response?: boolean | ResponseCacheConfig;
+	/** DNS cache configuration */
+	dns?: boolean | DNSCacheOptions;
+}
+export type CacheOption = boolean | CacheConfig;
+export interface RezoDefaultOptions {
+	baseURL?: string;
+	/** Optional React Native integrations such as file-system or network-state providers */
+	reactNative?: RezoReactNativeOptions;
+	/** Hooks for request/response lifecycle */
+	hooks?: Partial<RezoHooks>;
+	/**
+	 * Whether to disable automatic cookie handling.
+	 * When false (default), cookies are automatically managed via the jar.
+	 * Set to true to disable automatic cookie management.
+	 * @default false
+	 */
+	disableJar?: boolean;
+	/**
+	 * Custom cookie jar for managing cookies.
+	 * The recommended way to manage cookies - pass the jar when creating the instance.
+	 * @example
+	 * ```typescript
+	 * const client = new Rezo({ jar: myJar });
+	 * // or
+	 * const client = rezo.create({ jar: myJar });
+	 * ```
+	 */
+	jar?: RezoHttpRequest["jar"];
+	/** Set default cookies to send with the requests in various formats */
+	cookies?: RezoHttpRequest["cookies"];
+	/**
+	 * Path to cookie file for persistence.
+	 * - .json files save cookies as serialized JSON
+	 * - .txt files save cookies in Netscape format
+	 * Cookies are loaded on construction and saved automatically after each request.
+	 */
+	cookieFile?: string;
+	/**
+	 * Queue for request management - supports multiple formats:
+	 * - RezoHttpQueue instance (takes priority)
+	 * - RezoQueue instance
+	 * - HttpQueueConfig object (creates RezoHttpQueue internally)
+	 * - QueueConfig object (creates RezoQueue internally)
+	 *
+	 * @example
+	 * ```typescript
+	 * // Pass RezoHttpQueue instance
+	 * const queue = new RezoHttpQueue({ concurrency: 5, domainConcurrency: 2 });
+	 * const client = rezo.create({ queue });
+	 *
+	 * // Or pass config to create internally
+	 * const client = rezo.create({ queue: { concurrency: 5 } });
+	 * ```
+	 */
+	queue?: RezoQueue<any> | HttpQueue | QueueConfig | HttpQueueConfig;
+	/**
+	 * @deprecated Use `queue` instead
+	 * Legacy queue options format
+	 */
+	queueOptions?: {
+		enable: boolean;
+		options?: queueOptions;
+	};
+	/** Request headers as various supported formats */
+	headers?: RezoHttpRequest["headers"];
+	/** Expected response data type */
+	responseType?: ResponseType$1;
+	/** Character encoding for the response */
+	responseEncoding?: string;
+	/** Basic authentication credentials */
+	auth?: RezoHttpRequest["auth"];
+	/** Request timeout in milliseconds */
+	timeout?: number;
+	/** @deprecated Use `timeout` instead */
+	requestTimeout?: number;
+	/** Whether to reject requests with invalid SSL certificates */
+	rejectUnauthorized?: boolean;
+	/** Retry configuration for failed requests */
+	retry?: RezoHttpRequest["retry"];
+	/** Whether to use a secure context for HTTPS requests */
+	useSecureContext?: boolean;
+	/** Custom secure context for TLS connections */
+	secureContext?: RezoHttpRequest["secureContext"];
+	/** Whether to automatically follow HTTP redirects */
+	followRedirects?: boolean;
+	/** Maximum number of redirects to follow */
+	maxRedirects?: number;
+	/** Whether to automatically decompress response data */
+	decompress?: boolean;
+	/** Whether to keep the connection alive for reuse */
+	keepAlive?: boolean;
+	/** Whether to detect and prevent redirect cycles */
+	enableRedirectCycleDetection?: boolean;
+	/** Whether to send cookies and authorization headers with cross-origin requests */
+	withCredentials?: boolean;
+	/** Proxy configuration (URL string or detailed options) */
+	proxy?: RezoHttpRequest["proxy"];
+	/** Maximum allowed size of the request body in bytes */
+	maxBodyLength?: number;
+	/** Maximum transfer rate (single number or [upload, download] tuple) */
+	maxRate?: RezoHttpRequest["maxRate"];
+	/**
+   * Callback invoked when a redirect response is received.
+   * Controls redirect behavior including whether to follow, modify URL, or change HTTP method.
+   *
+   * @param options - Redirect response details
+   * @param options.url - Redirect target URL
+   * @param options.status - HTTP status code
+   * @param options.headers - Response headers
+   * @param options.sameDomain - Whether redirect is to same domain
+   * @returns Boolean to follow/reject redirect, or object for granular control
+   *
+   * @example
+   * ```typescript
+   * beforeRedirect: ({ status, url }) => {
+   *   if (status === 301 || status === 302) {
+   *     return true; // Follow permanent/temporary redirects
+   *   } else if (status === 307 || status === 308) {
+   *     return { redirect: true, url: url.toString() }; // Preserve method for 307/308
+   *   } else if (status === 303) {
+   *     return { redirect: true, url: url.toString(), method: 'GET' }; // Force GET for 303
+   *   }
+   *   return false; // Reject other redirects
+   * }
+   * ```
+   */
+	beforeRedirect?: RezoHttpRequest["beforeRedirect"];
+	/** Alias for beforeRedirect */
+	onRedirect?: RezoHttpRequest["onRedirect"];
+	/** Array of functions to transform request data */
+	transformRequest?: RezoHttpRequest["transformRequest"];
+	/** Array of functions to transform response data */
+	transformResponse?: RezoHttpRequest["transformResponse"];
+	/** Browser simulation configuration for user agent spoofing */
+	browser?: RezoHttpRequest["browser"];
+	/** Enable debug logging for the request */
+	debug?: RezoHttpRequest["debug"];
+	/** Enable verbose logging with detailed information */
+	verbose?: RezoHttpRequest["verbose"];
+	/** Enable URL tracking to log redirect chain and retry attempts */
+	trackUrl?: RezoHttpRequest["trackUrl"];
+	/** HTTP agent for HTTP requests */
+	httpAgent?: RezoHttpRequest["httpAgent"];
+	/** HTTPS agent for HTTPS requests */
+	httpsAgent?: RezoHttpRequest["httpsAgent"];
+	/** Transitional options for backward compatibility */
+	transitional?: RezoHttpRequest["transitional"];
+	/** Character encoding for request body and response data */
+	encoding?: BufferEncoding;
+	/**
+	 * Cache configuration for response and DNS caching
+	 * - `true`: Enable default in-memory cache (fast, sensible defaults)
+	 * - `{ response: {...}, dns: {...} }`: Fine-grained control
+	 *
+	 * Response cache defaults: 30 min TTL, 500 entries, GET/HEAD only
+	 * DNS cache defaults: 1 min TTL, 1000 entries
+	 */
+	cache?: CacheOption;
+	/**
+	 * Proxy manager for advanced proxy rotation and pool management
+	 * - Provide a `ProxyManager` instance for full control
+	 * - Or provide `ProxyManagerConfig` to auto-create internally
+	 *
+	 * Note: ProxyManager overrides `proxy` option when set.
+	 * Use `useProxyManager: false` per-request to bypass.
+	 *
+	 * @example
+	 * ```typescript
+	 * // With config (auto-creates ProxyManager)
+	 * const client = new Rezo({
+	 *   proxyManager: {
+	 *     rotation: 'random',
+	 *     proxies: [
+	 *       { protocol: 'socks5', host: '127.0.0.1', port: 1080 },
+	 *       { protocol: 'http', host: 'proxy.example.com', port: 8080 }
+	 *     ],
+	 *     whitelist: ['api.example.com'],
+	 *     autoDisableDeadProxies: true
+	 *   }
+	 * });
+	 *
+	 * // With ProxyManager instance
+	 * const pm = new ProxyManager({ rotation: 'sequential', proxies: [...] });
+	 * const client = new Rezo({ proxyManager: pm });
+	 * ```
+	 */
+	proxyManager?: ProxyManager | ProxyManagerConfig;
+	/**
+	 * Determines whether a given HTTP status code should be treated as successful.
+	 * When a status code fails validation, the request throws an error.
+	 *
+	 * @default (status) => status >= 200 && status < 300
+	 */
+	validateStatus?: ((status: number) => boolean) | null;
+	/**
+	 * Custom function to serialize URL query parameters.
+	 * Replaces the default serialization logic.
+	 */
+	paramsSerializer?: (params: Record<string, any>) => string;
+	/**
+	 * Custom DNS lookup function for hostname resolution.
+	 * Replaces the default `dns.lookup` used by Node.js.
+	 */
+	dnsLookup?: RezoHttpRequest["dnsLookup"];
+	/** Browser fingerprint stealth configuration (instance-level only) */
+	stealth?: RezoStealth;
+}
+/**
+ * Normalized retry configuration with all options resolved
+ */
+export interface NormalizedRetryConfig {
+	/** Maximum number of retry attempts */
+	maxRetries: number;
+	/** Base delay between retries in milliseconds */
+	retryDelay: number;
+	/** Maximum delay cap in milliseconds */
+	maxDelay: number;
+	/** Backoff multiplier or function */
+	backoff: number | "exponential" | "linear" | ((attempt: number, baseDelay: number) => number);
+	/** HTTP status codes that trigger retry */
+	statusCodes: number[];
+	/** Whether to retry on timeout errors */
+	retryOnTimeout: boolean;
+	/** Whether to retry on network errors */
+	retryOnNetworkError: boolean;
+	/** HTTP methods that are safe to retry */
+	methods: string[];
+	/** Custom condition function */
+	condition?: (error: any, attempt: number) => boolean | Promise<boolean>;
+	/** Called before each retry */
+	onRetry?: (error: any, attempt: number, delay: number) => boolean | void | Promise<boolean | void>;
+	/** Called when all retries are exhausted */
+	onRetryExhausted?: (error: any, totalAttempts: number) => void | Promise<void>;
+}
 /**
  * Configuration object that encapsulates comprehensive request execution metadata and response processing information.
  * This interface serves as the central configuration hub for HTTP requests, containing both input parameters
@@ -1650,8 +3194,8 @@ export interface RezoConfig {
 	enableRedirectCycleDetection?: boolean;
 	/** @description Reject unauthorized SSL certificates */
 	rejectUnauthorized?: boolean;
-	/** @description Retry configuration */
-	retry?: RezoRequestConfig["retry"];
+	/** @description Normalized retry configuration (null if retries disabled) */
+	retry?: NormalizedRetryConfig | null;
 	/** @description Compression settings */
 	compression?: {
 		/** @description Enable compression */
@@ -1661,8 +3205,15 @@ export interface RezoConfig {
 		/** @description Supported compression algorithms */
 		algorithms?: string[];
 	};
-	/** @description Enable cookie jar for session management */
-	enableCookieJar?: boolean;
+	/**
+	 * @description Disable cookie jar for session management.
+	 * When false (default), cookies are automatically managed.
+	 * Set to true to disable automatic cookie handling.
+	 * @default false
+	 */
+	disableJar?: boolean;
+	/** @description Send cookies with cross-origin requests. Default: false */
+	withCredentials?: boolean;
 	/** @description Feature flags for adapter capabilities */
 	features?: {
 		/** @description HTTP/2 support */
@@ -1770,10 +3321,12 @@ export interface RezoConfig {
 	hooks: Partial<RezoHooks> | null;
 	/** @description Snapshot of the original request configuration */
 	originalRequest: RezoRequestConfig;
+	/** @description Original request body, preserved for POST body retention during redirects */
+	originalBody?: RezoRequestConfig["body"];
 	/** @description Final resolved URL after redirects and processing */
 	finalUrl: string;
 	/** @description HTTP adapter used for the request */
-	adapterUsed: "http" | "https" | "http2" | "fetch" | "xhr" | "curl";
+	adapterUsed: "http" | "https" | "http2" | "fetch" | "xhr" | "curl" | "react-native";
 	/** @description Metadata about the adapter used */
 	adapterMetadata?: {
 		/** @description Adapter version */
@@ -1814,25 +3367,27 @@ export interface RezoConfig {
 	 * - getCookiesSync(url): Get cookies for a URL
 	 * - removeAllCookiesSync(): Clear all cookies
 	 */
-	cookieJar: RezoCookieJar;
-	/** @description Comprehensive timing information */
+	jar: RezoCookieJar;
+	/** @description Comprehensive timing information (matches PerformanceResourceTiming API) */
 	timing: {
-		/** @description Request start timestamp (absolute performance.now() value) */
-		startTimestamp: number;
-		/** @description Request end timestamp (absolute performance.now() value) */
-		endTimestamp: number;
-		/** @description DNS lookup duration in milliseconds */
-		dnsMs?: number;
-		/** @description TCP connection duration in milliseconds */
-		tcpMs?: number;
-		/** @description TLS handshake duration in milliseconds */
-		tlsMs?: number;
-		/** @description Time to first byte in milliseconds (from start to first response byte) */
-		ttfbMs?: number;
-		/** @description Content transfer duration in milliseconds */
-		transferMs?: number;
-		/** @description Total request duration in milliseconds (endTimestamp - startTimestamp) */
-		durationMs: number;
+		/** @description Request start timestamp (performance.now() value when request began) */
+		startTime: number;
+		/** @description Timestamp when DNS lookup started */
+		domainLookupStart: number;
+		/** @description Timestamp when DNS lookup ended */
+		domainLookupEnd: number;
+		/** @description Timestamp when connection started */
+		connectStart: number;
+		/** @description Timestamp when TLS handshake started (0 for HTTP) */
+		secureConnectionStart: number;
+		/** @description Timestamp when connection completed */
+		connectEnd: number;
+		/** @description Timestamp when request was sent */
+		requestStart: number;
+		/** @description Timestamp when first byte of response received */
+		responseStart: number;
+		/** @description Timestamp when response completed */
+		responseEnd: number;
 	};
 	/** @description Network connection information */
 	network: {
@@ -1894,6 +3449,8 @@ export interface RezoConfig {
 	};
 	/** @description Debug mode flag */
 	debug?: boolean;
+	/** @description URL tracking mode flag - logs redirect chain and retries */
+	trackUrl?: boolean;
 	/** @description Request tracking identifier */
 	requestId: string;
 	/** @description Session identifier */
@@ -1930,8 +3487,20 @@ export interface RezoConfig {
 	 * ```
 	 */
 	beforeRedirect?: RezoRequestConfig["beforeRedirect"];
+	/** Alias for beforeRedirect */
+	onRedirect?: RezoRequestConfig["beforeRedirect"];
 	/** Character encoding for request body and response data */
 	encoding?: BufferEncoding;
+	/**
+	 * Determines whether a given HTTP status code should be treated as successful.
+	 * Used by adapters to decide if a response is an error.
+	 * @default (status) => status >= 200 && status < 300
+	 */
+	validateStatus?: ((status: number) => boolean) | null;
+	/**
+	 * Custom DNS lookup function for hostname resolution.
+	 */
+	dnsLookup?: (hostname: string, options: any, callback: (err: Error | null, address: string, family: number) => void) => void;
 	/**
 	 * Whether to use cookies for the request
 	 */
@@ -1940,7 +3509,9 @@ export interface RezoConfig {
 export declare enum RezoErrorCode {
 	CONNECTION_REFUSED = "ECONNREFUSED",
 	CONNECTION_RESET = "ECONNRESET",
+	CONNECTION_ABORTED = "ECONNABORTED",
 	CONNECTION_TIMEOUT = "ETIMEDOUT",
+	SOCKET_TIMEOUT = "ESOCKETTIMEDOUT",
 	DNS_LOOKUP_FAILED = "ENOTFOUND",
 	DNS_TEMPORARY_FAILURE = "EAI_AGAIN",
 	HOST_UNREACHABLE = "EHOSTUNREACH",
@@ -1952,13 +3523,18 @@ export declare enum RezoErrorCode {
 	REDIRECT_CYCLE = "REZ_REDIRECT_CYCLE_DETECTED",
 	MISSING_REDIRECT_LOCATION = "REZ_MISSING_REDIRECT_LOCATION",
 	DECOMPRESSION_ERROR = "REZ_DECOMPRESSION_ERROR",
+	HEADERS_ALREADY_SENT = "ERR_HTTP_HEADERS_SENT",
 	REQUEST_TIMEOUT = "UND_ERR_REQUEST_TIMEOUT",
 	HEADERS_TIMEOUT = "UND_ERR_HEADERS_TIMEOUT",
 	CONNECT_TIMEOUT = "UND_ERR_CONNECT_TIMEOUT",
 	ABORTED = "ABORT_ERR",
+	ABORTED_UNDICI = "UND_ERR_ABORTED",
+	ABORTED_ERR = "ERR_ABORTED",
 	DOWNLOAD_FAILED = "REZ_DOWNLOAD_FAILED",
 	UPLOAD_FAILED = "REZ_UPLOAD_FAILED",
 	STREAM_ERROR = "REZ_STREAM_ERROR",
+	STREAM_DESTROYED = "ERR_STREAM_DESTROYED",
+	STREAM_PREMATURE_CLOSE = "ERR_STREAM_PREMATURE_CLOSE",
 	BODY_TOO_LARGE = "REZ_BODY_TOO_LARGE",
 	RESPONSE_TOO_LARGE = "REZ_RESPONSE_TOO_LARGE",
 	INVALID_JSON = "REZ_INVALID_JSON",
@@ -1981,15 +3557,38 @@ export declare enum RezoErrorCode {
 	TLS_HANDSHAKE_TIMEOUT = "ERR_TLS_HANDSHAKE_TIMEOUT",
 	TLS_PROTOCOL_ERROR = "EPROTO",
 	TLS_PROTOCOL_VERSION = "ERR_TLS_INVALID_PROTOCOL_VERSION",
+	TLS_RENEGOTIATION_DISABLED = "ERR_TLS_RENEGOTIATION_DISABLED",
+	TLS_CERT_SIGNATURE_UNSUPPORTED = "ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED",
 	CERTIFICATE_HOSTNAME_MISMATCH = "ERR_TLS_CERT_ALTNAME_INVALID",
 	CERTIFICATE_EXPIRED = "CERT_HAS_EXPIRED",
 	CERTIFICATE_SELF_SIGNED = "SELF_SIGNED_CERT_IN_CHAIN",
+	CERTIFICATE_SELF_SIGNED_NO_CHAIN = "DEPTH_ZERO_SELF_SIGNED_CERT",
 	CERTIFICATE_VERIFY_FAILED = "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+	UNDICI_SOCKET_ERROR = "UND_ERR_SOCKET",
+	UNDICI_INVALID_INFO = "UND_ERR_INFO",
+	NO_PROXY_AVAILABLE = "REZ_NO_PROXY_AVAILABLE",
 	RATE_LIMITED = "REZ_RATE_LIMITED",
 	UNKNOWN_ERROR = "REZ_UNKNOWN_ERROR"
 }
+/**
+ * Union of all known Rezo error code strings.
+ *
+ * Provides full IDE autocomplete on `e.code` while still accepting
+ * unknown OS/runtime error codes via `(string & {})`.
+ *
+ * @example
+ * ```typescript
+ * catch (e) {
+ *   if (e instanceof RezoError) {
+ *     if (e.code === 'ECONNREFUSED') { ... }  // autocompletes
+ *     if (e.code === RezoErrorCode.CONNECTION_REFUSED) { ... }  // also works
+ *   }
+ * }
+ * ```
+ */
+export type RezoErrorCodeString = `${RezoErrorCode}` | (string & {});
 export declare class RezoError<T = any> extends Error {
-	readonly code?: string;
+	readonly code?: RezoErrorCodeString;
 	readonly errno?: number;
 	readonly config: RezoConfig;
 	readonly request?: RezoHttpRequest;
@@ -2010,12 +3609,11 @@ export declare class RezoError<T = any> extends Error {
 	readonly isSocksError: boolean;
 	readonly isTlsError: boolean;
 	readonly isRetryable: boolean;
-	readonly details: string;
 	readonly suggestion: string;
-	constructor(message: string, config: RezoConfig, code?: string, request?: RezoHttpRequest, response?: RezoResponse<T>);
+	constructor(message: string, config: RezoConfig, code?: RezoErrorCodeString, request?: RezoHttpRequest, response?: RezoResponse<T>);
 	static isRezoError(error: unknown): error is RezoError;
 	static fromError<T = any>(error: Error, config: RezoConfig, request?: RezoHttpRequest, response?: RezoResponse<T>): RezoError<T>;
-	static createNetworkError<T = any>(message: string, code: string, config: RezoConfig, request?: RezoHttpRequest): RezoError<T>;
+	static createNetworkError<T = any>(message: string, code: RezoErrorCodeString, config: RezoConfig, request?: RezoHttpRequest): RezoError<T>;
 	static createHttpError<T = any>(statusCode: number, config: RezoConfig, request?: RezoHttpRequest, response?: RezoResponse<T>): RezoError<T>;
 	static createTimeoutError<T = any>(message: string, config: RezoConfig, request?: RezoHttpRequest): RezoError<T>;
 	static createAbortError<T = any>(message: string, config: RezoConfig, request?: RezoHttpRequest): RezoError<T>;
@@ -2026,9 +3624,9 @@ export declare class RezoError<T = any> extends Error {
 	static createUploadError<T = any>(message: string, config: RezoConfig, request?: RezoHttpRequest, response?: RezoResponse<T>): RezoError<T>;
 	static createStreamError<T = any>(message: string, config: RezoConfig, request?: RezoHttpRequest, response?: RezoResponse<T>): RezoError<T>;
 	static createRedirectError<T = any>(message: string, config: RezoConfig, request?: RezoHttpRequest, response?: RezoResponse<T>): RezoError<T>;
-	static createProxyError<T = any>(code: string, config: RezoConfig, request?: RezoHttpRequest): RezoError<T>;
-	static createSocksError<T = any>(code: string, config: RezoConfig, request?: RezoHttpRequest): RezoError<T>;
-	static createTlsError<T = any>(code: string, config: RezoConfig, request?: RezoHttpRequest): RezoError<T>;
+	static createProxyError<T = any>(code: RezoErrorCodeString, config: RezoConfig, request?: RezoHttpRequest): RezoError<T>;
+	static createSocksError<T = any>(code: RezoErrorCodeString, config: RezoConfig, request?: RezoHttpRequest): RezoError<T>;
+	static createTlsError<T = any>(code: RezoErrorCodeString, config: RezoConfig, request?: RezoHttpRequest): RezoError<T>;
 	static createRateLimitError<T = any>(config: RezoConfig, request?: RezoHttpRequest, response?: RezoResponse<T>): RezoError<T>;
 	/**
 	 * Convert error to JSON - only includes defined values
@@ -2036,275 +3634,6 @@ export declare class RezoError<T = any> extends Error {
 	toJSON(): Record<string, unknown>;
 	toString(): string;
 	getFullDetails(): string;
-}
-/**
- * Queue configuration options
- */
-export interface QueueConfig {
-	/** Maximum concurrent tasks (default: Infinity) */
-	concurrency?: number;
-	/** Auto-start processing when tasks are added (default: true) */
-	autoStart?: boolean;
-	/** Timeout per task in milliseconds (default: none) */
-	timeout?: number;
-	/** Throw on timeout vs silently fail (default: true) */
-	throwOnTimeout?: boolean;
-	/** Interval between task starts in ms for rate limiting */
-	interval?: number;
-	/** Max tasks to start per interval (default: Infinity) */
-	intervalCap?: number;
-	/** Carry over unused interval capacity to next interval */
-	carryoverConcurrencyCount?: boolean;
-}
-/**
- * Task options when adding to queue
- */
-export interface TaskOptions {
-	/** Task priority (higher runs first, default: 0) */
-	priority?: number;
-	/** Task-specific timeout (overrides queue default) */
-	timeout?: number;
-	/** Unique ID for tracking/cancellation */
-	id?: string;
-	/** Signal for external cancellation */
-	signal?: AbortSignal;
-}
-/**
- * Current queue state
- */
-export interface QueueState {
-	/** Number of tasks currently running */
-	pending: number;
-	/** Number of tasks waiting in queue */
-	size: number;
-	/** Total tasks (pending + size) */
-	total: number;
-	/** Is queue paused */
-	isPaused: boolean;
-	/** Is queue idle (no tasks) */
-	isIdle: boolean;
-}
-/**
- * Queue statistics
- */
-export interface QueueStats {
-	/** Total tasks added since creation */
-	added: number;
-	/** Total tasks processed (started) */
-	processed: number;
-	/** Total successful completions */
-	completed: number;
-	/** Total failures */
-	failed: number;
-	/** Total timeouts */
-	timedOut: number;
-	/** Total cancellations */
-	cancelled: number;
-	/** Average task duration (ms) */
-	averageDuration: number;
-	/** Tasks per second (rolling average) */
-	throughput: number;
-}
-/**
- * Queue event types
- */
-export interface QueueEvents {
-	/** Task added to queue */
-	add: {
-		id: string;
-		priority: number;
-	};
-	/** Task started executing */
-	start: {
-		id: string;
-	};
-	/** Task completed successfully */
-	completed: {
-		id: string;
-		result: any;
-		duration: number;
-	};
-	/** Task failed with error */
-	error: {
-		id: string;
-		error: Error;
-	};
-	/** Task timed out */
-	timeout: {
-		id: string;
-	};
-	/** Task cancelled */
-	cancelled: {
-		id: string;
-	};
-	/** Queue became active (was idle, now processing) */
-	active: undefined;
-	/** Queue became idle (all tasks done) */
-	idle: undefined;
-	/** Queue was paused */
-	paused: undefined;
-	/** Queue was resumed */
-	resumed: undefined;
-	/** Next task about to run */
-	next: undefined;
-	/** Queue was emptied (no pending tasks) */
-	empty: undefined;
-}
-/**
- * Event handler type
- */
-export type EventHandler<T> = (data: T) => void;
-/**
- * Task function type
- */
-export type TaskFunction<T> = () => Promise<T>;
-declare class RezoQueue<T = any> {
-	private queue;
-	private pendingCount;
-	private isPausedFlag;
-	private intervalId?;
-	private intervalCount;
-	private intervalStart;
-	private eventHandlers;
-	private statsData;
-	private totalDuration;
-	private throughputWindow;
-	private readonly throughputWindowSize;
-	private idlePromise?;
-	private emptyPromise?;
-	readonly config: Required<QueueConfig>;
-	/**
-	 * Create a new RezoQueue
-	 * @param config - Queue configuration options
-	 */
-	constructor(config?: QueueConfig);
-	/**
-	 * Get current queue state
-	 */
-	get state(): QueueState;
-	/**
-	 * Get queue statistics
-	 */
-	get stats(): QueueStats;
-	/**
-	 * Get/set concurrency limit
-	 */
-	get concurrency(): number;
-	set concurrency(value: number);
-	/**
-	 * Number of pending (running) tasks
-	 */
-	get pending(): number;
-	/**
-	 * Number of tasks waiting in queue
-	 */
-	get size(): number;
-	/**
-	 * Check if queue is paused
-	 */
-	get isPaused(): boolean;
-	/**
-	 * Add a task to the queue
-	 * @param fn - Async function to execute
-	 * @param options - Task options
-	 * @returns Promise resolving to task result
-	 */
-	add<R = T>(fn: TaskFunction<R>, options?: TaskOptions): Promise<R>;
-	/**
-	 * Add multiple tasks to the queue
-	 * @param fns - Array of async functions
-	 * @param options - Task options (applied to all)
-	 * @returns Promise resolving to array of results
-	 */
-	addAll<R = T>(fns: TaskFunction<R>[], options?: TaskOptions): Promise<R[]>;
-	/**
-	 * Pause queue processing (running tasks continue)
-	 */
-	pause(): void;
-	/**
-	 * Resume queue processing
-	 */
-	start(): void;
-	/**
-	 * Clear all pending tasks from queue
-	 */
-	clear(): void;
-	/**
-	 * Cancel a specific task by ID
-	 * @param id - Task ID to cancel
-	 * @returns true if task was found and cancelled
-	 */
-	cancel(id: string): boolean;
-	/**
-	 * Cancel all tasks matching a predicate
-	 * @param predicate - Function to test each task
-	 * @returns Number of tasks cancelled
-	 */
-	cancelBy(predicate: (task: {
-		id: string;
-		priority: number;
-	}) => boolean): number;
-	/**
-	 * Wait for queue to become idle (no running or pending tasks)
-	 */
-	onIdle(): Promise<void>;
-	/**
-	 * Wait for queue to be empty (no pending tasks, but may have running)
-	 */
-	onEmpty(): Promise<void>;
-	/**
-	 * Wait for queue size to be less than limit
-	 * @param limit - Size threshold
-	 */
-	onSizeLessThan(limit: number): Promise<void>;
-	/**
-	 * Register an event handler
-	 * @param event - Event name
-	 * @param handler - Handler function
-	 */
-	on<E extends keyof QueueEvents>(event: E, handler: EventHandler<QueueEvents[E]>): void;
-	/**
-	 * Remove an event handler
-	 * @param event - Event name
-	 * @param handler - Handler function to remove
-	 */
-	off<E extends keyof QueueEvents>(event: E, handler: EventHandler<QueueEvents[E]>): void;
-	/**
-	 * Destroy the queue and cleanup resources
-	 */
-	destroy(): void;
-	/**
-	 * Insert task into queue maintaining priority order (highest first)
-	 */
-	private insertByPriority;
-	/**
-	 * Try to run next task if capacity available
-	 */
-	private tryRunNext;
-	/**
-	 * Execute a task
-	 */
-	private runTask;
-	/**
-	 * Record task duration for statistics
-	 */
-	private recordDuration;
-	/**
-	 * Start interval-based rate limiting
-	 */
-	private startInterval;
-	/**
-	 * Emit an event
-	 */
-	protected emit<E extends keyof QueueEvents>(event: E, data: QueueEvents[E]): void;
-	/**
-	 * Check if queue became empty
-	 */
-	private checkEmpty;
-	/**
-	 * Check if queue became idle
-	 */
-	private checkIdle;
 }
 type ProxyProtocol$1 = "http" | "https" | "socks4" | "socks5";
 /**
@@ -2411,6 +3740,8 @@ export type ContentType = "application/json" | "application/x-www-form-urlencode
 export interface RezoRequestConfig<D = any> {
 	/** The target URL for the request */
 	url: string | URL;
+	/** Optional React Native integrations for this request */
+	reactNative?: RezoReactNativeOptions;
 	/**
 	 * The absolute request url
 	 */
@@ -2487,19 +3818,223 @@ export interface RezoRequestConfig<D = any> {
 	timeout?: number;
 	/** Whether to reject requests with invalid SSL certificates */
 	rejectUnauthorized?: boolean;
-	/** Retry configuration for failed requests */
-	retry?: {
-		/** Maximum number of retry attempts */
+	/**
+	 * Retry configuration for failed requests.
+	 *
+	 * Supports multiple configuration styles:
+	 * - Simple: `retry: 3` (retry up to 3 times)
+	 * - Boolean: `retry: true` (use default retry settings)
+	 * - Object: `retry: { limit: 3, delay: 1000, backoff: 2 }`
+	 *
+	 * @example
+	 * ```typescript
+	 * // Simple retry count
+	 * await rezo.get(url, { retry: 3 });
+	 *
+	 * // Full configuration
+	 * await rezo.get(url, {
+	 *   retry: {
+	 *     limit: 5,
+	 *     delay: 1000,
+	 *     backoff: 2,
+	 *     retryOn: [408, 429, 500, 502, 503, 504],
+	 *     retryOnTimeout: true,
+	 *     retryOnNetworkError: true,
+	 *     methods: ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']
+	 *   }
+	 * });
+	 * ```
+	 */
+	retry?: boolean | number | {
+		/**
+		 * Maximum number of retry attempts
+		 * @alias limit
+		 */
 		maxRetries?: number;
-		/** Delay between retries in milliseconds */
+		/**
+		 * Maximum number of retry attempts (alias for maxRetries)
+		 * @alias maxRetries
+		 */
+		limit?: number;
+		/**
+		 * Base delay between retries in milliseconds
+		 * @alias delay
+		 * @default 1000
+		 */
 		retryDelay?: number;
-		/** Whether to increment delay on each retry */
+		/**
+		 * Base delay between retries in milliseconds (alias for retryDelay)
+		 * @alias retryDelay
+		 * @default 1000
+		 */
+		delay?: number;
+		/**
+		 * Whether to increment delay on each retry (deprecated, use backoff instead)
+		 * @deprecated Use `backoff` instead for exponential backoff
+		 */
 		incrementDelay?: boolean;
-		/** HTTP status codes that should trigger a retry attempt  defaults are (408, 429, 500, 502, 503, 504, 425, 520) */
+		/**
+		 * Backoff multiplier for exponential delay increase.
+		 * - Number: multiply delay by this value on each retry (e.g., 2 = 1s, 2s, 4s, 8s...)
+		 * - 'exponential': same as 2
+		 * - 'linear': add base delay each time (1s, 2s, 3s, 4s...)
+		 * - Function: custom backoff (attempt: number) => delay in ms
+		 *
+		 * @example
+		 * ```typescript
+		 * // Exponential: 1s, 2s, 4s, 8s...
+		 * backoff: 2
+		 *
+		 * // More aggressive: 1s, 3s, 9s, 27s...
+		 * backoff: 3
+		 *
+		 * // Linear: 1s, 2s, 3s, 4s...
+		 * backoff: 'linear'
+		 *
+		 * // Custom function
+		 * backoff: (attempt) => Math.min(attempt * 1000, 30000)
+		 * ```
+		 *
+		 * @default 1 (no backoff, constant delay)
+		 */
+		backoff?: number | "exponential" | "linear" | ((attempt: number, baseDelay: number) => number);
+		/**
+		 * Maximum delay between retries in milliseconds.
+		 * Caps the delay even when using exponential backoff.
+		 *
+		 * @default 30000 (30 seconds)
+		 */
+		maxDelay?: number;
+		/**
+		 * HTTP status codes that should trigger a retry attempt
+		 * @alias retryOn
+		 * @default [408, 425, 429, 500, 502, 503, 504, 520]
+		 */
 		statusCodes?: number[];
-		/** Weather to stop or continue retry when certain condition is met*/
-		condition?: (error: RezoError) => boolean | Promise<boolean>;
+		/**
+		 * HTTP status codes that should trigger a retry attempt (alias for statusCodes)
+		 * @alias statusCodes
+		 * @default [408, 425, 429, 500, 502, 503, 504, 520]
+		 */
+		retryOn?: number[];
+		/**
+		 * Retry on timeout errors (ETIMEDOUT, ECONNABORTED)
+		 * @default true
+		 */
+		retryOnTimeout?: boolean;
+		/**
+		 * Retry on network errors (ECONNREFUSED, ECONNRESET, ENOTFOUND, etc.)
+		 * @default true
+		 */
+		retryOnNetworkError?: boolean;
+		/**
+		 * HTTP methods that are safe to retry.
+		 * Non-idempotent methods like POST are excluded by default to prevent duplicate submissions.
+		 *
+		 * @default ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']
+		 */
+		methods?: HttpMethod[];
+		/**
+		 * Custom condition to determine if retry should occur.
+		 * Return true to retry, false to stop retrying.
+		 * Called after checking status codes and error types.
+		 */
+		condition?: (error: RezoError, attempt: number) => boolean | Promise<boolean>;
+		/**
+		 * Called before each retry attempt. Can be used for logging or modifying retry behavior.
+		 * Return false to cancel the retry.
+		 */
+		onRetry?: (error: RezoError, attempt: number, delay: number) => boolean | void | Promise<boolean | void>;
+		/**
+		 * Called when all retry attempts are exhausted.
+		 */
+		onRetryExhausted?: (error: RezoError, totalAttempts: number) => void | Promise<void>;
 	};
+	/**
+	 * Rate limit wait configuration - wait and retry when receiving rate limit responses.
+	 *
+	 * This feature runs BEFORE the retry system. When a rate-limiting status code is received,
+	 * the client will wait for the specified time and automatically retry the request.
+	 *
+	 * **Basic Usage:**
+	 * - `waitOnStatus: true` - Enable waiting on 429 status (default behavior)
+	 * - `waitOnStatus: [429, 503]` - Enable waiting on specific status codes
+	 *
+	 * **Wait Time Sources:**
+	 * - `'retry-after'` - Use standard Retry-After header (default)
+	 * - `{ header: 'X-RateLimit-Reset' }` - Use custom header
+	 * - `{ body: 'retry_after' }` - Extract from JSON response body
+	 * - Custom function for complex logic
+	 *
+	 * @example
+	 * ```typescript
+	 * // Wait on 429 using Retry-After header
+	 * await rezo.get(url, { waitOnStatus: true });
+	 *
+	 * // Wait on 429 using custom header
+	 * await rezo.get(url, {
+	 *   waitOnStatus: true,
+	 *   waitTimeSource: { header: 'X-RateLimit-Reset' }
+	 * });
+	 *
+	 * // Wait on 429 extracting time from JSON body
+	 * await rezo.get(url, {
+	 *   waitOnStatus: true,
+	 *   waitTimeSource: { body: 'data.retry_after' }
+	 * });
+	 *
+	 * // Custom function for complex APIs
+	 * await rezo.get(url, {
+	 *   waitOnStatus: [429, 503],
+	 *   waitTimeSource: (response) => {
+	 *     const reset = response.headers.get('x-ratelimit-reset');
+	 *     return reset ? parseInt(reset) - Math.floor(Date.now() / 1000) : null;
+	 *   }
+	 * });
+	 * ```
+	 */
+	waitOnStatus?: boolean | number[];
+	/**
+	 * Where to extract the wait time from when rate-limited.
+	 *
+	 * - `'retry-after'` - Standard Retry-After header (default)
+	 * - `{ header: string }` - Custom header name (e.g., 'X-RateLimit-Reset')
+	 * - `{ body: string }` - JSON path in response body (e.g., 'data.retry_after', 'wait_seconds')
+	 * - Function - Custom logic receiving the response, return seconds to wait or null
+	 *
+	 * @default 'retry-after'
+	 */
+	waitTimeSource?: "retry-after" | {
+		header: string;
+	} | {
+		body: string;
+	} | ((response: {
+		status: number;
+		headers: RezoHeaders;
+		data?: any;
+	}) => number | null);
+	/**
+	 * Maximum time to wait for rate limit in milliseconds.
+	 * If the extracted wait time exceeds this, the request will fail instead of waiting.
+	 * Set to 0 for unlimited wait time.
+	 *
+	 * @default 60000 (60 seconds)
+	 */
+	maxWaitTime?: number;
+	/**
+	 * Default wait time in milliseconds if the wait time source returns nothing.
+	 * Used as fallback when Retry-After header or body path is not present.
+	 *
+	 * @default 1000 (1 second)
+	 */
+	defaultWaitTime?: number;
+	/**
+	 * Maximum number of wait attempts before giving up.
+	 * After this many waits, the request will proceed to retry logic or fail.
+	 *
+	 * @default 3
+	 */
+	maxWaitAttempts?: number;
 	/** Whether to use a secure context for HTTPS requests */
 	useSecureContext?: boolean;
 	/** Custom secure context for TLS connections */
@@ -2681,6 +4216,11 @@ export interface RezoRequestConfig<D = any> {
 	 * ```
 	 */
 	beforeRedirect?: (options: OnRedirectOptions) => OnRedirectResponse;
+	/**
+	 * Alias for beforeRedirect - callback invoked when a redirect response is received.
+	 * @see beforeRedirect
+	 */
+	onRedirect?: (options: OnRedirectOptions) => OnRedirectResponse;
 	/** Whether to send cookies and authorization headers with cross-origin requests */
 	withCredentials?: boolean;
 	/** Proxy configuration (URL string or detailed options) */
@@ -2753,6 +4293,12 @@ export interface RezoRequestConfig<D = any> {
 	debug?: boolean;
 	/** Enable verbose logging with detailed information */
 	verbose?: boolean;
+	/**
+	 * Enable URL tracking to log the complete redirect chain with status codes.
+	 * When enabled, logs: initial URL -> redirect URL (status code) -> final URL
+	 * Also logs retry attempts with their status codes.
+	 */
+	trackUrl?: boolean;
 	/** Name of the cookie containing XSRF token */
 	xsrfCookieName?: string;
 	/** Name of the header to send XSRF token in */
@@ -2773,6 +4319,60 @@ export interface RezoRequestConfig<D = any> {
 	/** Character encoding for request body and response data */
 	encoding?: BufferEncoding;
 	/**
+	 * Determines whether a given HTTP status code should be treated as a successful response.
+	 * When a status code fails validation, the request will throw an error.
+	 *
+	 * @param status - The HTTP response status code
+	 * @returns true if the status code should be considered successful
+	 *
+	 * @default (status) => status >= 200 && status < 300
+	 *
+	 * @example
+	 * ```typescript
+	 * // Accept all 2xx and 3xx as success
+	 * validateStatus: (status) => status >= 200 && status < 400
+	 *
+	 * // Never throw on any status code
+	 * validateStatus: () => true
+	 *
+	 * // Only accept 200
+	 * validateStatus: (status) => status === 200
+	 * ```
+	 */
+	validateStatus?: ((status: number) => boolean) | null;
+	/**
+	 * Custom function to serialize URL query parameters.
+	 * When provided, this replaces the default serialization logic.
+	 *
+	 * @param params - The params object to serialize
+	 * @returns The serialized query string (without leading '?')
+	 *
+	 * @example
+	 * ```typescript
+	 * // Custom array serialization
+	 * paramsSerializer: (params) => qs.stringify(params, { arrayFormat: 'brackets' })
+	 *
+	 * // Simple key=value pairs
+	 * paramsSerializer: (params) =>
+	 *   Object.entries(params).map(([k, v]) => `${k}=${v}`).join('&')
+	 * ```
+	 */
+	paramsSerializer?: (params: Record<string, any>) => string;
+	/**
+	 * Custom DNS lookup function for hostname resolution.
+	 * Replaces the default `dns.lookup` used by Node.js for this request.
+	 *
+	 * @example
+	 * ```typescript
+	 * import { lookup } from 'node:dns/promises';
+	 * dnsLookup: (hostname, options, callback) => {
+	 *   // Custom DNS resolution logic
+	 *   lookup(hostname).then(result => callback(null, result.address, result.family));
+	 * }
+	 * ```
+	 */
+	dnsLookup?: (hostname: string, options: any, callback: (err: Error | null, address: string, family: number) => void) => void;
+	/**
 	 * Request lifecycle hooks for intercepting and modifying request/response behavior.
 	 * Optional hooks that will be merged with default hooks during request processing.
 	 */
@@ -2784,6 +4384,8 @@ export interface OnRedirectOptions {
 	headers: RezoHeaders;
 	sameDomain: boolean;
 	method: string;
+	/** The current request body (RezoFormData, string, object, etc.) - allows user to inspect/modify */
+	body?: any;
 }
 export type OnRedirectResponse = boolean | ToRedirectOptions | undefined;
 export type ToRedirectOptions = {
@@ -2807,7 +4409,7 @@ export type ToRedirectOptions = {
  * @public - Use with all methods
  * @internal - Do not use internally within the library
  */
-export type RezoHttpRequest = Omit<RezoRequestConfig, "body" | "url" | "method" | "form" | "json" | "formData" | "multipart" | "fullUrl" | "responseType">;
+export type RezoHttpRequest = Omit<RezoRequestConfig, "body" | "url" | "method" | "form" | "json" | "formData" | "multipart" | "fullUrl" | "responseType" | "fileName" | "saveTo" | "baseURL">;
 /**
  * Method-aware request types for better TypeScript inference
  * These types remove data/body fields from methods that don't typically use them
@@ -2816,7 +4418,7 @@ export type RezoHttpRequest = Omit<RezoRequestConfig, "body" | "url" | "method" 
  * RezoHttpGetRequest - Request options for GET requests (no request body)
  * @public - Use with GET method
  */
-export type RezoHttpGetRequest = Omit<RezoHttpRequest, "data" | "body">;
+export type RezoHttpGetRequest = Omit<RezoHttpRequest, "data" | "body" | "fileName" | "saveTo">;
 /**
  * RezoHttpPostRequest - Request options for POST requests (includes request body)
  * @public - Use with POST method
@@ -2857,430 +4459,6 @@ export type RezoHttpOptionsRequest = Omit<RezoHttpRequest, "data" | "body">;
  * @internal - Do not use internally within the library
  */
 export type RezoRequestOptions = Omit<RezoRequestConfig, "fullUrl">;
-export interface DNSCacheOptions {
-	enable?: boolean;
-	ttl?: number;
-	maxEntries?: number;
-}
-declare class DNSCache {
-	private cache;
-	private enabled;
-	constructor(options?: DNSCacheOptions);
-	private makeKey;
-	lookup(hostname: string, family?: 4 | 6): Promise<{
-		address: string;
-		family: 4 | 6;
-	} | undefined>;
-	lookupAll(hostname: string, family?: 4 | 6): Promise<Array<{
-		address: string;
-		family: 4 | 6;
-	}>>;
-	private resolveDNS;
-	private resolveAllDNS;
-	invalidate(hostname: string): void;
-	clear(): void;
-	get size(): number;
-	get isEnabled(): boolean;
-	setEnabled(enabled: boolean): void;
-}
-export interface ResponseCacheConfig {
-	enable?: boolean;
-	cacheDir?: string;
-	networkCheck?: boolean;
-	ttl?: number;
-	maxEntries?: number;
-	methods?: string[];
-	respectHeaders?: boolean;
-}
-export type ResponseCacheOption = boolean | ResponseCacheConfig;
-export interface CachedResponse {
-	status: number;
-	statusText: string;
-	headers: Record<string, string>;
-	data: unknown;
-	url: string;
-	timestamp: number;
-	ttl: number;
-	etag?: string;
-	lastModified?: string;
-}
-declare class ResponseCache {
-	private memoryCache;
-	private config;
-	private persistenceEnabled;
-	private initialized;
-	constructor(options?: ResponseCacheOption);
-	private initializePersistence;
-	private initializePersistenceAsync;
-	private getCacheFilePath;
-	private persistToDisk;
-	private loadFromDiskAsync;
-	private generateKey;
-	private parseCacheControl;
-	isCacheable(method: string, status: number, headers?: Record<string, string>): boolean;
-	get(method: string, url: string, headers?: Record<string, string>): CachedResponse | undefined;
-	private loadSingleFromDisk;
-	set(method: string, url: string, response: RezoResponse, requestHeaders?: Record<string, string>): void;
-	private normalizeHeaders;
-	getConditionalHeaders(method: string, url: string, requestHeaders?: Record<string, string>): Record<string, string> | undefined;
-	updateRevalidated(method: string, url: string, newHeaders: Record<string, string>, requestHeaders?: Record<string, string>): CachedResponse | undefined;
-	invalidate(url: string, method?: string): void;
-	clear(): void;
-	get size(): number;
-	get isEnabled(): boolean;
-	get isPersistent(): boolean;
-	getConfig(): ResponseCacheConfig;
-}
-type BeforeProxySelectHook$1 = (context: BeforeProxySelectContext) => ProxyInfo | void | Promise<ProxyInfo | void>;
-type AfterProxySelectHook$1 = (context: AfterProxySelectContext) => void | Promise<void>;
-type BeforeProxyErrorHook$1 = (context: BeforeProxyErrorContext) => void | Promise<void>;
-type AfterProxyErrorHook$1 = (context: AfterProxyErrorContext) => void | Promise<void>;
-type BeforeProxyDisableHook$1 = (context: BeforeProxyDisableContext) => boolean | void | Promise<boolean | void>;
-type AfterProxyDisableHook$1 = (context: AfterProxyDisableContext) => void | Promise<void>;
-type AfterProxyRotateHook$1 = (context: AfterProxyRotateContext) => void | Promise<void>;
-type AfterProxyEnableHook$1 = (context: AfterProxyEnableContext) => void | Promise<void>;
-type OnNoProxiesAvailableHook$1 = (context: OnNoProxiesAvailableContext) => void | Promise<void>;
-/**
- * Proxy hooks collection for ProxyManager events
- */
-export interface ProxyHooks {
-	beforeProxySelect: BeforeProxySelectHook$1[];
-	afterProxySelect: AfterProxySelectHook$1[];
-	beforeProxyError: BeforeProxyErrorHook$1[];
-	afterProxyError: AfterProxyErrorHook$1[];
-	beforeProxyDisable: BeforeProxyDisableHook$1[];
-	afterProxyDisable: AfterProxyDisableHook$1[];
-	afterProxyRotate: AfterProxyRotateHook$1[];
-	afterProxyEnable: AfterProxyEnableHook$1[];
-	/** Hook triggered when no proxies are available */
-	onNoProxiesAvailable: OnNoProxiesAvailableHook$1[];
-}
-declare class ProxyManager {
-	/** Configuration for the proxy manager */
-	readonly config: ProxyManagerConfig;
-	/** Internal proxy states map (proxyId -> state) */
-	private states;
-	/** Current index for sequential rotation */
-	private currentIndex;
-	/** Request counter for current proxy (sequential rotation) */
-	private currentProxyRequests;
-	/** Last selected proxy (for rotation tracking) */
-	private lastSelectedProxy;
-	/** Cooldown timers map (proxyId -> timerId) */
-	private cooldownTimers;
-	/** Total requests through manager */
-	private _totalRequests;
-	/** Total successful requests */
-	private _totalSuccesses;
-	/** Total failed requests */
-	private _totalFailures;
-	/** Proxy hooks */
-	hooks: ProxyHooks;
-	/**
-	 * Create a new ProxyManager instance
-	 * @param config - Proxy manager configuration
-	 */
-	constructor(config: ProxyManagerConfig);
-	/**
-	 * Create initial state for a proxy
-	 */
-	private createInitialState;
-	/**
-	 * Check if a URL should use proxy based on whitelist/blacklist
-	 * @param url - The request URL to check
-	 * @returns true if URL should use proxy, false if should go direct
-	 */
-	shouldProxy(url: string): boolean;
-	/**
-	 * Match a URL against a pattern
-	 */
-	private matchPattern;
-	/**
-	 * Get active proxies (not disabled)
-	 */
-	getActive(): ProxyInfo[];
-	/**
-	 * Get disabled proxies
-	 */
-	getDisabled(): ProxyInfo[];
-	/**
-	 * Get proxies in cooldown
-	 */
-	getCooldown(): ProxyInfo[];
-	/**
-	 * Process expired cooldowns and re-enable proxies
-	 */
-	private processExpiredCooldowns;
-	/**
-	 * Get next proxy based on rotation strategy
-	 * @param url - The request URL (for whitelist/blacklist checking)
-	 * @returns Selected proxy or null if should go direct
-	 */
-	next(url: string): ProxyInfo | null;
-	/**
-	 * Get detailed selection result with reason
-	 * @param url - The request URL
-	 * @returns Selection result with proxy and reason
-	 */
-	select(url: string): ProxySelectionResult;
-	/**
-	 * Select proxy based on rotation strategy
-	 */
-	private selectProxy;
-	/**
-	 * Report a successful request through a proxy
-	 * @param proxy - The proxy that succeeded
-	 */
-	reportSuccess(proxy: ProxyInfo): void;
-	/**
-	 * Report a failed request through a proxy
-	 * @param proxy - The proxy that failed
-	 * @param error - The error that occurred
-	 * @param url - Optional URL for hook context
-	 */
-	reportFailure(proxy: ProxyInfo, error: Error, url?: string): void;
-	/**
-	 * Disable a proxy from the pool
-	 * @param proxy - The proxy to disable
-	 * @param reason - Reason for disabling
-	 */
-	disableProxy(proxy: ProxyInfo, reason?: "dead" | "limit-reached" | "manual"): void;
-	/**
-	 * Enable a previously disabled proxy
-	 * @param proxy - The proxy to enable
-	 * @param reason - Reason for enabling
-	 */
-	enableProxy(proxy: ProxyInfo, reason?: "cooldown-expired" | "manual"): void;
-	/**
-	 * Add proxies to the pool
-	 * @param proxies - Proxies to add
-	 */
-	add(proxies: ProxyInfo | ProxyInfo[]): void;
-	/**
-	 * Remove proxies from the pool
-	 * @param proxies - Proxies to remove
-	 */
-	remove(proxies: ProxyInfo | ProxyInfo[]): void;
-	/**
-	 * Reset all proxies - re-enable all and reset counters
-	 */
-	reset(): void;
-	/**
-	 * Get current status of all proxies
-	 */
-	getStatus(): ProxyManagerStatus;
-	/**
-	 * Get state for a specific proxy
-	 * @param proxy - The proxy to get state for
-	 */
-	getProxyState(proxy: ProxyInfo): ProxyState | undefined;
-	/**
-	 * Check if any proxies are available
-	 */
-	hasAvailableProxies(): boolean;
-	/**
-	 * Destroy the manager and cleanup timers
-	 */
-	destroy(): void;
-	private runBeforeProxySelectHooksSync;
-	private runAfterProxySelectHooksSync;
-	private runBeforeProxyErrorHooksSync;
-	private runAfterProxyErrorHooksSync;
-	private runAfterProxyRotateHooks;
-	private runAfterProxyDisableHooks;
-	private runAfterProxyEnableHooks;
-	/**
-	 * Run onNoProxiesAvailable hooks synchronously
-	 * Called when no proxies are available and an error is about to be thrown
-	 */
-	private runOnNoProxiesAvailableHooksSync;
-	/**
-	 * Run onNoProxiesAvailable hooks asynchronously
-	 * Called when no proxies are available and an error is about to be thrown
-	 */
-	runOnNoProxiesAvailableHooks(context: OnNoProxiesAvailableContext): Promise<void>;
-	/**
-	 * Notify that no proxies are available and trigger hooks
-	 * This method is called when proxy selection fails due to pool exhaustion
-	 *
-	 * @param url - The request URL that needed a proxy
-	 * @param error - The error that will be thrown
-	 * @returns The context object with detailed information about the proxy pool state
-	 *
-	 * @example
-	 * ```typescript
-	 * manager.hooks.onNoProxiesAvailable.push((context) => {
-	 *     console.error(`No proxies available for ${context.url}`);
-	 *     console.log(`Dead: ${context.disabledReasons.dead}, Limit: ${context.disabledReasons.limitReached}`);
-	 *     // Trigger external alert or proxy refresh
-	 *     alertSystem.notify('Proxy pool exhausted', context);
-	 * });
-	 *
-	 * // Called internally or by adapters when no proxies are available
-	 * const context = manager.notifyNoProxiesAvailable('https://api.example.com', new Error('No proxies'));
-	 * ```
-	 */
-	notifyNoProxiesAvailable(url: string, error: Error): OnNoProxiesAvailableContext;
-}
-export type queueOptions = QueueConfig;
-export interface CacheConfig {
-	/** Response cache configuration */
-	response?: boolean | ResponseCacheConfig;
-	/** DNS cache configuration */
-	dns?: boolean | DNSCacheOptions;
-}
-export type CacheOption = boolean | CacheConfig;
-export interface RezoDefaultOptions {
-	baseURL?: string;
-	/** Hooks for request/response lifecycle */
-	hooks?: Partial<RezoHooks>;
-	/** Whether to enable automatic cookie handling (default: true)*/
-	enableCookieJar?: boolean;
-	/**
-	 * Custom cookie jar for managing cookies.
-	 * The recommended way to manage cookies - pass the jar when creating the instance.
-	 * @example
-	 * ```typescript
-	 * const client = new Rezo({ jar: myJar });
-	 * // or
-	 * const client = rezo.create({ jar: myJar });
-	 * ```
-	 */
-	jar?: RezoHttpRequest["jar"];
-	/** Set default cookies to send with the requests in various formats */
-	cookies?: RezoHttpRequest["cookies"];
-	/**
-	 * Path to cookie file for persistence.
-	 * - .json files save cookies as serialized JSON
-	 * - .txt files save cookies in Netscape format
-	 * Cookies are loaded on construction and saved automatically after each request.
-	 */
-	cookieFile?: string;
-	queueOptions?: {
-		enable: boolean;
-		options?: queueOptions;
-	};
-	/** Request headers as various supported formats */
-	headers?: RezoHttpRequest["headers"];
-	/** Expected response data type */
-	responseType?: ResponseType$1;
-	/** Character encoding for the response */
-	responseEncoding?: string;
-	/** Basic authentication credentials */
-	auth?: RezoHttpRequest["auth"];
-	/** Request timeout in milliseconds */
-	timeout?: number;
-	/** @deprecated Use `timeout` instead */
-	requestTimeout?: number;
-	/** Whether to reject requests with invalid SSL certificates */
-	rejectUnauthorized?: boolean;
-	/** Retry configuration for failed requests */
-	retry?: RezoHttpRequest["retry"];
-	/** Whether to use a secure context for HTTPS requests */
-	useSecureContext?: boolean;
-	/** Custom secure context for TLS connections */
-	secureContext?: RezoHttpRequest["secureContext"];
-	/** Whether to automatically follow HTTP redirects */
-	followRedirects?: boolean;
-	/** Maximum number of redirects to follow */
-	maxRedirects?: number;
-	/** Whether to automatically decompress response data */
-	decompress?: boolean;
-	/** Whether to keep the connection alive for reuse */
-	keepAlive?: boolean;
-	/** Whether to detect and prevent redirect cycles */
-	enableRedirectCycleDetection?: boolean;
-	/** Whether to send cookies and authorization headers with cross-origin requests */
-	withCredentials?: boolean;
-	/** Proxy configuration (URL string or detailed options) */
-	proxy?: RezoHttpRequest["proxy"];
-	/** Maximum allowed size of the request body in bytes */
-	maxBodyLength?: number;
-	/** Maximum transfer rate (single number or [upload, download] tuple) */
-	maxRate?: RezoHttpRequest["maxRate"];
-	/**
-   * Callback invoked when a redirect response is received.
-   * Controls redirect behavior including whether to follow, modify URL, or change HTTP method.
-   *
-   * @param options - Redirect response details
-   * @param options.url - Redirect target URL
-   * @param options.status - HTTP status code
-   * @param options.headers - Response headers
-   * @param options.sameDomain - Whether redirect is to same domain
-   * @returns Boolean to follow/reject redirect, or object for granular control
-   *
-   * @example
-   * ```typescript
-   * beforeRedirect: ({ status, url }) => {
-   *   if (status === 301 || status === 302) {
-   *     return true; // Follow permanent/temporary redirects
-   *   } else if (status === 307 || status === 308) {
-   *     return { redirect: true, url: url.toString() }; // Preserve method for 307/308
-   *   } else if (status === 303) {
-   *     return { redirect: true, url: url.toString(), method: 'GET' }; // Force GET for 303
-   *   }
-   *   return false; // Reject other redirects
-   * }
-   * ```
-   */
-	beforeRedirect?: RezoHttpRequest["beforeRedirect"];
-	/** Array of functions to transform request data */
-	transformRequest?: RezoHttpRequest["transformRequest"];
-	/** Array of functions to transform response data */
-	transformResponse?: RezoHttpRequest["transformResponse"];
-	/** Browser simulation configuration for user agent spoofing */
-	browser?: RezoHttpRequest["browser"];
-	/** Enable debug logging for the request */
-	debug?: RezoHttpRequest["debug"];
-	/** Enable verbose logging with detailed information */
-	verbose?: RezoHttpRequest["verbose"];
-	/** HTTP agent for HTTP requests */
-	httpAgent?: RezoHttpRequest["httpAgent"];
-	/** HTTPS agent for HTTPS requests */
-	httpsAgent?: RezoHttpRequest["httpsAgent"];
-	/** Transitional options for backward compatibility */
-	transitional?: RezoHttpRequest["transitional"];
-	/** Character encoding for request body and response data */
-	encoding?: BufferEncoding;
-	/**
-	 * Cache configuration for response and DNS caching
-	 * - `true`: Enable default in-memory cache (fast, sensible defaults)
-	 * - `{ response: {...}, dns: {...} }`: Fine-grained control
-	 *
-	 * Response cache defaults: 30 min TTL, 500 entries, GET/HEAD only
-	 * DNS cache defaults: 1 min TTL, 1000 entries
-	 */
-	cache?: CacheOption;
-	/**
-	 * Proxy manager for advanced proxy rotation and pool management
-	 * - Provide a `ProxyManager` instance for full control
-	 * - Or provide `ProxyManagerConfig` to auto-create internally
-	 *
-	 * Note: ProxyManager overrides `proxy` option when set.
-	 * Use `useProxyManager: false` per-request to bypass.
-	 *
-	 * @example
-	 * ```typescript
-	 * // With config (auto-creates ProxyManager)
-	 * const client = new Rezo({
-	 *   proxyManager: {
-	 *     rotation: 'random',
-	 *     proxies: [
-	 *       { protocol: 'socks5', host: '127.0.0.1', port: 1080 },
-	 *       { protocol: 'http', host: 'proxy.example.com', port: 8080 }
-	 *     ],
-	 *     whitelist: ['api.example.com'],
-	 *     autoDisableDeadProxies: true
-	 *   }
-	 * });
-	 *
-	 * // With ProxyManager instance
-	 * const pm = new ProxyManager({ rotation: 'sequential', proxies: [...] });
-	 * const client = new Rezo({ proxyManager: pm });
-	 * ```
-	 */
-	proxyManager?: ProxyManager | ProxyManagerConfig;
-}
 export interface httpAdapterOverloads {
 	request<T = any>(options: RezoRequestOptions): Promise<RezoResponse<T>>;
 	request<T = any>(options: RezoRequestOptions & {
@@ -3390,12 +4568,22 @@ export type NestedObject = {
 	[key: string]: NestedValue;
 };
 export type NestedArray = NestedValue[];
+export type NestedMode = "json" | "brackets" | "dots";
+export interface RezoURLSearchParamsOptions {
+	nestedKeys?: NestedMode;
+}
 declare class RezoURLSearchParams extends URLSearchParams {
+	private nestedMode;
+	constructor(init?: string | URLSearchParams | NestedObject | string[][] | RezoURLSearchParams, options?: RezoURLSearchParamsOptions);
 	constructor(init?: string | URLSearchParams | NestedObject | string[][] | RezoURLSearchParams);
 	/**
 	 * Append a nested object to the search params
 	 */
 	appendObject(obj: NestedObject, prefix?: string): void;
+	/**
+	 * Build the nested key based on the current mode
+	 */
+	private buildNestedKey;
 	/**
 	 * Set a value (replacing existing values with the same key)
 	 */
@@ -3409,9 +4597,20 @@ declare class RezoURLSearchParams extends URLSearchParams {
 	 */
 	private appendArray;
 	/**
-	 * Convert to a plain object (useful for debugging)
+	 * Convert to a plain flat object (keys remain as-is)
 	 */
-	toObject(): Record<string, string>;
+	toFlatObject(): Record<string, string>;
+	/**
+	 * Convert to a nested object, parsing bracket/dot notation keys
+	 * and JSON-encoded values back into their original structure
+	 */
+	toObject(): Record<string, any>;
+	/**
+	 * Override toString to use unencoded brackets for nested keys.
+	 * Native URLSearchParams encodes [ ] as %5B %5D, but standard
+	 * form encoding (PHP, Rails, Express/qs) expects literal brackets.
+	 */
+	toString(): string;
 	/**
 	 * Create from a flat object with bracket notation keys
 	 */
@@ -4122,6 +5321,162 @@ export interface httpAdapterPutOverloads {
 		responseType: "upload";
 	}): Promise<RezoUploadResponse>;
 }
+export interface InterceptorOptions {
+	/** Only run when this predicate returns true */
+	runWhen?: (config: any) => boolean;
+}
+declare class RequestInterceptorManager {
+	private entries;
+	private hooks;
+	constructor(hooks: RezoHooks);
+	/**
+	 * Register a request interceptor.
+	 *
+	 * @param fulfilled - Transform or inspect the config before the request is sent.
+	 *                    Must return the config (or a promise resolving to it).
+	 * @param rejected - Handle errors from previous interceptors in the chain.
+	 * @param options - Additional options (runWhen predicate)
+	 * @returns Interceptor ID (use with `eject()` to remove)
+	 */
+	use(fulfilled?: ((config: RezoConfig) => RezoConfig | Promise<RezoConfig>) | null, rejected?: ((error: any) => any) | null, options?: InterceptorOptions): number;
+	/**
+	 * Remove an interceptor by its ID.
+	 */
+	eject(id: number): void;
+	/**
+	 * Remove all interceptors registered through this manager.
+	 */
+	clear(): void;
+	/**
+	 * Iterate over all active interceptors.
+	 */
+	forEach(fn: (entry: {
+		fulfilled: Function | null;
+		rejected: Function | null;
+	}) => void): void;
+	/** Number of active interceptors */
+	get size(): number;
+}
+declare class ResponseInterceptorManager {
+	private entries;
+	private hooks;
+	constructor(hooks: RezoHooks);
+	/**
+	 * Register a response interceptor.
+	 *
+	 * @param fulfilled - Transform or inspect the response after it's received.
+	 *                    Must return the response (or a promise resolving to it).
+	 * @param rejected - Handle request errors (network failures, non-2xx statuses, etc.)
+	 * @param options - Additional options (runWhen predicate)
+	 * @returns Interceptor ID (use with `eject()` to remove)
+	 */
+	use(fulfilled?: ((response: RezoResponse) => RezoResponse | Promise<RezoResponse>) | null, rejected?: ((error: any) => any) | null, options?: InterceptorOptions): number;
+	/**
+	 * Remove an interceptor by its ID.
+	 */
+	eject(id: number): void;
+	/**
+	 * Remove all interceptors registered through this manager.
+	 */
+	clear(): void;
+	/**
+	 * Iterate over all active interceptors.
+	 */
+	forEach(fn: (entry: {
+		fulfilled: Function | null;
+		rejected: Function | null;
+	}) => void): void;
+	/** Number of active interceptors */
+	get size(): number;
+}
+declare class RezoUri extends URL {
+	/**
+	 * Get query parameters as a plain object.
+	 * Duplicate keys are collapsed to the last value.
+	 */
+	get params(): Record<string, string>;
+	/**
+	 * Set query parameters from a plain object.
+	 * Replaces all existing search params.
+	 */
+	set params(value: Record<string, string>);
+	/**
+	 * Get auth as `{ username, password }`.
+	 * Values are already decoded.
+	 */
+	get auth(): {
+		username: string;
+		password: string;
+	};
+	/**
+	 * Set auth from `{ username, password }`.
+	 * Values are automatically percent-encoded.
+	 */
+	set auth(value: {
+		username: string;
+		password: string;
+	});
+	/**
+	 * All URL parts as a plain object.
+	 */
+	toObject(): {
+		href: string;
+		origin: string;
+		protocol: string;
+		username: string;
+		password: string;
+		host: string;
+		hostname: string;
+		port: string;
+		pathname: string;
+		search: string;
+		hash: string;
+		params: Record<string, string>;
+	};
+	/**
+	 * Deep clone this URI.
+	 */
+	clone(): RezoUri;
+	/**
+	 * JSON serialization returns the full href string.
+	 */
+	toJSON(): string;
+	/**
+	 * Create a RezoUri from a native URL or string.
+	 */
+	static from(url: string | URL): RezoUri;
+}
+/**
+ * Options for `rezo.buildUri()`.
+ * Every property of the URL API is settable, plus convenience helpers
+ * like `params`, `auth`, `baseURL`, and `paramsSerializer`.
+ */
+export interface BuildUriOptions {
+	href?: string;
+	origin?: string;
+	protocol?: string;
+	username?: string;
+	password?: string;
+	host?: string;
+	hostname?: string;
+	port?: number | string;
+	pathname?: string;
+	search?: string;
+	hash?: string;
+	/** Full or relative URL string (alias for href when used with baseURL) */
+	url?: string | URL;
+	/** Base URL to resolve relative paths against */
+	baseURL?: string;
+	/** Query parameters object — merged into search, properly encoded */
+	params?: Record<string, any>;
+	/** Custom params serializer */
+	paramsSerializer?: (params: any) => string | Record<string, string>;
+	/** Basic auth — encoded into username:password */
+	auth?: {
+		username: string;
+		password: string;
+	};
+}
 /**
  * Adapter function type - all adapters must implement this signature
  */
@@ -4130,11 +5485,11 @@ export type AdapterFunction<T = any> = (options: RezoRequestConfig, defaultOptio
  * Main Rezo class - Enterprise-grade HTTP client with advanced features
  */
 export declare class Rezo {
-	protected queue: RezoQueue | null;
+	protected queue: RezoQueue | HttpQueue | null;
 	protected isQueueEnabled: boolean;
 	defaults: RezoDefaultOptions;
 	hooks: RezoHooks;
-	private jar;
+	private cookieJar;
 	/** Session ID persists across all requests from this instance */
 	readonly sessionId: string;
 	/** Response cache for caching HTTP responses */
@@ -4145,6 +5500,18 @@ export declare class Rezo {
 	private readonly adapter;
 	/** Proxy manager for advanced proxy rotation and pool management */
 	private readonly _proxyManager;
+	/**
+	 * Interceptor managers for request and response lifecycle.
+	 *
+	 * Register interceptors using `use()`, remove with `eject()`, or clear all with `clear()`.
+	 *
+	 * - `interceptors.request.use(onFulfilled, onRejected)` — modify config before sending
+	 * - `interceptors.response.use(onFulfilled, onRejected)` — transform responses or handle errors
+	 */
+	interceptors: {
+		request: RequestInterceptorManager;
+		response: ResponseInterceptorManager;
+	};
 	constructor(config?: RezoDefaultOptions, adapter?: AdapterFunction);
 	/**
 	 * Get the ProxyManager instance (if configured)
@@ -4193,11 +5560,98 @@ export declare class Rezo {
 	patchMultipart: httpAdapterPatchOverloads["patchMultipart"];
 	private executeRequest;
 	private buildFullUrl;
+	/**
+	 * Build a full, safe URL from parts or a request config.
+	 *
+	 * Accepts either a string/URL, or an options object with individual URL components.
+	 * All values are properly encoded. Components from `this.defaults` (baseURL, paramsSerializer)
+	 * are used as fallbacks.
+	 *
+	 * @example
+	 * ```ts
+	 * // From request config (baseURL + path + params)
+	 * rezo.buildUri({ url: '/users', params: { page: 2 } })
+	 *
+	 * // From individual parts
+	 * rezo.buildUri({
+	 *   protocol: 'https',
+	 *   hostname: 'api.example.com',
+	 *   port: 8443,
+	 *   pathname: '/v1/users',
+	 *   params: { role: 'admin' },
+	 *   hash: 'section-2',
+	 *   auth: { username: 'user', password: 'pass' }
+	 * })
+	 * // → "https://user:pass@api.example.com:8443/v1/users?role=admin#section-2"
+	 *
+	 * // Just encode a string safely
+	 * rezo.buildUri('https://example.com/path with spaces?q=a&b')
+	 * ```
+	 */
+	buildUri(config: string | URL | BuildUriOptions): RezoUri;
 	private isvalidJson;
+	/**
+	 * Deep-merge two request configs. Headers and params are merged (not replaced).
+	 * Properties from config2 take precedence over config1.
+	 */
+	static mergeConfig(config1: RezoDefaultOptions, config2: Partial<RezoDefaultOptions>): RezoDefaultOptions;
+	/**
+	 * Create a child instance inheriting this instance's defaults, merged with new options.
+	 * Unlike `create()` which starts fresh, `extend()` chains defaults.
+	 *
+	 * @example
+	 * ```ts
+	 * const api = rezo.extend({ baseURL: 'https://api.example.com' });
+	 * const authed = api.extend({ headers: { Authorization: 'Bearer ...' } });
+	 * ```
+	 */
+	extend(config: RezoDefaultOptions): Rezo;
+	/**
+	 * Async iterator for paginated APIs.
+	 *
+	 * Auto-detects pagination via Link headers, or use custom logic
+	 * via `pagination.getNextUrl` / `pagination.transform`.
+	 *
+	 * @example
+	 * ```ts
+	 * // Auto-detect via Link header
+	 * for await (const page of rezo.paginate('/users')) {
+	 *   console.log(page.data);
+	 * }
+	 *
+	 * // Cursor-based
+	 * for await (const page of rezo.paginate('/items', {
+	 *   pagination: {
+	 *     getNextUrl: (resp) => resp.data.next_cursor
+	 *       ? `/items?cursor=${resp.data.next_cursor}` : null,
+	 *   }
+	 * })) { ... }
+	 *
+	 * // Collect all items
+	 * const allUsers = [];
+	 * for await (const page of rezo.paginate('/users', {
+	 *   pagination: { transform: (resp) => resp.data.results }
+	 * })) {
+	 *   allUsers.push(...page);
+	 * }
+	 * ```
+	 */
+	paginate<T = any>(url: string, options?: RezoHttpRequest & {
+		pagination?: {
+			/** Extract the next page URL from the response. Return null/undefined to stop. */
+			getNextUrl?: (response: RezoResponse<T>) => string | null | undefined;
+			/** Transform each response into the yielded value. Defaults to yielding response.data. */
+			transform?: (response: RezoResponse<T>) => any;
+			/** Maximum number of pages to fetch. Default: Infinity. */
+			countLimit?: number;
+			/** Maximum number of requests. Same as countLimit. */
+			requestLimit?: number;
+		};
+	}): AsyncGenerator<T, void, undefined>;
 	private __create;
 	/** Get the cookie jar for this instance */
-	get cookieJar(): RezoCookieJar;
-	set cookieJar(jar: RezoCookieJar);
+	get jar(): RezoCookieJar;
+	set jar(jar: RezoCookieJar);
 	/**
 	 * Save cookies to file (if cookieFile is configured).
 	 * Can also specify a different path to save to.
@@ -4313,11 +5767,15 @@ export declare class Rezo {
 	setCookies(setCookieArray: string[], url: string, startNew?: boolean): void;
 	setCookies(setCookieArray: string[], url: string | undefined, startNew: boolean): void;
 	/**
-	 * Get all cookies from the cookie jar in multiple convenient formats.
+	 * Get cookies from the cookie jar in multiple convenient formats.
 	 *
-	 * Returns a `Cookies` object containing all stored cookies in various formats
+	 * Returns a `Cookies` object containing stored cookies in various formats
 	 * for different use cases. This provides flexible access to cookies for
 	 * HTTP headers, file storage, serialization, or programmatic manipulation.
+	 *
+	 * If a `url` is provided, only cookies valid for that URL (matching domain, path,
+	 * expiration, etc.) are returned. If no `url` is provided, all cookies in the
+	 * jar are returned.
 	 *
 	 * The returned `Cookies` object contains:
 	 * - **array**: `Cookie[]` - Array of Cookie class instances for programmatic access
@@ -4326,37 +5784,29 @@ export declare class Rezo {
 	 * - **string**: `string` - Cookie header format (`key=value; key2=value2`) for HTTP requests
 	 * - **setCookiesString**: `string[]` - Array of Set-Cookie header strings
 	 *
+	 * @param url - Optional URL to filter cookies. If provided, returns only cookies valid for this URL.
 	 * @returns A Cookies object with cookies in multiple formats
 	 *
 	 * @example
 	 * ```typescript
-	 * const cookies = rezo.getCookies();
+	 * // Get ALL cookies in the jar
+	 * const allCookies = rezo.getCookies();
 	 *
-	 * // Access as Cookie instances for programmatic use
-	 * for (const cookie of cookies.array) {
-	 *   console.log(`${cookie.key}=${cookie.value} (expires: ${cookie.expires})`);
+	 * // Get cookies valid for a specific URL
+	 * const googleCookies = rezo.getCookies('https://google.com');
+	 * console.log(googleCookies.string); // Only sends valid cookies for google.com
+	 *
+	 * // Access as Cookie instances
+	 * for (const cookie of allCookies.array) {
+	 *   console.log(`${cookie.key}=${cookie.value}`);
 	 * }
-	 *
-	 * // Get cookie header string for manual HTTP requests
-	 * console.log(cookies.string); // "session=abc123; user=john"
 	 *
 	 * // Save to Netscape cookie file
-	 * fs.writeFileSync('cookies.txt', cookies.netscape);
+	 * fs.writeFileSync('cookies.txt', allCookies.netscape);
 	 *
 	 * // Serialize to JSON for storage
-	 * const json = JSON.stringify(cookies.serialized);
+	 * const json = JSON.stringify(allCookies.serialized);
 	 * localStorage.setItem('cookies', json);
-	 *
-	 * // Get Set-Cookie headers (useful for proxying responses)
-	 * for (const setCookie of cookies.setCookiesString) {
-	 *   console.log(setCookie); // "session=abc123; Domain=example.com; Path=/; HttpOnly"
-	 * }
-	 *
-	 * // Check cookie count
-	 * console.log(`Total cookies: ${cookies.array.length}`);
-	 *
-	 * // Find specific cookie
-	 * const sessionCookie = cookies.array.find(c => c.key === 'session');
 	 * ```
 	 *
 	 * @see {@link setCookies} - Set cookies in the jar
@@ -4364,6 +5814,7 @@ export declare class Rezo {
 	 * @see {@link cookieJar} - Access the underlying RezoCookieJar for more methods
 	 */
 	getCookies(): Cookies;
+	getCookies(url: string): Cookies;
 	/**
 	 * Remove all cookies from the cookie jar.
 	 *
@@ -4408,37 +5859,181 @@ export declare class Rezo {
 	 * @see {@link cookieJar} - Access the underlying RezoCookieJar for more control
 	 */
 	clearCookies(): void;
+	/**
+	 * Destroy this Rezo instance and clean up resources.
+	 *
+	 * Releases internal resources such as ProxyManager cooldown timers.
+	 * Call this when the instance is no longer needed to prevent memory leaks.
+	 *
+	 * @example
+	 * ```typescript
+	 * const rezo = new Rezo({ proxyManager: new ProxyManager({ ... }) });
+	 * // ... use rezo ...
+	 * rezo.destroy(); // cleanup timers and state
+	 * ```
+	 */
+	destroy(): void;
+	/**
+	 * Convert a Rezo request configuration to a cURL command string.
+	 *
+	 * Generates a valid cURL command that can be executed in a terminal to
+	 * reproduce the same HTTP request. Useful for:
+	 * - Debugging and sharing requests
+	 * - Documentation and examples
+	 * - Testing requests outside of Node.js
+	 * - Exporting requests to other tools
+	 *
+	 * @param config - Request configuration object
+	 * @returns A cURL command string
+	 *
+	 * @example
+	 * ```typescript
+	 * const curl = Rezo.toCurl({
+	 *   url: 'https://api.example.com/users',
+	 *   method: 'POST',
+	 *   headers: { 'Content-Type': 'application/json' },
+	 *   body: { name: 'John', email: 'john@example.com' }
+	 * });
+	 * // Output: curl -X POST -H 'content-type: application/json' --data-raw '{"name":"John","email":"john@example.com"}' -L --compressed 'https://api.example.com/users'
+	 * ```
+	 */
+	static toCurl(config: RezoRequestConfig | RezoRequestOptions): string;
+	/**
+	 * Parse a cURL command string into a Rezo request configuration.
+	 *
+	 * Converts a cURL command into a configuration object that can be
+	 * passed directly to Rezo request methods. Useful for:
+	 * - Importing requests from browser DevTools
+	 * - Converting curl examples from API documentation
+	 * - Migrating scripts from curl to Rezo
+	 *
+	 * Supports common cURL options:
+	 * - `-X, --request` - HTTP method
+	 * - `-H, --header` - Request headers
+	 * - `-d, --data, --data-raw, --data-binary` - Request body
+	 * - `-u, --user` - Basic authentication
+	 * - `-x, --proxy` - Proxy configuration
+	 * - `--socks5, --socks4` - SOCKS proxy
+	 * - `-L, --location` - Follow redirects
+	 * - `--max-redirs` - Maximum redirects
+	 * - `--max-time` - Request timeout
+	 * - `-k, --insecure` - Skip TLS verification
+	 * - `-A, --user-agent` - User agent header
+	 *
+	 * @param curlCommand - A cURL command string
+	 * @returns A request configuration object
+	 *
+	 * @example
+	 * ```typescript
+	 * // From browser DevTools "Copy as cURL"
+	 * const config = Rezo.fromCurl(`
+	 *   curl 'https://api.example.com/data' \\
+	 *     -H 'Authorization: Bearer token123' \\
+	 *     -H 'Content-Type: application/json'
+	 * `);
+	 *
+	 * // Use with Rezo
+	 * const rezo = new Rezo();
+	 * const response = await rezo.request(config);
+	 * ```
+	 */
+	static fromCurl(curlCommand: string): RezoRequestOptions;
 }
 /**
- * Extended Rezo instance with Axios-compatible static helpers.
- * Provides drop-in replacement API surface for Axios users.
+ * Request options for the callable rezo(url, options) form.
+ * Fetch API compatible + supports all Rezo-specific options (json, form, formData, multipart, responseType).
+ * Automatically routes to the correct HTTP method handler.
  */
-export interface RezoInstance extends Rezo {
+export interface FetchRequestInit extends Omit<RezoRequestConfig, "url" | "method" | "fullUrl"> {
+	/** HTTP method (GET, POST, PUT, DELETE, etc.) - defaults to GET */
+	method?: "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS" | "TRACE";
+}
+/**
+ * Callable function signature for Fetch API compatibility.
+ * Allows calling rezo as a function: rezo(url, options)
+ */
+export interface RezoCallable {
+	/**
+	 * Make an HTTP request. Fetch API compatible with full Rezo features.
+	 * Automatically routes to the correct method handler based on `options.method`.
+	 *
+	 * @param url - The URL to request
+	 * @param options - Request options (method defaults to GET)
+	 * @returns Promise resolving to RezoResponse
+	 *
+	 * @example
+	 * ```typescript
+	 * // Simple GET request
+	 * const response = await rezo('https://api.example.com/data');
+	 *
+	 * // POST with JSON body (Fetch API style)
+	 * const response = await rezo('https://api.example.com/users', {
+	 *   method: 'POST',
+	 *   headers: { 'Content-Type': 'application/json' },
+	 *   body: JSON.stringify({ name: 'John' })
+	 * });
+	 *
+	 * // POST with Rezo json shorthand
+	 * const response = await rezo('https://api.example.com/users', {
+	 *   method: 'POST',
+	 *   json: { name: 'John' }
+	 * });
+	 *
+	 * // POST form data
+	 * const response = await rezo('https://api.example.com/login', {
+	 *   method: 'POST',
+	 *   form: { username: 'john', password: 'secret' }
+	 * });
+	 *
+	 * // POST multipart
+	 * const response = await rezo('https://api.example.com/upload', {
+	 *   method: 'POST',
+	 *   formData: { file: buffer, name: 'photo.jpg' }
+	 * });
+	 * ```
+	 */
+	<T = any>(url: string | URL, options?: FetchRequestInit): Promise<RezoResponse<T>>;
+}
+/**
+ * Extended Rezo instance with static helpers and callable signature.
+ * Can be invoked directly as a function or via named HTTP methods.
+ */
+export interface RezoInstance extends Rezo, RezoCallable {
 	/** Create a new Rezo instance with custom configuration */
 	create(config?: RezoDefaultOptions): Rezo;
+	/** Deep-merge two request configs */
+	mergeConfig: typeof Rezo.mergeConfig;
 	/** Type guard to check if an error is a RezoError instance */
 	isRezoError: typeof RezoError.isRezoError;
 	/** Check if an error is a cancellation error */
 	isCancel: (error: unknown) => boolean;
-	/** Alias for RezoError (Axios compatibility) */
+	/** RezoError class reference */
 	Cancel: typeof RezoError;
-	/** AbortController for request cancellation (Axios compatibility) */
+	/** AbortController for request cancellation */
 	CancelToken: typeof AbortController;
-	/** Promise.all wrapper (Axios compatibility) */
+	/** Execute multiple requests in parallel */
 	all: typeof Promise.all;
-	/** Spread array arguments to callback function (Axios compatibility) */
+	/** Spread array arguments to callback function */
 	spread: <T extends unknown[], R>(callback: (...args: T) => R) => (array: T) => R;
 }
+/**
+ * Package version and name constants
+ * These are maintained here to avoid importing package.json,
+ * which causes issues in Deno and other runtimes.
+ *
+ * IMPORTANT: Update these values when bumping package version.
+ */
+export declare const VERSION = "1.0.126";
 /**
  * Type guard to check if an error is a RezoError instance.
  */
 export declare const isRezoError: typeof RezoError.isRezoError;
 /**
- * Alias for RezoError (Axios compatibility).
+ * Alias for RezoError.
  */
 export declare const Cancel: typeof RezoError;
 /**
- * AbortController for request cancellation (Axios compatibility).
+ * AbortController for request cancellation.
  */
 export declare const CancelToken: {
 	new (): AbortController;
@@ -4449,7 +6044,7 @@ export declare const CancelToken: {
  */
 export declare const isCancel: (error: unknown) => boolean;
 /**
- * Promise.all wrapper (Axios compatibility).
+ * Promise.all wrapper.
  */
 export declare const all: {
 	<T>(values: Iterable<T | PromiseLike<T>>): Promise<Awaited<T>[]>;
@@ -4459,13 +6054,9 @@ export declare const all: {
 	}>;
 };
 /**
- * Spreads array arguments to callback function (Axios compatibility).
+ * Spreads array arguments to callback function.
  */
 export declare const spread: <T extends unknown[], R>(callback: (...args: T) => R) => (array: T) => R;
-/**
- * Current library version.
- */
-export declare const VERSION: string;
 declare const rezo: RezoInstance;
 
 export {

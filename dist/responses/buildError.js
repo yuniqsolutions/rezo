@@ -146,14 +146,19 @@ function isTlsError(code, message) {
     "SELF_SIGNED_CERT_IN_CHAIN",
     "DEPTH_ZERO_SELF_SIGNED_CERT",
     "ERR_TLS_RENEGOTIATION_DISABLED",
-    "ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED"
+    "ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED",
+    "ERR_SSL_TLSV1_ALERT_NO_APPLICATION_PROTOCOL"
   ];
   if (tlsCodes.includes(code))
     return true;
+  if (code.startsWith("ERR_SSL_"))
+    return true;
   const msg = message.toLowerCase();
-  return msg.includes("certificate") || msg.includes("ssl") || msg.includes("tls") || msg.includes("handshake");
+  return msg.includes("certificate") || msg.includes("ssl") || msg.includes("tls") || msg.includes("handshake") || msg.includes("alpn");
 }
 function mapTlsCode(code, message) {
+  if (code && code.startsWith("ERR_SSL_"))
+    return code;
   if (code && code.startsWith("ERR_TLS") || code.startsWith("CERT_") || code === "EPROTO" || code.startsWith("UNABLE_TO") || code.startsWith("SELF_SIGNED") || code.startsWith("DEPTH_ZERO")) {
     return code;
   }
@@ -166,6 +171,10 @@ function mapTlsCode(code, message) {
     return "ERR_TLS_CERT_ALTNAME_INVALID";
   if (msg.includes("handshake") && msg.includes("timeout"))
     return "ERR_TLS_HANDSHAKE_TIMEOUT";
+  if (msg.includes("no application protocol") || msg.includes("alpn"))
+    return "ERR_SSL_NO_ALPN";
+  if (msg.includes("does not support http/2"))
+    return "ERR_HTTP2_NOT_SUPPORTED";
   return "EPROTO";
 }
 function isTimeoutError(code, message) {

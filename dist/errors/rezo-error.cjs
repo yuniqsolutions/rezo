@@ -346,13 +346,39 @@ const ERROR_INFO = exports.ERROR_INFO = {
     message: "Rate Limited",
     details: "The server has rate-limited your requests. Too many requests were sent in a short period.",
     suggestion: "Implement request throttling or wait before retrying. Check the Retry-After header if available."
+  },
+  ECONNABORTED: {
+    code: -103,
+    message: "Connection Aborted",
+    details: "The connection was aborted locally. This typically occurs when a request is cancelled or times out during data transfer.",
+    suggestion: "Retry the request. If persistent, increase timeout values or check network stability."
+  },
+  ESOCKETTIMEDOUT: {
+    code: -1073,
+    message: "Socket Timeout",
+    details: "The socket timed out while waiting for data. No response was received within the socket timeout period.",
+    suggestion: "Increase the timeout value or check if the server is responding."
+  },
+  ERR_ABORTED: {
+    code: -1074,
+    message: "Request Aborted",
+    details: "The request was explicitly aborted before completion.",
+    suggestion: "If unintended, review your code for abort triggers."
+  },
+  REZ_NO_PROXY_AVAILABLE: {
+    code: -1050,
+    message: "No Proxy Available",
+    details: "All proxies in ProxyManager are exhausted, disabled, or in cooldown. The URL may also not match whitelist/blacklist rules.",
+    suggestion: "Add more proxies, enable cooldown for auto-recovery, increase maxFailures, or set failWithoutProxy: false to allow direct connections."
   }
 };
 var RezoErrorCode; exports.RezoErrorCode = RezoErrorCode;
 ((RezoErrorCode) => {
   RezoErrorCode["CONNECTION_REFUSED"] = "ECONNREFUSED";
   RezoErrorCode["CONNECTION_RESET"] = "ECONNRESET";
+  RezoErrorCode["CONNECTION_ABORTED"] = "ECONNABORTED";
   RezoErrorCode["CONNECTION_TIMEOUT"] = "ETIMEDOUT";
+  RezoErrorCode["SOCKET_TIMEOUT"] = "ESOCKETTIMEDOUT";
   RezoErrorCode["DNS_LOOKUP_FAILED"] = "ENOTFOUND";
   RezoErrorCode["DNS_TEMPORARY_FAILURE"] = "EAI_AGAIN";
   RezoErrorCode["HOST_UNREACHABLE"] = "EHOSTUNREACH";
@@ -364,13 +390,18 @@ var RezoErrorCode; exports.RezoErrorCode = RezoErrorCode;
   RezoErrorCode["REDIRECT_CYCLE"] = "REZ_REDIRECT_CYCLE_DETECTED";
   RezoErrorCode["MISSING_REDIRECT_LOCATION"] = "REZ_MISSING_REDIRECT_LOCATION";
   RezoErrorCode["DECOMPRESSION_ERROR"] = "REZ_DECOMPRESSION_ERROR";
+  RezoErrorCode["HEADERS_ALREADY_SENT"] = "ERR_HTTP_HEADERS_SENT";
   RezoErrorCode["REQUEST_TIMEOUT"] = "UND_ERR_REQUEST_TIMEOUT";
   RezoErrorCode["HEADERS_TIMEOUT"] = "UND_ERR_HEADERS_TIMEOUT";
   RezoErrorCode["CONNECT_TIMEOUT"] = "UND_ERR_CONNECT_TIMEOUT";
   RezoErrorCode["ABORTED"] = "ABORT_ERR";
+  RezoErrorCode["ABORTED_UNDICI"] = "UND_ERR_ABORTED";
+  RezoErrorCode["ABORTED_ERR"] = "ERR_ABORTED";
   RezoErrorCode["DOWNLOAD_FAILED"] = "REZ_DOWNLOAD_FAILED";
   RezoErrorCode["UPLOAD_FAILED"] = "REZ_UPLOAD_FAILED";
   RezoErrorCode["STREAM_ERROR"] = "REZ_STREAM_ERROR";
+  RezoErrorCode["STREAM_DESTROYED"] = "ERR_STREAM_DESTROYED";
+  RezoErrorCode["STREAM_PREMATURE_CLOSE"] = "ERR_STREAM_PREMATURE_CLOSE";
   RezoErrorCode["BODY_TOO_LARGE"] = "REZ_BODY_TOO_LARGE";
   RezoErrorCode["RESPONSE_TOO_LARGE"] = "REZ_RESPONSE_TOO_LARGE";
   RezoErrorCode["INVALID_JSON"] = "REZ_INVALID_JSON";
@@ -393,10 +424,16 @@ var RezoErrorCode; exports.RezoErrorCode = RezoErrorCode;
   RezoErrorCode["TLS_HANDSHAKE_TIMEOUT"] = "ERR_TLS_HANDSHAKE_TIMEOUT";
   RezoErrorCode["TLS_PROTOCOL_ERROR"] = "EPROTO";
   RezoErrorCode["TLS_PROTOCOL_VERSION"] = "ERR_TLS_INVALID_PROTOCOL_VERSION";
+  RezoErrorCode["TLS_RENEGOTIATION_DISABLED"] = "ERR_TLS_RENEGOTIATION_DISABLED";
+  RezoErrorCode["TLS_CERT_SIGNATURE_UNSUPPORTED"] = "ERR_TLS_CERT_SIGNATURE_ALGORITHM_UNSUPPORTED";
   RezoErrorCode["CERTIFICATE_HOSTNAME_MISMATCH"] = "ERR_TLS_CERT_ALTNAME_INVALID";
   RezoErrorCode["CERTIFICATE_EXPIRED"] = "CERT_HAS_EXPIRED";
   RezoErrorCode["CERTIFICATE_SELF_SIGNED"] = "SELF_SIGNED_CERT_IN_CHAIN";
+  RezoErrorCode["CERTIFICATE_SELF_SIGNED_NO_CHAIN"] = "DEPTH_ZERO_SELF_SIGNED_CERT";
   RezoErrorCode["CERTIFICATE_VERIFY_FAILED"] = "UNABLE_TO_VERIFY_LEAF_SIGNATURE";
+  RezoErrorCode["UNDICI_SOCKET_ERROR"] = "UND_ERR_SOCKET";
+  RezoErrorCode["UNDICI_INVALID_INFO"] = "UND_ERR_INFO";
+  RezoErrorCode["NO_PROXY_AVAILABLE"] = "REZ_NO_PROXY_AVAILABLE";
   RezoErrorCode["RATE_LIMITED"] = "REZ_RATE_LIMITED";
   RezoErrorCode["UNKNOWN_ERROR"] = "REZ_UNKNOWN_ERROR";
 })(RezoErrorCode ||= {});
@@ -423,6 +460,40 @@ function getHttpErrorMessage(statusCode) {
     505: "HTTP Version Not Supported: The HTTP version used in the request is not supported."
   };
   return statusMessages[statusCode] || `HTTP Error ${statusCode}: The server responded with a non-successful status code.`;
+}
+function getHttpStatusText(statusCode) {
+  const statusTexts = {
+    200: "OK",
+    201: "Created",
+    202: "Accepted",
+    204: "No Content",
+    301: "Moved Permanently",
+    302: "Found",
+    303: "See Other",
+    304: "Not Modified",
+    307: "Temporary Redirect",
+    308: "Permanent Redirect",
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    408: "Request Timeout",
+    409: "Conflict",
+    410: "Gone",
+    413: "Payload Too Large",
+    414: "URI Too Long",
+    415: "Unsupported Media Type",
+    422: "Unprocessable Entity",
+    429: "Too Many Requests",
+    500: "Internal Server Error",
+    501: "Not Implemented",
+    502: "Bad Gateway",
+    503: "Service Unavailable",
+    504: "Gateway Timeout",
+    505: "HTTP Version Not Supported"
+  };
+  return statusTexts[statusCode] || "Unknown Status";
 }
 function getCode(code) {
   const error = ERROR_INFO[code];
@@ -519,9 +590,9 @@ function cleanStackTrace(stack) {
 class RezoError extends Error {
   constructor(message, config, code, request, response) {
     super();
-    Object.defineProperty(this, "config", { value: config, enumerable: false });
-    Object.defineProperty(this, "request", { value: request, enumerable: false });
-    Object.defineProperty(this, "response", { value: response, enumerable: false });
+    Object.defineProperty(this, "config", { value: config, enumerable: !!config });
+    Object.defineProperty(this, "request", { value: request, enumerable: !!request });
+    Object.defineProperty(this, "response", { value: response, enumerable: !!response });
     Object.defineProperty(this, "isRezoError", { value: true, enumerable: false });
     if (code) {
       Object.defineProperty(this, "code", { value: code, enumerable: true });
@@ -544,17 +615,15 @@ class RezoError extends Error {
     if (code) {
       const errorInfo = getCode(code);
       Object.defineProperty(this, "errno", { value: errorInfo.errno, enumerable: false });
-      Object.defineProperty(this, "details", { value: errorInfo.details, enumerable: false });
       Object.defineProperty(this, "suggestion", { value: errorInfo.suggestion, enumerable: false });
       this.message = errorInfo.message;
     } else {
       this.message = message;
-      Object.defineProperty(this, "details", { value: message, enumerable: false });
-      Object.defineProperty(this, "suggestion", { value: "Check the error details for more information.", enumerable: false });
+      Object.defineProperty(this, "suggestion", { value: "Check the error for more information.", enumerable: false });
     }
     if (response) {
-      Object.defineProperty(this, "status", { value: response.status, enumerable: false });
-      Object.defineProperty(this, "statusText", { value: response.statusText, enumerable: false });
+      Object.defineProperty(this, "status", { value: response.status, enumerable: false, configurable: true });
+      Object.defineProperty(this, "statusText", { value: response.statusText, enumerable: false, configurable: true });
     }
     this.name = this.constructor.name;
     Object.setPrototypeOf(this, RezoError.prototype);
@@ -567,21 +636,6 @@ class RezoError extends Error {
         Object.defineProperty(this, "stack", { value: cleaned, enumerable: false, writable: true });
       }
     }
-  }
-  [Symbol.for("nodejs.util.inspect.custom")](_depth, _options) {
-    const parts = [];
-    parts.push(`${this.name}: ${this.message}`);
-    if (this.code) {
-      parts.push(`  code: '${this.code}'`);
-    }
-    if (this.details && this.details !== this.message) {
-      parts.push(`  details: ${this.details}`);
-    }
-    if (this.suggestion) {
-      parts.push(`  suggestion: ${this.suggestion}`);
-    }
-    return parts.join(`
-`);
   }
   static isRezoError(error) {
     return error instanceof RezoError || error !== null && typeof error === "object" && error.isRezoError === true;
@@ -612,8 +666,20 @@ class RezoError extends Error {
     return new RezoError(message, config, code, request);
   }
   static createHttpError(statusCode, config, request, response) {
-    const error = new RezoError(getHttpErrorMessage(statusCode), config, "REZ_HTTP_ERROR", request, response);
-    Object.defineProperty(error, "status", { value: statusCode, enumerable: false });
+    const method = (config.method || request?.method || "GET").toUpperCase();
+    const url = config.fullUrl || config.url || request?.url || "unknown";
+    const statusText = response?.statusText || getHttpStatusText(statusCode);
+    const finalUrl = response?.finalUrl || url;
+    const urls = response?.urls || [url];
+    const message = `Request failed with status code ${statusCode}`;
+    const error = new RezoError(message, config, "REZ_HTTP_ERROR", request, response);
+    error.message = message;
+    Object.defineProperty(error, "status", { value: statusCode, enumerable: true });
+    Object.defineProperty(error, "statusText", { value: statusText, enumerable: true });
+    Object.defineProperty(error, "method", { value: method, enumerable: true });
+    Object.defineProperty(error, "url", { value: url, enumerable: true });
+    Object.defineProperty(error, "finalUrl", { value: finalUrl, enumerable: true });
+    Object.defineProperty(error, "urls", { value: urls, enumerable: true });
     return error;
   }
   static createTimeoutError(message, config, request) {
@@ -670,14 +736,20 @@ class RezoError extends Error {
     };
     if (this.code !== undefined)
       result.code = this.code;
-    if (this.details !== undefined)
-      result.details = this.details;
-    if (this.suggestion !== undefined)
-      result.suggestion = this.suggestion;
+    if (this.method !== undefined)
+      result.method = this.method;
+    if (this.url !== undefined)
+      result.url = this.url;
+    if (this.finalUrl !== undefined)
+      result.finalUrl = this.finalUrl;
     if (this.status !== undefined)
       result.status = this.status;
     if (this.statusText !== undefined)
       result.statusText = this.statusText;
+    if (this.urls !== undefined)
+      result.urls = this.urls;
+    if (this.cause)
+      result.cause = typeof this.cause === "string" ? this.cause : this.cause?.message || null;
     return result;
   }
   toString() {
@@ -690,19 +762,28 @@ class RezoError extends Error {
   getFullDetails() {
     let result = `${this.name}: ${this.message}
 `;
-    result += `
-Details: ${this.details}
-`;
-    result += `Suggestion: ${this.suggestion}
-`;
     if (this.code)
       result += `Code: ${this.code}
 `;
-    if (this.errno)
-      result += `Error Number: ${this.errno}
+    if (this.method)
+      result += `Method: ${this.method}
 `;
+    if (this.url)
+      result += `URL: ${this.url}
+`;
+    if (this.finalUrl && this.finalUrl !== this.url) {
+      result += `Final URL: ${this.finalUrl}
+`;
+    }
     if (this.status)
       result += `HTTP Status: ${this.status} ${this.statusText || ""}
+`;
+    if (this.urls && this.urls.length > 1) {
+      result += `Redirect Chain: ${this.urls.join(" -> ")}
+`;
+    }
+    if (this.errno)
+      result += `Error Number: ${this.errno}
 `;
     if (this.hostname)
       result += `Host: ${this.hostname}
@@ -710,11 +791,16 @@ Details: ${this.details}
     if (this.port)
       result += `Port: ${this.port}
 `;
+    if (this.suggestion)
+      result += `
+Suggestion: ${this.suggestion}
+`;
     return result;
   }
 }
 
 exports.getHttpErrorMessage = getHttpErrorMessage;
+exports.getHttpStatusText = getHttpStatusText;
 exports.getCode = getCode;
 exports.getErrorInfo = getErrorInfo;
 exports.RezoError = RezoError;

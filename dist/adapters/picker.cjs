@@ -65,7 +65,8 @@ function getAdapterCapabilities(adapter) {
       fileDownload: true,
       compression: true,
       abortSignal: true,
-      tlsConfig: true
+      tlsConfig: true,
+      backgroundTasks: false
     },
     http2: {
       cookies: true,
@@ -77,7 +78,8 @@ function getAdapterCapabilities(adapter) {
       fileDownload: true,
       compression: true,
       abortSignal: true,
-      tlsConfig: true
+      tlsConfig: true,
+      backgroundTasks: false
     },
     curl: {
       cookies: true,
@@ -89,7 +91,8 @@ function getAdapterCapabilities(adapter) {
       fileDownload: true,
       compression: true,
       abortSignal: true,
-      tlsConfig: true
+      tlsConfig: true,
+      backgroundTasks: false
     },
     fetch: {
       cookies: false,
@@ -101,7 +104,8 @@ function getAdapterCapabilities(adapter) {
       fileDownload: false,
       compression: true,
       abortSignal: true,
-      tlsConfig: false
+      tlsConfig: false,
+      backgroundTasks: false
     },
     xhr: {
       cookies: false,
@@ -113,33 +117,64 @@ function getAdapterCapabilities(adapter) {
       fileDownload: false,
       compression: false,
       abortSignal: true,
-      tlsConfig: false
+      tlsConfig: false,
+      backgroundTasks: false
     },
     "react-native": {
-      cookies: false,
+      cookies: true,
       proxy: false,
-      streaming: true,
+      streaming: false,
       http2: false,
       uploadProgress: false,
-      downloadProgress: true,
-      fileDownload: true,
+      downloadProgress: false,
+      fileDownload: false,
       compression: true,
       abortSignal: true,
-      tlsConfig: false
+      tlsConfig: false,
+      backgroundTasks: false
     }
   };
   return capabilities[adapter];
 }
 function buildAdapterContext(options, defaultOptions) {
   const internal = options;
+  const responseType = internal.responseType;
+  const reactNativeOptions = {
+    ...defaultOptions.reactNative || {},
+    ...options.reactNative || {},
+    fileSystemAdapter: options.reactNative?.fileSystemAdapter || defaultOptions.reactNative?.fileSystemAdapter,
+    streamTransport: options.reactNative?.streamTransport || defaultOptions.reactNative?.streamTransport,
+    networkInfoProvider: options.reactNative?.networkInfoProvider || defaultOptions.reactNative?.networkInfoProvider,
+    backgroundTaskProvider: options.reactNative?.backgroundTaskProvider || defaultOptions.reactNative?.backgroundTaskProvider,
+    backgroundTask: options.reactNative?.backgroundTask !== undefined ? options.reactNative.backgroundTask : defaultOptions.reactNative?.backgroundTask
+  };
+  const fileSystemAdapter = reactNativeOptions?.fileSystemAdapter;
+  const hasFileSystemAdapter = !!fileSystemAdapter;
+  const hasFileDownloadSupport = !!fileSystemAdapter?.downloadFile && (fileSystemAdapter.capabilities?.fileDownload ?? true);
+  const hasDownloadProgressSupport = hasFileDownloadSupport && (fileSystemAdapter?.capabilities?.downloadProgress ?? true);
+  const hasFileUploadSupport = !!fileSystemAdapter?.uploadFile && (fileSystemAdapter.capabilities?.uploadFromFile ?? true);
+  const hasUploadProgressSupport = hasFileUploadSupport && (fileSystemAdapter.capabilities?.uploadProgress ?? true);
+  const backgroundTask = reactNativeOptions?.backgroundTask;
+  const needsBackgroundTasks = !!backgroundTask && backgroundTask.enabled !== false;
   return {
     needsCookies: !!(options.jar || defaultOptions.jar),
     needsProxy: !!options.proxy,
-    needsStreaming: !!internal._isStream,
+    needsStreaming: !!internal._isStream || responseType === "stream",
     needsHttp2: false,
-    needsUploadProgress: !!internal._isUpload,
-    needsDownloadProgress: !!internal._isDownload,
+    needsUploadProgress: !!internal._isUpload || responseType === "upload",
+    needsDownloadProgress: !!internal._isDownload || responseType === "download",
     needsFileDownload: !!(internal.fileName || internal.saveTo),
+    needsBackgroundTasks,
+    reactNative: {
+      hasFileSystemAdapter,
+      hasStreamTransport: !!reactNativeOptions?.streamTransport,
+      hasFileDownloadSupport,
+      hasDownloadProgressSupport,
+      hasFileUploadSupport,
+      hasUploadProgressSupport,
+      hasNetworkInfoProvider: !!reactNativeOptions?.networkInfoProvider,
+      hasBackgroundTaskProvider: !!reactNativeOptions?.backgroundTaskProvider
+    },
     preferredAdapter: undefined
   };
 }
@@ -148,7 +183,7 @@ function getAvailableAdapters(runtime) {
     return ["react-native", "fetch"];
   }
   if (runtime.isBrowser || runtime.isWebWorker) {
-    return ["fetch", "xhr"];
+    return ["xhr", "fetch"];
   }
   if (runtime.isEdge) {
     return ["fetch"];
@@ -163,27 +198,48 @@ function getAvailableAdapters(runtime) {
 }
 function scoreAdapter(adapter, context, runtime) {
   const caps = getAdapterCapabilities(adapter);
+  const effectiveCaps = runtime.isReactNative && adapter === "react-native" ? {
+    ...caps,
+    streaming: context.reactNative?.hasStreamTransport ?? caps.streaming,
+    fileDownload: context.reactNative?.hasFileDownloadSupport ?? caps.fileDownload,
+    downloadProgress: context.reactNative?.hasDownloadProgressSupport ?? caps.downloadProgress,
+    uploadProgress: context.reactNative?.hasUploadProgressSupport ?? caps.uploadProgress,
+    backgroundTasks: context.reactNative?.hasBackgroundTaskProvider ?? caps.backgroundTasks
+  } : runtime.isReactNative && adapter === "fetch" ? {
+    ...caps,
+    streaming: false,
+    uploadProgress: false,
+    downloadProgress: false,
+    fileDownload: false,
+    backgroundTasks: false
+  } : caps;
   let score = 100;
-  if (context.needsCookies && !caps.cookies) {
+  if (context.needsCookies && !effectiveCaps.cookies) {
     return -1;
   }
-  if (context.needsProxy && !caps.proxy) {
+  if (context.needsProxy && !effectiveCaps.proxy) {
     return -1;
   }
-  if (context.needsHttp2 && !caps.http2) {
+  if (context.needsHttp2 && !effectiveCaps.http2) {
     score -= 30;
   }
-  if (context.needsStreaming && caps.streaming) {
+  if (runtime.isReactNative && context.needsBackgroundTasks && !effectiveCaps.backgroundTasks) {
+    return -1;
+  }
+  if (context.needsStreaming && effectiveCaps.streaming) {
     score += 20;
   }
-  if (context.needsUploadProgress && caps.uploadProgress) {
+  if (context.needsUploadProgress && effectiveCaps.uploadProgress) {
     score += 10;
   }
-  if (context.needsDownloadProgress && caps.downloadProgress) {
+  if (context.needsDownloadProgress && effectiveCaps.downloadProgress) {
     score += 10;
   }
-  if (context.needsFileDownload && caps.fileDownload) {
+  if (context.needsFileDownload && effectiveCaps.fileDownload) {
     score += 15;
+  }
+  if (context.needsBackgroundTasks && effectiveCaps.backgroundTasks) {
+    score += 12;
   }
   if (runtime.isNode || runtime.isBun) {
     if (adapter === "http" || adapter === "http2") {
@@ -191,8 +247,10 @@ function scoreAdapter(adapter, context, runtime) {
     }
   }
   if (runtime.isBrowser) {
-    if (adapter === "fetch") {
+    if (adapter === "xhr") {
       score += 15;
+    } else if (adapter === "fetch") {
+      score += 5;
     }
   }
   if (runtime.isReactNative) {
@@ -205,7 +263,7 @@ function scoreAdapter(adapter, context, runtime) {
       score += 25;
     }
   }
-  const featureCount = Object.values(caps).filter(Boolean).length;
+  const featureCount = Object.values(effectiveCaps).filter(Boolean).length;
   score += featureCount * 2;
   return score;
 }

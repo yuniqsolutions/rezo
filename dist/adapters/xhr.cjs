@@ -1,21 +1,125 @@
 const { RezoError } = require('../errors/rezo-error.cjs');
 const { buildSmartError, builErrorFromResponse } = require('../responses/buildError.cjs');
-const { Cookie } = require('../utils/cookies.cjs');
+const { Cookie } = require('../cookies/cookie-jar.cjs');
 const RezoFormData = require('../utils/form-data.cjs');
-const { getDefaultConfig, prepareHTTPOptions } = require('../utils/http-config.cjs');
+const { getDefaultConfig, prepareHTTPOptions, calculateRetryDelay, shouldRetry } = require('../utils/http-config.cjs');
 const { RezoHeaders } = require('../utils/headers.cjs');
 const { RezoURLSearchParams } = require('../utils/data-operations.cjs');
-const { StreamResponse } = require('../responses/stream.cjs');
-const { DownloadResponse } = require('../responses/download.cjs');
-const { UploadResponse } = require('../responses/upload.cjs');
+const { StreamResponse } = require('../responses/universal/stream.cjs');
+const { DownloadResponse } = require('../responses/universal/download.cjs');
+const { UploadResponse } = require('../responses/universal/upload.cjs');
 const { RezoPerformance } = require('../utils/tools.cjs');
-const { ResponseCache } = require('../cache/response-cache.cjs');
+const { ResponseCache } = require('../cache/universal-response-cache.cjs');
+const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
 const Environment = {
   isBrowser: typeof window !== "undefined" && typeof document !== "undefined",
   hasXHR: typeof XMLHttpRequest !== "undefined",
   hasFormData: typeof FormData !== "undefined",
   hasBlob: typeof Blob !== "undefined"
 };
+const debugLog = {
+  requestStart: (config, url, method) => {
+    if (config.debug) {
+      console.log(`
+[Rezo Debug] ─────────────────────────────────────`);
+      console.log(`[Rezo Debug] ${method} ${url}`);
+      console.log(`[Rezo Debug] Request ID: ${config.requestId}`);
+      console.log(`[Rezo Debug] Adapter: xhr`);
+      if (config.originalRequest?.headers) {
+        const headers = config.originalRequest.headers instanceof RezoHeaders ? config.originalRequest.headers.toObject() : config.originalRequest.headers;
+        console.log(`[Rezo Debug] Request Headers:`, JSON.stringify(headers, null, 2));
+      }
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track] → ${method} ${url}`);
+    }
+  },
+  retry: (config, attempt, maxRetries, statusCode, delay) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Retry ${attempt}/${maxRetries} after status ${statusCode}${delay > 0 ? ` (waiting ${delay}ms)` : ""}`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ⟳ Retry ${attempt}/${maxRetries} (status ${statusCode})`);
+    }
+  },
+  maxRetries: (config, maxRetries) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Max retries (${maxRetries}) reached, throwing error`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ✗ Max retries reached`);
+    }
+  },
+  response: (config, status, statusText, duration) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Response: ${status} ${statusText} (${duration.toFixed(2)}ms)`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track] ✓ ${status} ${statusText}`);
+    }
+  },
+  responseHeaders: (config, headers) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Response Headers:`, JSON.stringify(headers, null, 2));
+    }
+  },
+  cookies: (config, cookieCount) => {
+    if (config.debug && cookieCount > 0) {
+      console.log(`[Rezo Debug] Cookies received: ${cookieCount}`);
+    }
+  },
+  timing: (config, timing) => {
+    if (config.debug) {
+      const parts = [];
+      if (timing.ttfb)
+        parts.push(`TTFB: ${timing.ttfb.toFixed(2)}ms`);
+      if (timing.total)
+        parts.push(`Total: ${timing.total.toFixed(2)}ms`);
+      if (parts.length > 0) {
+        console.log(`[Rezo Debug] Timing: ${parts.join(" | ")}`);
+      }
+    }
+  },
+  complete: (config, url) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Request complete: ${url}`);
+      console.log(`[Rezo Debug] ─────────────────────────────────────
+`);
+    }
+  },
+  error: (config, error) => {
+    if (config.debug) {
+      console.log(`[Rezo Debug] Error: ${error instanceof Error ? error.message : error}`);
+    }
+    if (config.trackUrl) {
+      console.log(`[Rezo Track]   ✗ Error: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+};
+function updateTiming(config, timing, bodySize) {
+  const now = performance.now();
+  config.timing.domainLookupStart = config.timing.startTime;
+  config.timing.domainLookupEnd = config.timing.startTime;
+  config.timing.connectStart = config.timing.startTime;
+  config.timing.secureConnectionStart = 0;
+  config.timing.connectEnd = config.timing.startTime;
+  config.timing.requestStart = config.timing.startTime;
+  config.timing.responseStart = timing.firstByteTime || config.timing.startTime;
+  config.timing.responseEnd = now;
+  config.transfer.bodySize = bodySize;
+  config.transfer.responseSize = bodySize;
+}
+function getTimingDurations(config) {
+  const t = config.timing;
+  return {
+    total: t.responseEnd - t.startTime,
+    dns: t.domainLookupEnd - t.domainLookupStart,
+    tcp: t.secureConnectionStart > 0 ? t.secureConnectionStart - t.connectStart : t.connectEnd - t.connectStart,
+    tls: t.secureConnectionStart > 0 ? t.connectEnd - t.secureConnectionStart : undefined,
+    firstByte: t.responseStart - t.startTime,
+    download: t.responseEnd - t.responseStart
+  };
+}
 const responseCacheInstances = new Map;
 function getCacheConfigKey(option) {
   if (option === true)
@@ -83,7 +187,15 @@ function buildUrlTree(config, finalUrl) {
     const urlStr = typeof config.url === "string" ? config.url : String(config.url);
     urls.push(urlStr);
   }
-  if (finalUrl && (urls.length === 0 || urls[0] !== finalUrl)) {
+  if (config.redirectHistory && config.redirectHistory.length > 0) {
+    for (const redirect of config.redirectHistory) {
+      const redirectUrl = typeof redirect.url === "string" ? redirect.url : redirect.url?.toString?.() || "";
+      if (redirectUrl && urls[urls.length - 1] !== redirectUrl) {
+        urls.push(redirectUrl);
+      }
+    }
+  }
+  if (finalUrl && (urls.length === 0 || urls[urls.length - 1] !== finalUrl)) {
     urls.push(finalUrl);
   }
   return urls.length > 0 ? urls : [finalUrl];
@@ -253,15 +365,13 @@ async function executeRequest(options, defaultOptions, jar) {
   return response;
 }
 async function executeXHRRequest(fetchOptions, config, options, perform, streamResult, downloadResult, uploadResult) {
-  let retries = 0;
-  const retryDelay = config?.retry?.retryDelay || 0;
-  const maxRetries = config?.retry?.maxRetries || 0;
-  const incrementDelay = config?.retry?.incrementDelay || false;
-  const statusCodes = config?.retry?.statusCodes;
+  let retryAttempt = 0;
+  const retryConfig = config?.retry;
+  const startTime = performance.now();
   const timing = {
-    startTime: performance.now(),
-    startTimestamp: Date.now()
+    startTime
   };
+  config.timing.startTime = startTime;
   const ABSOLUTE_MAX_ATTEMPTS = 50;
   let totalAttempts = 0;
   config.setSignal();
@@ -278,31 +388,65 @@ async function executeXHRRequest(fetchOptions, config, options, perform, streamR
     try {
       const response = await executeSingleXHRRequest(config, fetchOptions, timing, streamResult, downloadResult, uploadResult);
       if (response instanceof RezoError) {
+        const errorStatus = response.status || 0;
+        if (shouldWaitOnStatus(errorStatus, options.waitOnStatus)) {
+          const rateLimitWaitAttempt = config._rateLimitWaitAttempt || 0;
+          const waitResult = await handleRateLimitWait({
+            status: errorStatus,
+            headers: response.response?.headers || new RezoHeaders,
+            data: response.response?.data,
+            url: fetchOptions.fullUrl || fetchOptions.url?.toString() || "",
+            method: fetchOptions.method || "GET",
+            config,
+            options,
+            currentWaitAttempt: rateLimitWaitAttempt
+          });
+          if (waitResult.shouldRetry) {
+            config._rateLimitWaitAttempt = waitResult.waitAttempt;
+            continue;
+          }
+        }
         config.errors.push({
           attempt: config.retryAttempts + 1,
           error: response,
           duration: perform.now()
         });
         perform.reset();
-        if (!config.retry) {
+        if (!retryConfig) {
           throw response;
         }
-        if (config.retry.condition) {
-          const isPassed = await config.retry.condition(response);
-          if (typeof isPassed === "boolean" && isPassed === false) {
+        const method = fetchOptions.method || "GET";
+        retryAttempt++;
+        if (retryConfig.condition) {
+          const shouldContinue = await retryConfig.condition(response, retryAttempt);
+          if (shouldContinue === false) {
+            if (retryConfig.onRetryExhausted) {
+              await retryConfig.onRetryExhausted(response, retryAttempt);
+            }
             throw response;
           }
         } else {
-          if (statusCodes && !statusCodes.includes(response.status || 0)) {
+          const canRetry = shouldRetry(response, retryAttempt, method, retryConfig);
+          if (!canRetry) {
+            if (retryAttempt > retryConfig.maxRetries) {
+              debugLog.maxRetries(config, retryConfig.maxRetries);
+              if (retryConfig.onRetryExhausted) {
+                await retryConfig.onRetryExhausted(response, retryAttempt);
+              }
+            }
             throw response;
           }
-          if (maxRetries <= retries) {
+        }
+        const currentDelay = calculateRetryDelay(retryAttempt, retryConfig.retryDelay, retryConfig.backoff, retryConfig.maxDelay);
+        debugLog.retry(config, retryAttempt, retryConfig.maxRetries, response.status || 0, currentDelay);
+        if (retryConfig.onRetry) {
+          const shouldProceed = await retryConfig.onRetry(response, retryAttempt, currentDelay);
+          if (shouldProceed === false) {
             throw response;
           }
-          retries++;
-          if (retryDelay > 0) {
-            await new Promise((resolve) => setTimeout(resolve, incrementDelay ? retryDelay * retries : retryDelay));
-          }
+        }
+        if (currentDelay > 0) {
+          await new Promise((resolve) => setTimeout(resolve, currentDelay));
         }
         config.retryAttempts++;
         continue;
@@ -326,7 +470,7 @@ function executeSingleXHRRequest(config, fetchOptions, timing, streamResult, dow
       config.isSecure = isSecure;
       config.finalUrl = url;
       config.network.protocol = isSecure ? "https" : "http";
-      config.timing.startTimestamp = timing.startTimestamp;
+      debugLog.requestStart(config, url, fetchOptions.method?.toUpperCase() || "GET");
       const xhr = new XMLHttpRequest;
       xhr.open(fetchOptions.method.toUpperCase(), url, true);
       const headers = toXHRHeaders(fetchOptions.headers);
@@ -348,9 +492,7 @@ function executeSingleXHRRequest(config, fetchOptions, timing, streamResult, dow
       if (config.timeout) {
         xhr.timeout = config.timeout;
       }
-      if (config.enableCookieJar) {
-        xhr.withCredentials = true;
-      }
+      xhr.withCredentials = config.withCredentials === true;
       const eventEmitter = streamResult || downloadResult || uploadResult;
       if (eventEmitter) {
         const reqHeaders = fetchOptions.headers instanceof RezoHeaders ? fetchOptions.headers.toObject() : fetchOptions.headers || {};
@@ -369,48 +511,67 @@ function executeSingleXHRRequest(config, fetchOptions, timing, streamResult, dow
           xhr.abort();
         });
       }
+      const downloadStartTime = performance.now();
+      let lastDownloadBytes = 0;
+      let lastDownloadTime = downloadStartTime;
       xhr.onprogress = (event) => {
-        if (!config.timing.ttfbMs) {
+        if (!timing.firstByteTime) {
           timing.firstByteTime = performance.now();
-          config.timing.ttfbMs = timing.firstByteTime - timing.startTime;
+          config.timing.responseStart = timing.firstByteTime;
         }
         if (eventEmitter) {
+          const now = performance.now();
+          const elapsed = now - downloadStartTime;
+          const chunkSize = event.loaded - lastDownloadBytes;
+          const chunkTime = now - lastDownloadTime;
+          const speed = chunkTime > 0 ? chunkSize / (chunkTime / 1000) : 0;
+          const averageSpeed = elapsed > 0 ? event.loaded / (elapsed / 1000) : 0;
+          const remaining = event.total > event.loaded && averageSpeed > 0 ? (event.total - event.loaded) / averageSpeed * 1000 : 0;
+          lastDownloadBytes = event.loaded;
+          lastDownloadTime = now;
           const progressEvent = {
             loaded: event.loaded,
             total: event.total || 0,
-            percentage: event.total ? Math.round(event.loaded / event.total * 100) : 0,
-            speed: 0,
-            averageSpeed: 0,
-            estimatedTime: 0,
-            timestamp: Date.now()
+            percentage: event.total ? event.loaded / event.total * 100 : 0,
+            speed,
+            averageSpeed,
+            estimatedTime: remaining,
+            timestamp: now
           };
           eventEmitter.emit("progress", progressEvent);
-          eventEmitter.emit("download-progress", progressEvent);
         }
       };
       if (xhr.upload && uploadResult) {
+        const uploadStartTime = performance.now();
+        let lastUploadBytes = 0;
+        let lastUploadTime = uploadStartTime;
         xhr.upload.onprogress = (event) => {
+          const now = performance.now();
+          const elapsed = now - uploadStartTime;
+          const chunkSize = event.loaded - lastUploadBytes;
+          const chunkTime = now - lastUploadTime;
+          const speed = chunkTime > 0 ? chunkSize / (chunkTime / 1000) : 0;
+          const averageSpeed = elapsed > 0 ? event.loaded / (elapsed / 1000) : 0;
+          const remaining = event.total > event.loaded && averageSpeed > 0 ? (event.total - event.loaded) / averageSpeed * 1000 : 0;
+          lastUploadBytes = event.loaded;
+          lastUploadTime = now;
           const progressEvent = {
             loaded: event.loaded,
             total: event.total || 0,
-            percentage: event.total ? Math.round(event.loaded / event.total * 100) : 0,
-            speed: 0,
-            averageSpeed: 0,
-            estimatedTime: 0,
-            timestamp: Date.now()
+            percentage: event.total ? event.loaded / event.total * 100 : 0,
+            speed,
+            averageSpeed,
+            estimatedTime: remaining,
+            timestamp: now
           };
           uploadResult.emit("progress", progressEvent);
-          uploadResult.emit("upload-progress", progressEvent);
         };
       }
       xhr.onload = () => {
-        if (!config.timing.ttfbMs) {
+        if (!timing.firstByteTime) {
           timing.firstByteTime = performance.now();
-          config.timing.ttfbMs = timing.firstByteTime - timing.startTime;
+          config.timing.responseStart = timing.firstByteTime;
         }
-        config.timing.endTimestamp = Date.now();
-        config.timing.durationMs = performance.now() - timing.startTime;
-        config.timing.transferMs = timing.firstByteTime ? performance.now() - timing.firstByteTime : config.timing.durationMs;
         const status = xhr.status;
         const statusText = xhr.statusText;
         const responseHeaders = parseXHRHeaders(xhr);
@@ -427,8 +588,8 @@ function executeSingleXHRRequest(config, fetchOptions, timing, streamResult, dow
             contentLength: contentLength ? parseInt(contentLength, 10) : undefined,
             cookies: cookies.array,
             timing: {
-              firstByte: config.timing.ttfbMs,
-              total: performance.now() - timing.startTime
+              firstByte: config.timing.responseStart - config.timing.startTime,
+              total: performance.now() - config.timing.startTime
             }
           };
           eventEmitter.emit("headers", headersEvent);
@@ -472,9 +633,9 @@ function executeSingleXHRRequest(config, fetchOptions, timing, streamResult, dow
             responseData = text;
           }
         }
-        config.transfer.bodySize = bodySize;
-        config.transfer.responseSize = bodySize;
-        if (status >= 400) {
+        updateTiming(config, timing, bodySize);
+        const _validateStatus = fetchOptions.validateStatus ?? ((s) => s >= 200 && s < 300);
+        if (fetchOptions.validateStatus !== null && !_validateStatus(status)) {
           const error = builErrorFromResponse(`HTTP Error ${status}: ${statusText}`, {
             status,
             statusText,
@@ -487,6 +648,15 @@ function executeSingleXHRRequest(config, fetchOptions, timing, streamResult, dow
           resolve(error);
           return;
         }
+        const duration = performance.now() - timing.startTime;
+        debugLog.response(config, status, statusText, duration);
+        debugLog.responseHeaders(config, responseHeaders.toObject());
+        debugLog.cookies(config, cookies.array.length);
+        debugLog.timing(config, {
+          ttfb: config.timing.responseStart - config.timing.startTime,
+          total: duration
+        });
+        debugLog.complete(config, xhr.responseURL || url);
         const finalResponse = {
           data: responseData,
           status,
@@ -509,19 +679,12 @@ function executeSingleXHRRequest(config, fetchOptions, timing, streamResult, dow
             finalUrl: xhr.responseURL || url,
             cookies,
             urls: buildUrlTree(config, xhr.responseURL || url),
-            timing: {
-              total: config.timing.durationMs || 0,
-              dns: config.timing.dnsMs,
-              tcp: config.timing.tcpMs,
-              tls: config.timing.tlsMs,
-              firstByte: config.timing.ttfbMs,
-              download: config.timing.transferMs
-            },
+            timing: getTimingDurations(config),
             config: sanitizeConfig(config)
           };
           streamResult.emit("finish", streamFinishEvent);
           streamResult.emit("done", streamFinishEvent);
-          streamResult.emit("end");
+          streamResult.emit("complete", streamFinishEvent);
           streamResult._markFinished();
         }
         if (downloadResult) {
@@ -537,18 +700,15 @@ function executeSingleXHRRequest(config, fetchOptions, timing, streamResult, dow
             fileName: config.fileName || "",
             fileSize: bodySize,
             timing: {
-              total: config.timing.durationMs || 0,
-              dns: config.timing.dnsMs,
-              tcp: config.timing.tcpMs,
-              tls: config.timing.tlsMs,
-              firstByte: config.timing.ttfbMs,
-              download: config.timing.transferMs || 0
+              ...getTimingDurations(config),
+              download: getTimingDurations(config).download || 0
             },
-            averageSpeed: config.timing.transferMs ? bodySize / config.timing.transferMs * 1000 : 0,
+            averageSpeed: getTimingDurations(config).download ? bodySize / getTimingDurations(config).download * 1000 : 0,
             config: sanitizeConfig(config)
           };
           downloadResult.emit("finish", downloadFinishEvent);
           downloadResult.emit("done", downloadFinishEvent);
+          downloadResult.emit("complete", downloadFinishEvent);
           downloadResult._markFinished();
         }
         if (uploadResult) {
@@ -566,20 +726,17 @@ function executeSingleXHRRequest(config, fetchOptions, timing, streamResult, dow
             urls: buildUrlTree(config, xhr.responseURL || url),
             uploadSize: config.transfer.requestSize || 0,
             timing: {
-              total: config.timing.durationMs || 0,
-              dns: config.timing.dnsMs,
-              tcp: config.timing.tcpMs,
-              tls: config.timing.tlsMs,
-              upload: config.timing.transferMs || 0,
-              waiting: config.timing.ttfbMs || 0,
-              download: config.timing.transferMs
+              ...getTimingDurations(config),
+              upload: getTimingDurations(config).firstByte || 0,
+              waiting: getTimingDurations(config).download > 0 && getTimingDurations(config).firstByte > 0 ? getTimingDurations(config).download - getTimingDurations(config).firstByte : 0
             },
-            averageUploadSpeed: config.timing.transferMs ? (config.transfer.requestSize || 0) / config.timing.transferMs * 1000 : 0,
-            averageDownloadSpeed: config.timing.transferMs ? bodySize / config.timing.transferMs * 1000 : 0,
+            averageUploadSpeed: getTimingDurations(config).firstByte && config.transfer.requestSize ? config.transfer.requestSize / getTimingDurations(config).firstByte * 1000 : 0,
+            averageDownloadSpeed: getTimingDurations(config).download ? bodySize / getTimingDurations(config).download * 1000 : 0,
             config: sanitizeConfig(config)
           };
           uploadResult.emit("finish", uploadFinishEvent);
           uploadResult.emit("done", uploadFinishEvent);
+          uploadResult.emit("complete", uploadFinishEvent);
           uploadResult._markFinished();
         }
         resolve(finalResponse);

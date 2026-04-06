@@ -24,7 +24,8 @@ function createDefaultHooks() {
     onDns: [],
     onTls: [],
     onTimeout: [],
-    onAbort: []
+    onAbort: [],
+    onRateLimitWait: []
   };
 }
 function mergeHooks(base, overrides) {
@@ -55,7 +56,8 @@ function mergeHooks(base, overrides) {
     onDns: [...base.onDns, ...overrides.onDns || []],
     onTls: [...base.onTls, ...overrides.onTls || []],
     onTimeout: [...base.onTimeout, ...overrides.onTimeout || []],
-    onAbort: [...base.onAbort, ...overrides.onAbort || []]
+    onAbort: [...base.onAbort, ...overrides.onAbort || []],
+    onRateLimitWait: [...base.onRateLimitWait, ...overrides.onRateLimitWait || []]
   };
 }
 function serializeHooks(hooks) {

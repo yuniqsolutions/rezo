@@ -24,13 +24,15 @@ class HttpQueue extends RezoQueue {
   httpConfig;
   constructor(config = {}) {
     super(config);
+    const autoRetry = config.autoRetry ?? config.retryOnRateLimit ?? false;
     this.httpConfig = {
       ...this.config,
       domainConcurrency: config.domainConcurrency ?? 1 / 0,
       requestsPerSecond: config.requestsPerSecond ?? 0,
       respectRetryAfter: config.respectRetryAfter ?? true,
       respectRateLimitHeaders: config.respectRateLimitHeaders ?? true,
-      autoRetry: config.autoRetry ?? false,
+      autoRetry,
+      retryOnRateLimit: autoRetry,
       maxRetries: config.maxRetries ?? 3,
       retryDelay: config.retryDelay ?? 1000,
       retryStatusCodes: config.retryStatusCodes ?? [429, 500, 502, 503, 504]
@@ -146,14 +148,28 @@ class HttpQueue extends RezoQueue {
     }
     return false;
   }
-  onHttp(event, handler) {
-    if (!this.httpEventHandlers.has(event)) {
-      this.httpEventHandlers.set(event, new Set);
+  on(event, handler) {
+    if (event === "rateLimited" || event === "domainAvailable" || event === "retry") {
+      if (!this.httpEventHandlers.has(event)) {
+        this.httpEventHandlers.set(event, new Set);
+      }
+      this.httpEventHandlers.get(event).add(handler);
+    } else {
+      super.on(event, handler);
     }
-    this.httpEventHandlers.get(event).add(handler);
+  }
+  off(event, handler) {
+    if (event === "rateLimited" || event === "domainAvailable" || event === "retry") {
+      this.httpEventHandlers.get(event)?.delete(handler);
+    } else {
+      super.off(event, handler);
+    }
+  }
+  onHttp(event, handler) {
+    this.on(event, handler);
   }
   offHttp(event, handler) {
-    this.httpEventHandlers.get(event)?.delete(handler);
+    this.off(event, handler);
   }
   clearHttp() {
     for (const [domain, queue] of this.domainQueues.entries()) {

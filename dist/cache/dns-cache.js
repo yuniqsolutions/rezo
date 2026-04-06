@@ -1,5 +1,5 @@
 import { LRUCache } from './lru-cache.js';
-import dns from "dns";
+import dns from "node:dns";
 const DEFAULT_DNS_TTL = 60000;
 const DEFAULT_DNS_MAX_ENTRIES = 1000;
 
@@ -24,10 +24,12 @@ export class DNSCache {
     const cached = this.cache.get(key);
     if (cached && cached.addresses.length > 0) {
       const address = cached.addresses[Math.floor(Math.random() * cached.addresses.length)];
-      return { address, family: cached.family };
+      if (address && typeof address === "string") {
+        return { address, family: cached.family };
+      }
     }
     const result = await this.resolveDNS(hostname, family);
-    if (result) {
+    if (result && result.address && typeof result.address === "string") {
       this.cache.set(key, {
         addresses: [result.address],
         family: result.family,
