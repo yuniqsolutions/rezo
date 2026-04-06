@@ -7,7 +7,7 @@ const { MemoryMonitor } = require('./plugin/memory-monitor.cjs');
 const { HealthMetrics } = require('./plugin/health-metrics.cjs');
 const { CappedMap } = require('./plugin/capped-map.cjs');
 const { CappedArray } = require('./plugin/capped-array.cjs');
-const { parseHTML } = require("linkedom");
+const { parseHTML } = require('../dom/index.cjs');
 const path = require("node:path");
 import rezo, { Rezo } from '../index.cjs';
 const { RezoQueue } = require('../queue/queue.cjs');

@@ -6023,7 +6023,7 @@ export interface RezoInstance extends Rezo, RezoCallable {
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.126";
+export declare const VERSION = "1.0.127";
 /**
  * cURL Options Configuration
  *

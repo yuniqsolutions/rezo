@@ -1,6 +1,6 @@
 {
   "name": "rezo",
-  "version": "1.0.126",
+  "version": "1.0.127",
   "description": "Lightning-fast, enterprise-grade HTTP client for modern JavaScript. Full HTTP/2 support, intelligent cookie management, multiple adapters (HTTP, Fetch, cURL, XHR), streaming, proxy support (HTTP/HTTPS/SOCKS), and cross-environment compatibility.",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
@@ -62,7 +62,6 @@
   },
   "dependencies": {
     "tough-cookie": "^6.0.1",
-    "linkedom": "^0.18.12",
     "ua-parser-js": "^2.0.9"
   },
   "devDependencies": {
@@ -127,8 +126,8 @@
       "crawler": [
         "dist/crawler.d.ts"
       ],
-      "dom": [
-        "dist/dom/index.d.ts"
+      "wget": [
+        "dist/wget/index.d.ts"
       ]
     }
   },
@@ -216,11 +215,6 @@
       "import": "./dist/entries/crawler.js",
       "require": "./dist/entries/crawler.cjs"
     },
-    "./dom": {
-      "types": "./dist/dom/index.d.ts",
-      "import": "./dist/dom/index.js",
-      "require": "./dist/dom/index.cjs"
-    },
     "./wget": {
       "types": "./dist/wget/index.d.ts",
       "import": "./dist/wget/index.js",
@@ -236,6 +230,14 @@
     "./dist/utils/cookies.cjs": "./dist/utils/cookies.browser.cjs",
     "./dist/cache/response-cache.js": "./dist/cache/universal-response-cache.js",
     "./dist/cache/response-cache.cjs": "./dist/cache/universal-response-cache.cjs"
+  },
+  "peerDependencies": {
+    "linkedom": ">=0.16.0"
+  },
+  "peerDependenciesMeta": {
+    "linkedom": {
+      "optional": true
+    }
   },
   "react-native": {
     "./dist/platform/node.js": "./dist/platform/react-native.js",

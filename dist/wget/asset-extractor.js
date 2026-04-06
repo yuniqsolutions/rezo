@@ -1,4 +1,4 @@
-import { parseHTML, DOMParser } from '../dom/index.js';
+import { parseHTML, createDOMParser } from '../dom/index.js';
 const HTML_URL_ATTRIBUTES = {
   a: ["href"],
   area: ["href"],
@@ -316,7 +316,7 @@ export class AssetExtractor {
   extractFromXML(xml, baseUrl) {
     const assets = [];
     try {
-      const parser = new DOMParser;
+      const parser = createDOMParser();
       const doc = parser.parseFromString(xml, "text/xml");
       const isSVG = doc.documentElement?.tagName.toLowerCase() === "svg";
       const source = isSVG ? "svg" : "xml";

@@ -7,7 +7,7 @@ import { MemoryMonitor } from './plugin/memory-monitor.js';
 import { HealthMetrics } from './plugin/health-metrics.js';
 import { CappedMap } from './plugin/capped-map.js';
 import { CappedArray } from './plugin/capped-array.js';
-import { parseHTML } from "linkedom";
+import { parseHTML } from '../dom/index.js';
 import path from "node:path";
 import rezo, { Rezo } from '../index.js';
 import { RezoQueue } from '../queue/queue.js';

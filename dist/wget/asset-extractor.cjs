@@ -1,4 +1,4 @@
-const { parseHTML, DOMParser } = require('../dom/index.cjs');
+const { parseHTML, createDOMParser } = require('../dom/index.cjs');
 const HTML_URL_ATTRIBUTES = {
   a: ["href"],
   area: ["href"],
@@ -316,7 +316,7 @@ class AssetExtractor {
   extractFromXML(xml, baseUrl) {
     const assets = [];
     try {
-      const parser = new DOMParser;
+      const parser = createDOMParser();
       const doc = parser.parseFromString(xml, "text/xml");
       const isSVG = doc.documentElement?.tagName.toLowerCase() === "svg";
       const source = isSVG ? "svg" : "xml";
