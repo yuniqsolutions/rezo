@@ -6027,7 +6027,7 @@ export interface RezoInstance extends Rezo, RezoCallable {
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.130";
+export declare const VERSION = "1.0.131";
 export declare const isRezoError: typeof RezoError.isRezoError;
 export declare const Cancel: typeof RezoError;
 export declare const CancelToken: {

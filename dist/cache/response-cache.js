@@ -1,7 +1,11 @@
 import { LRUCache } from './lru-cache.js';
-import fs from "node:fs";
-import path from "node:path";
-const fsPromises = fs.promises;
+import { requireNodeModule } from '../utils/node-runtime.js';
+function getFsModule() {
+  return requireNodeModule("node:fs");
+}
+function getPathModule() {
+  return requireNodeModule("node:path");
+}
 const DEFAULT_TTL = 3000000;
 const DEFAULT_MAX_ENTRIES = 500;
 const DEFAULT_METHODS = ["GET", "HEAD"];
@@ -22,7 +26,7 @@ export class ResponseCache {
       methods: config.methods ?? DEFAULT_METHODS,
       respectHeaders: config.respectHeaders ?? true
     };
-    this.persistenceEnabled = !!this.config.cacheDir;
+    this.persistenceEnabled = !!this.config.cacheDir && !!getFsModule() && !!getPathModule();
     this.memoryCache = new LRUCache({
       maxEntries: this.config.maxEntries,
       ttl: this.config.ttl,
@@ -42,8 +46,13 @@ export class ResponseCache {
   async initializePersistenceAsync() {
     if (!this.config.cacheDir)
       return;
+    const fs = getFsModule();
+    if (!fs?.promises) {
+      this.persistenceEnabled = false;
+      return;
+    }
     try {
-      await fsPromises.mkdir(this.config.cacheDir, { recursive: true });
+      await fs.promises.mkdir(this.config.cacheDir, { recursive: true });
       await this.loadFromDiskAsync();
       this.initialized = true;
     } catch {
@@ -51,34 +60,42 @@ export class ResponseCache {
     }
   }
   getCacheFilePath(key) {
+    const path = getPathModule();
     const safeKey = Buffer.from(key).toString("base64url");
-    return path.join(this.config.cacheDir, `${safeKey}.json`);
+    return path && this.config.cacheDir ? path.join(this.config.cacheDir, `${safeKey}.json`) : `${this.config.cacheDir || ""}/${safeKey}.json`;
   }
   persistToDisk(key, entry) {
     if (!this.persistenceEnabled || !this.config.cacheDir)
       return;
+    const fs = getFsModule();
+    if (!fs?.promises)
+      return;
     const filePath = this.getCacheFilePath(key);
-    fsPromises.writeFile(filePath, JSON.stringify(entry), "utf-8").catch(() => {});
+    fs.promises.writeFile(filePath, JSON.stringify(entry), "utf-8").catch(() => {});
   }
   async loadFromDiskAsync() {
     if (!this.persistenceEnabled || !this.config.cacheDir)
       return;
+    const fs = getFsModule();
+    const path = getPathModule();
+    if (!fs?.promises || !path)
+      return;
     try {
-      const files = await fsPromises.readdir(this.config.cacheDir);
+      const files = await fs.promises.readdir(this.config.cacheDir);
       const now = Date.now();
       for (const file of files) {
         if (!file.endsWith(".json"))
           continue;
         try {
           const filePath = path.join(this.config.cacheDir, file);
-          const content = await fsPromises.readFile(filePath, "utf-8");
+          const content = await fs.promises.readFile(filePath, "utf-8");
           const entry = JSON.parse(content);
           if (entry.timestamp + entry.ttl > now) {
             const key = Buffer.from(file.replace(".json", ""), "base64url").toString("utf-8");
             const remainingTTL = entry.timestamp + entry.ttl - now;
             this.memoryCache.set(key, entry, remainingTTL);
           } else {
-            fsPromises.unlink(filePath).catch(() => {});
+            fs.promises.unlink(filePath).catch(() => {});
           }
         } catch {}
       }
@@ -144,6 +161,9 @@ export class ResponseCache {
   }
   loadSingleFromDisk(key) {
     if (!this.persistenceEnabled || !this.config.cacheDir)
+      return;
+    const fs = getFsModule();
+    if (!fs)
       return;
     try {
       const filePath = this.getCacheFilePath(key);
@@ -241,7 +261,8 @@ export class ResponseCache {
         this.memoryCache.delete(key);
         if (this.persistenceEnabled) {
           const filePath = this.getCacheFilePath(key);
-          fsPromises.unlink(filePath).catch(() => {});
+          const fs = getFsModule();
+          fs?.promises?.unlink(filePath).catch(() => {});
         }
         return;
       }
@@ -270,18 +291,23 @@ export class ResponseCache {
       this.memoryCache.delete(key);
       if (this.persistenceEnabled) {
         const filePath = this.getCacheFilePath(key);
-        fsPromises.unlink(filePath).catch(() => {});
+        const fs = getFsModule();
+        fs?.promises?.unlink(filePath).catch(() => {});
       }
     }
   }
   clear() {
     this.memoryCache.clear();
     if (this.persistenceEnabled && this.config.cacheDir) {
+      const fs = getFsModule();
+      const path = getPathModule();
+      if (!fs?.promises || !path)
+        return;
       const cacheDir = this.config.cacheDir;
-      fsPromises.readdir(cacheDir).then((files) => {
+      fs.promises.readdir(cacheDir).then((files) => {
         for (const file of files) {
           if (file.endsWith(".json")) {
-            fsPromises.unlink(path.join(cacheDir, file)).catch(() => {});
+            fs.promises.unlink(path.join(cacheDir, file)).catch(() => {});
           }
         }
       }).catch(() => {});
