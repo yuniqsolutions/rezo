@@ -347,7 +347,7 @@ export declare class RezoCookieJar extends TouchCookieJar {
 	 * @param filePath - Path to the cookie file
 	 * @param defaultUrl - Default URL for cookies without domain (optional)
 	 */
-	loadFromFile(filePath: string, defaultUrl?: string): void;
+	loadFromFile(filePath: string, _defaultUrl?: string): void;
 	/**
 	 * Save cookies to a file.
 	 * - .json files save cookies as serialized JSON
@@ -2314,7 +2314,7 @@ export declare class RezoQueue<T = any> {
 	private intervalId?;
 	private intervalCount;
 	readonly name: string;
-	private intervalStart;
+	private _intervalStart;
 	private eventHandlers;
 	private statsData;
 	private totalDuration;
@@ -4583,6 +4583,10 @@ export type RezoHttpOptionsRequest = Omit<RezoHttpRequest, "data" | "body">;
  * @internal - Do not use internally within the library
  */
 export type RezoRequestOptions = Omit<RezoRequestConfig, "fullUrl">;
+/**
+ * Helper types for GET method with specific response types
+ * These ensure responseType is properly typed without conflicts
+ */
 export interface httpAdapterOverloads {
 	request<T = any>(options: RezoRequestOptions): Promise<RezoResponse<T>>;
 	request<T = any>(options: RezoRequestOptions & {
@@ -5741,7 +5745,7 @@ export declare class Rezo {
 	 * ```
 	 */
 	buildUri(config: string | URL | BuildUriOptions): RezoUri;
-	private isvalidJson;
+	private _isvalidJson;
 	/**
 	 * Deep-merge two request configs. Headers and params are merged (not replaced).
 	 * Properties from config2 take precedence over config1.
@@ -5800,7 +5804,7 @@ export declare class Rezo {
 			requestLimit?: number;
 		};
 	}): AsyncGenerator<T, void, undefined>;
-	private __create;
+	private _create;
 	/** Get the cookie jar for this instance */
 	get jar(): RezoCookieJar;
 	set jar(jar: RezoCookieJar);
@@ -6275,7 +6279,7 @@ export declare function listProfiles(): string[];
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.127";
+export declare const VERSION = "1.0.128";
 export declare const PACKAGE_NAME = "rezo";
 export declare const isRezoError: typeof RezoError.isRezoError;
 export declare const Cancel: typeof RezoError;

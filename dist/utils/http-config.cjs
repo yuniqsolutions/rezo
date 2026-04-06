@@ -825,7 +825,7 @@ function checkISPermission(currentDir, fs) {
     return false;
   }
 }
-async function checkCurl() {
+async function _checkCurl() {
   const type = getEnvironment();
   if (type !== "node" && type !== "deno" && type !== "bun") {
     return { status: false };

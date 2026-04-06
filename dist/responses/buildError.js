@@ -15,7 +15,7 @@ function traverseCauseChain(error, detector, maxDepth = 10) {
 function isSocksLikeError(error) {
   const name = error.name || "";
   const message = (error.message || "").toLowerCase();
-  const code = error.code || "";
+  const _code = error.code || "";
   if (name === "SocksClientError" || name.includes("Socks") || name.includes("SOCKS")) {
     return detectSocksError(error.message);
   }

@@ -56,7 +56,7 @@ const REQUISITE_LINK_RELS = [
   "preload",
   "modulepreload"
 ];
-function determineAssetType(url, tag, attribute, rel) {
+function determineAssetType(url, tag, _attribute, rel) {
   const lowerTag = tag.toLowerCase();
   const lowerUrl = url.toLowerCase();
   if (lowerTag === "script")

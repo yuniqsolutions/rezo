@@ -104,7 +104,7 @@ class UrlFilter {
     if (!patternResult.allowed)
       return patternResult;
     if (this.options.relativeOnly) {
-      const isAbsolute = url.startsWith("http://") || url.startsWith("https://");
+      const _isAbsolute = url.startsWith("http://") || url.startsWith("https://");
     }
     return { allowed: true };
   }

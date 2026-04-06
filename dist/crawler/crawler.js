@@ -740,7 +740,7 @@ export class Crawler {
       return;
     }
   }
-  async hasCache(url, domain) {
+  async _hasCache(url, domain) {
     if (!this.isCacheEnabled)
       return false;
     await this.waitForCache();
@@ -757,7 +757,7 @@ export class Crawler {
   sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
-  rnd(min = 0, max = Number.MAX_VALUE) {
+  _rnd(min = 0, max = Number.MAX_VALUE) {
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
   onError(handler) {
@@ -1148,7 +1148,7 @@ export class Crawler {
     }
     return { allowed: true };
   }
-  shouldFollowLink(element) {
+  _shouldFollowLink(element) {
     if (this.config.followNofollow) {
       return true;
     }

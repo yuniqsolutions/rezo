@@ -124,7 +124,7 @@ export class LinkConverter {
     });
     return stats;
   }
-  convertHTMLLinks(html, urlMap, baseFile, outputDir, pageUrl) {
+  convertHTMLLinks(html, urlMap, baseFile, _outputDir, pageUrl) {
     let linksConverted = 0;
     let linksToRelative = 0;
     let linksToAbsolute = 0;
@@ -206,7 +206,7 @@ export class LinkConverter {
       linksToAbsolute
     };
   }
-  convertCSSLinks(css, urlMap, baseFile, outputDir, pageUrl) {
+  convertCSSLinks(css, urlMap, baseFile, _outputDir, pageUrl) {
     let linksConverted = 0;
     let linksToRelative = 0;
     let linksToAbsolute = 0;

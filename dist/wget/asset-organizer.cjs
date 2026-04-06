@@ -192,7 +192,7 @@ class AssetOrganizer {
       return "asset";
     }
   }
-  resolveCollision(basePath, hash) {
+  resolveCollision(basePath, _hash) {
     const existingVersion = this.filenameVersions.get(basePath);
     if (existingVersion === undefined) {
       this.filenameVersions.set(basePath, 1);

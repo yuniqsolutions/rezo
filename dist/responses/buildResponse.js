@@ -192,7 +192,7 @@ function parseResponseBodyWithAutoDetect(data, contentType, config) {
   }
   return data;
 }
-function parseResponseBody(data, contentType, responseType) {
+function _parseResponseBody(data, contentType, responseType) {
   if (contentType && jsonRelatedTypes.some((type) => contentType.includes(type))) {
     return parseJsonData(data);
   }

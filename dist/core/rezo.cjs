@@ -543,7 +543,7 @@ class Rezo {
     appendParams(url, serializerOpts);
     return url;
   }
-  isvalidJson(str) {
+  _isvalidJson(str) {
     try {
       return JSON.parse(str) ? true : false;
     } catch {
@@ -592,7 +592,7 @@ class Rezo {
       }
     }
   }
-  __create(config) {
+  _create(config) {
     return new Rezo(config, this.adapter);
   }
   get jar() {

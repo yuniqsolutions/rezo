@@ -9,7 +9,7 @@ class RezoQueue {
   intervalId;
   intervalCount = 0;
   name;
-  intervalStart = 0;
+  _intervalStart = 0;
   eventHandlers = new Map;
   statsData = {
     added: 0,
@@ -372,7 +372,7 @@ class RezoQueue {
     this.statsData.throughput = this.throughputWindow.length / this.throughputWindowSize;
   }
   startInterval() {
-    this.intervalStart = Date.now();
+    this._intervalStart = Date.now();
     this.intervalCount = 0;
     this.intervalId = setInterval(() => {
       if (!this.config.carryoverConcurrencyCount) {
@@ -380,7 +380,7 @@ class RezoQueue {
       } else {
         this.intervalCount = Math.max(0, this.intervalCount - this.config.intervalCap);
       }
-      this.intervalStart = Date.now();
+      this._intervalStart = Date.now();
       this.tryRunNext();
     }, this.config.interval);
   }

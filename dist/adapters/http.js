@@ -234,7 +234,7 @@ export async function executeRequest(options, defaultOptions, jar) {
   let cache;
   let requestHeaders;
   let cachedEntry;
-  let needsRevalidation = false;
+  let _needsRevalidation = false;
   if (cacheOption) {
     cache = getResponseCache(cacheOption);
     requestHeaders = config.fetchOptions.headers instanceof RezoHeaders ? Object.fromEntries(config.fetchOptions.headers.entries()) : config.fetchOptions.headers;
@@ -242,7 +242,7 @@ export async function executeRequest(options, defaultOptions, jar) {
     if (cachedEntry) {
       const cacheControl = parseCacheControlFromHeaders(cachedEntry.headers);
       if (cacheControl.noCache || cacheControl.mustRevalidate) {
-        needsRevalidation = true;
+        _needsRevalidation = true;
       } else {
         return buildCachedRezoResponse(cachedEntry, mainConfig);
       }
@@ -704,7 +704,7 @@ async function executeHttp1Request(fetchOptions, config, options, perform, fs, s
     }
   }
 }
-async function request(config, fetchOptions, requestCount, timing, _stats, responseStatusCode, fs, streamResult, downloadResult, uploadResult, rootJar) {
+async function request(config, fetchOptions, requestCount, timing, _stats, _responseStatusCode, fs, streamResult, downloadResult, uploadResult, rootJar) {
   return await new Promise(async (resolve) => {
     try {
       const { fullUrl, body, fileName: filename } = fetchOptions;
@@ -747,7 +747,7 @@ async function request(config, fetchOptions, requestCount, timing, _stats, respo
           }
           const { statusCode, statusMessage, headers, httpVersion, socket } = res;
           const { remoteAddress, remotePort, localAddress, localPort } = socket;
-          responseStatusCode = statusCode;
+          _responseStatusCode = statusCode;
           config.network.remoteAddress = remoteAddress;
           config.network.remotePort = remotePort;
           config.network.localAddress = localAddress;
@@ -1587,7 +1587,7 @@ function buildHTTPOptions(fetchOptions, isSecure, url) {
   };
   return requestOptions;
 }
-async function setInitialConfig(config, fetchOptions, isSecure, url, httpModule, requestCount, startTime, actualTimestamp) {
+async function setInitialConfig(config, fetchOptions, isSecure, url, httpModule, requestCount, _startTime, _actualTimestamp) {
   if (requestCount === 0) {
     const { body, timeout, proxy, httpAgent, httpsAgent, fileName: filename, auth, signal } = fetchOptions;
     config.adapterUsed = isSecure ? "https" : "http";

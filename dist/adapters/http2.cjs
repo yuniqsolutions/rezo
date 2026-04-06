@@ -224,7 +224,7 @@ class Http2SessionPool {
       this.cleanupInterval.unref();
     }
   }
-  getSessionKey(url, options, proxy) {
+  getSessionKey(url, _options, proxy) {
     const proxyKey = proxy ? typeof proxy === "string" ? proxy : `${proxy.protocol}://${proxy.host}:${proxy.port}` : "";
     return `${url.protocol}//${url.host}${proxyKey ? `@${proxyKey}` : ""}`;
   }
@@ -543,7 +543,7 @@ class Http2SessionPool {
     }
   }
   closeAllSessions() {
-    for (const [key, entry] of this.sessions.entries()) {
+    for (const [_key, entry] of this.sessions.entries()) {
       entry.session.close();
     }
     this.sessions.clear();
@@ -809,7 +809,7 @@ async function executeRequest(options, defaultOptions, jar) {
   let cache;
   let requestHeaders;
   let cachedEntry;
-  let needsRevalidation = false;
+  let _needsRevalidation = false;
   if (cacheOption) {
     cache = getResponseCache(cacheOption);
     requestHeaders = fetchOptions.headers instanceof RezoHeaders ? Object.fromEntries(fetchOptions.headers.entries()) : fetchOptions.headers;
@@ -817,7 +817,7 @@ async function executeRequest(options, defaultOptions, jar) {
     if (cachedEntry) {
       const cacheControl = parseCacheControlFromHeaders(cachedEntry.headers);
       if (cacheControl.noCache || cacheControl.mustRevalidate) {
-        needsRevalidation = true;
+        _needsRevalidation = true;
       } else {
         return buildCachedRezoResponse(cachedEntry, mainConfig);
       }
@@ -962,7 +962,7 @@ async function executeHttp2Request(fetchOptions, config, options, perform, fs, s
   const visitedUrls = new Set;
   let totalAttempts = 0;
   config.setSignal();
-  const timeoutClearInstance = config.timeoutClearInstance;
+  const _timeoutClearInstance = config.timeoutClearInstance;
   delete config.timeoutClearInstance;
   if (!config.requestId) {
     config.requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
@@ -1256,7 +1256,7 @@ async function executeHttp2Request(fetchOptions, config, options, perform, fs, s
     }
   }
 }
-async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _stats, responseStatusCode, fs, streamResult, downloadResult, uploadResult, sessionPool, rootJar) {
+async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _stats, _responseStatusCode, fs, streamResult, downloadResult, uploadResult, sessionPool, rootJar) {
   return new Promise(async (resolve) => {
     try {
       const { fullUrl, body } = fetchOptions;

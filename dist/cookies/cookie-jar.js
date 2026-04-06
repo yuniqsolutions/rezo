@@ -400,8 +400,13 @@ export class RezoCookieJar extends TouchCookieJar {
   get cookieFile() {
     return this._cookieFile;
   }
-  loadFromFile(filePath, defaultUrl) {
-    const fs = require("node:fs");
+  loadFromFile(filePath, _defaultUrl) {
+    let fs;
+    try {
+      fs = require("node:fs");
+    } catch {
+      throw new Error("loadFromFile() requires Node.js, Bun, or Deno. Not available in browsers or React Native.");
+    }
     if (!fs.existsSync(filePath)) {
       this._cookieFile = filePath;
       return;
@@ -410,11 +415,11 @@ export class RezoCookieJar extends TouchCookieJar {
     const isJson = filePath.toLowerCase().endsWith(".json");
     const store = this.store;
     const putCookieSync = (cookie) => {
-      let done = false;
+      let _done = false;
       let error = null;
       store.putCookie(cookie, (err) => {
         error = err;
-        done = true;
+        _done = true;
       });
       if (error)
         throw error;
@@ -450,7 +455,12 @@ export class RezoCookieJar extends TouchCookieJar {
     if (!targetPath) {
       throw new Error("No cookie file path specified. Provide a path or load from a file first.");
     }
-    const fs = require("node:fs");
+    let fs;
+    try {
+      fs = require("node:fs");
+    } catch {
+      throw new Error("saveToFile() requires Node.js, Bun, or Deno. Not available in browsers or React Native.");
+    }
     const isJson = targetPath.toLowerCase().endsWith(".json");
     const cookies = this.cookies();
     if (isJson) {

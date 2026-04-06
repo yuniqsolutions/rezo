@@ -149,7 +149,7 @@ export class RezoFormData {
   static fromObject(obj, options) {
     const fd = new RezoFormData;
     const useNestedKeys = options?.nestedKeys || false;
-    const appendValue = (key, value, isNested) => {
+    const appendValue = (key, value, _isNested) => {
       if (value === null || value === undefined) {
         return;
       }

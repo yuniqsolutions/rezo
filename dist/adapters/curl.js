@@ -196,7 +196,7 @@ function buildUrlTree(config, finalUrl) {
   }
   return urls.length > 0 ? urls : [finalUrl];
 }
-async function updateCookies(config, cookieStrings, url, rootJar) {
+async function _updateCookies(config, cookieStrings, url, rootJar) {
   if (!cookieStrings || cookieStrings.length === 0)
     return;
   const tempJar = new RezoCookieJar;
@@ -455,18 +455,18 @@ class CurlProgressTracker extends EventEmitter {
   downloadedBytes = 0;
   uploadedBytes = 0;
   downloadSpeed = 0;
-  uploadSpeed = 0;
-  timeRemaining = 0;
-  startTime = Date.now();
+  _uploadSpeed = 0;
+  _timeRemaining = 0;
+  _startTime = Date.now();
   parseProgress(line) {
     const progressMatch = line.match(/\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d:-]+)\s+([\d:-]+)\s+([\d:-]+)\s+(\d+)/);
     if (progressMatch) {
-      const [, totalPercent, total, receivedPercent, received, xferPercent, xfer, avgDload, avgUpload, timeTotal, timeSpent, timeLeft, currentSpeed] = progressMatch;
+      const [, _totalPercent, total, _receivedPercent, received, _xferPercent, xfer, avgDload, avgUpload, _timeTotal, _timeSpent, timeLeft, currentSpeed] = progressMatch;
       this.totalBytes = parseInt(total);
       this.downloadedBytes = parseInt(received);
       this.uploadedBytes = parseInt(xfer);
       this.downloadSpeed = parseInt(avgDload);
-      this.uploadSpeed = parseInt(avgUpload);
+      this._uploadSpeed = parseInt(avgUpload);
       const progress = {
         total: this.totalBytes,
         loaded: this.downloadedBytes + this.uploadedBytes,
@@ -1372,7 +1372,7 @@ class CurlCommandBuilder {
       this.addArg("--max-time", Math.ceil(config.timeout / 1000).toString());
     }
   }
-  buildAuthentication(config, originalRequest) {
+  buildAuthentication(config, _originalRequest) {
     if (!config.auth) {
       return;
     }
@@ -1538,14 +1538,14 @@ class CurlCommandBuilder {
     this.addArg("-c", cookieJarFile);
     return cookieJarFile;
   }
-  buildConnectionOptions(config, originalRequest) {
+  buildConnectionOptions(_config, originalRequest) {
     if (originalRequest.keepAlive === false) {
       this.addArg("-H", "Connection: close");
     } else {
       this.addArg("-H", "Connection: keep-alive");
     }
   }
-  buildDownloadOptions(config, originalRequest, tempFiles) {
+  buildDownloadOptions(config, originalRequest, _tempFiles) {
     const saveTo = originalRequest.saveTo || config.fileName;
     if (saveTo) {
       this.addArg("--create-dirs");
@@ -1643,7 +1643,7 @@ class CurlCommandBuilder {
 }
 
 class CurlResponseParser {
-  static parse(stdout, stderr, config, originalRequest) {
+  static parse(stdout, _stderr, config, originalRequest) {
     const statsMarker = "---CURL_STATS_START---";
     const statsEndMarker = "---CURL_STATS_END---";
     let body = stdout;
@@ -1833,7 +1833,7 @@ class CurlResponseParser {
     };
     return statusTexts[status] || "Unknown";
   }
-  static parseCookies(headers) {
+  static _parseCookies(headers) {
     const setCookieHeaders = headers["set-cookie"];
     const cookieArray = [];
     if (setCookieHeaders) {
@@ -1947,7 +1947,7 @@ class CurlExecutor {
     }
     return url;
   }
-  async executeCurlCommand(args, config, originalRequest, tempFiles, cookieJar, streamResult, downloadResult, uploadResult) {
+  async executeCurlCommand(args, config, originalRequest, _tempFiles, _cookieJar, streamResult, downloadResult, uploadResult) {
     return new Promise((resolve, reject) => {
       const isStreaming = !!streamResult;
       const isDownload = !!downloadResult;
@@ -1958,7 +1958,7 @@ class CurlExecutor {
       let stdout = "";
       let stderr = "";
       const progressTracker = new CurlProgressTracker;
-      const startTime = performance.now();
+      const _startTime = performance.now();
       if (originalRequest.onDownloadProgress) {
         progressTracker.on("progress", (progress) => {
           originalRequest.onDownloadProgress(progress);
@@ -2212,7 +2212,7 @@ export async function executeRequest(options, defaultOptions, jar) {
   let cache;
   let requestHeaders;
   let cachedEntry;
-  let needsRevalidation = false;
+  let _needsRevalidation = false;
   const isStream = options._isStream || options.responseType === "stream";
   const isDownload = options._isDownload || !!options.fileName || !!options.saveTo || options.responseType === "download";
   const isUpload = options._isUpload || options.responseType === "upload";
@@ -2223,7 +2223,7 @@ export async function executeRequest(options, defaultOptions, jar) {
     if (cachedEntry) {
       const cacheControl = parseCacheControlFromHeaders(cachedEntry.headers);
       if (cacheControl.noCache || cacheControl.mustRevalidate) {
-        needsRevalidation = true;
+        _needsRevalidation = true;
       } else {
         return buildCachedRezoResponse(cachedEntry, config);
       }

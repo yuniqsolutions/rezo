@@ -148,7 +148,7 @@ class SocksClient extends EventEmitter {
   state = 0 /* Created */;
   receiveBuffer;
   nextRequiredPacketBufferSize = 0;
-  socks5ChosenAuthType = SOCKS5_AUTH.NoAuth;
+  _socks5ChosenAuthType = SOCKS5_AUTH.NoAuth;
   onDataReceived;
   onClose;
   onError;
@@ -387,10 +387,10 @@ class SocksClient extends EventEmitter {
       this.closeSocket(hasCredentials ? "SOCKS5 proxy rejected authentication - check username/password" : "SOCKS5 proxy requires authentication but no credentials provided");
     } else {
       if (data[1] === SOCKS5_AUTH.NoAuth) {
-        this.socks5ChosenAuthType = SOCKS5_AUTH.NoAuth;
+        this._socks5ChosenAuthType = SOCKS5_AUTH.NoAuth;
         this.sendSocks5CommandRequest();
       } else if (data[1] === SOCKS5_AUTH.UserPass) {
-        this.socks5ChosenAuthType = SOCKS5_AUTH.UserPass;
+        this._socks5ChosenAuthType = SOCKS5_AUTH.UserPass;
         this.sendSocks5UserPassAuthentication();
       } else {
         const authName = data[1] === 1 ? "GSSAPI" : `method ${data[1]}`;

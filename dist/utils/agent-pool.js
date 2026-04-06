@@ -57,7 +57,7 @@ class AgentPool {
   createLookupFunction() {
     return;
   }
-  createHttpAgent(key) {
+  createHttpAgent(_key) {
     const agentOptions = {
       keepAlive: this.config.keepAlive,
       keepAliveMsecs: this.config.keepAliveMsecs,
@@ -72,14 +72,14 @@ class AgentPool {
     }
     return new http.Agent(agentOptions);
   }
-  setupAgentSocketUnref(agent) {
+  _setupAgentSocketUnref(agent) {
     agent.on("free", (socket) => {
       if (socket && typeof socket.unref === "function") {
         socket.unref();
       }
     });
   }
-  createHttpsAgent(key, tlsOptions) {
+  createHttpsAgent(_key, tlsOptions) {
     const secureContext = tls.createSecureContext({
       ecdhCurve: "X25519:prime256v1:secp384r1",
       ciphers: [
