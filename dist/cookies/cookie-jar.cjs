@@ -1,8 +1,7 @@
 const { CookieJar: TouchCookieJar } = require("tough-cookie");
 const { Cookie } = require('./cookie.cjs');
-const { requireNodeModule } = require('../utils/node-runtime.cjs');
-const _mod_p2kzqp = require('./cookie.cjs');
-exports.Cookie = _mod_p2kzqp.Cookie;;
+const _mod_y8mmg9 = require('./cookie.cjs');
+exports.Cookie = _mod_y8mmg9.Cookie;;
 
 class RezoCookieJar extends TouchCookieJar {
   constructor(store, options) {
@@ -403,8 +402,10 @@ class RezoCookieJar extends TouchCookieJar {
     return this._cookieFile;
   }
   loadFromFile(filePath, _defaultUrl) {
-    const fs = requireNodeModule("node:fs");
-    if (!fs) {
+    let fs;
+    try {
+      fs = require("node:fs");
+    } catch {
       throw new Error("loadFromFile() requires Node.js, Bun, or Deno. Not available in browsers or React Native.");
     }
     if (!fs.existsSync(filePath)) {
@@ -455,8 +456,10 @@ class RezoCookieJar extends TouchCookieJar {
     if (!targetPath) {
       throw new Error("No cookie file path specified. Provide a path or load from a file first.");
     }
-    const fs = requireNodeModule("node:fs");
-    if (!fs) {
+    let fs;
+    try {
+      fs = require("node:fs");
+    } catch {
       throw new Error("saveToFile() requires Node.js, Bun, or Deno. Not available in browsers or React Native.");
     }
     const isJson = targetPath.toLowerCase().endsWith(".json");
@@ -481,7 +484,7 @@ class RezoCookieJar extends TouchCookieJar {
   }
 }
 const CookieJar = exports.CookieJar = RezoCookieJar;
-const _mod_nfmlpp = require("tough-cookie");
-exports.Store = _mod_nfmlpp.Store;;
+const _mod_2m96de = require("tough-cookie");
+exports.Store = _mod_2m96de.Store;;
 
 exports.RezoCookieJar = RezoCookieJar;

@@ -1,6 +1,5 @@
 import { CookieJar as TouchCookieJar } from "tough-cookie";
 import { Cookie } from './cookie.js';
-import { requireNodeModule } from '../utils/node-runtime.js';
 export { Cookie } from './cookie.js';
 
 export class RezoCookieJar extends TouchCookieJar {
@@ -402,8 +401,10 @@ export class RezoCookieJar extends TouchCookieJar {
     return this._cookieFile;
   }
   loadFromFile(filePath, _defaultUrl) {
-    const fs = requireNodeModule("node:fs");
-    if (!fs) {
+    let fs;
+    try {
+      fs = require("node:fs");
+    } catch {
       throw new Error("loadFromFile() requires Node.js, Bun, or Deno. Not available in browsers or React Native.");
     }
     if (!fs.existsSync(filePath)) {
@@ -454,8 +455,10 @@ export class RezoCookieJar extends TouchCookieJar {
     if (!targetPath) {
       throw new Error("No cookie file path specified. Provide a path or load from a file first.");
     }
-    const fs = requireNodeModule("node:fs");
-    if (!fs) {
+    let fs;
+    try {
+      fs = require("node:fs");
+    } catch {
       throw new Error("saveToFile() requires Node.js, Bun, or Deno. Not available in browsers or React Native.");
     }
     const isJson = targetPath.toLowerCase().endsWith(".json");

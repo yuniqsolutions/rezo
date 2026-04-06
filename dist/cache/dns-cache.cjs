@@ -1,5 +1,5 @@
 const { LRUCache } = require('./lru-cache.cjs');
-const { requireNodeModule } = require('../utils/node-runtime.cjs');
+const dns = require("node:dns");
 const DEFAULT_DNS_TTL = 60000;
 const DEFAULT_DNS_MAX_ENTRIES = 1000;
 
@@ -59,11 +59,6 @@ class DNSCache {
   }
   resolveDNS(hostname, family) {
     return new Promise((resolve) => {
-      const dns = requireNodeModule("node:dns");
-      if (!dns?.lookup) {
-        resolve(undefined);
-        return;
-      }
       const options = { family: family ?? 0 };
       dns.lookup(hostname, options, (err, address, resultFamily) => {
         if (err || !address || typeof address !== "string") {
@@ -76,11 +71,6 @@ class DNSCache {
   }
   resolveAllDNS(hostname, family) {
     return new Promise((resolve) => {
-      const dns = requireNodeModule("node:dns");
-      if (!dns?.lookup) {
-        resolve([]);
-        return;
-      }
       const options = { family: family ?? 0, all: true };
       dns.lookup(hostname, options, (err, addresses) => {
         if (err || !addresses || !Array.isArray(addresses)) {

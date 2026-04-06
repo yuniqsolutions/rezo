@@ -1,5 +1,5 @@
 import { LRUCache } from './lru-cache.js';
-import { requireNodeModule } from '../utils/node-runtime.js';
+import dns from "node:dns";
 const DEFAULT_DNS_TTL = 60000;
 const DEFAULT_DNS_MAX_ENTRIES = 1000;
 
@@ -59,11 +59,6 @@ export class DNSCache {
   }
   resolveDNS(hostname, family) {
     return new Promise((resolve) => {
-      const dns = requireNodeModule("node:dns");
-      if (!dns?.lookup) {
-        resolve(undefined);
-        return;
-      }
       const options = { family: family ?? 0 };
       dns.lookup(hostname, options, (err, address, resultFamily) => {
         if (err || !address || typeof address !== "string") {
@@ -76,11 +71,6 @@ export class DNSCache {
   }
   resolveAllDNS(hostname, family) {
     return new Promise((resolve) => {
-      const dns = requireNodeModule("node:dns");
-      if (!dns?.lookup) {
-        resolve([]);
-        return;
-      }
       const options = { family: family ?? 0, all: true };
       dns.lookup(hostname, options, (err, addresses) => {
         if (err || !addresses || !Array.isArray(addresses)) {

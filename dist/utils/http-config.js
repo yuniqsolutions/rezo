@@ -4,7 +4,6 @@ import { RezoHeaders } from './headers.js';
 import { RezoURLSearchParams } from './data-operations.js';
 import { parseProxyString } from '../proxy/parse.js';
 import { createDefaultHooks, mergeHooks, serializeHooks } from '../core/hooks.js';
-import { importNodeModule } from './node-runtime.js';
 const hasBuffer = typeof Buffer !== "undefined";
 function isBuffer(value) {
   return hasBuffer && Buffer.isBuffer(value);
@@ -224,7 +223,11 @@ export async function getFS() {
   if (type !== "node" && type !== "deno" && type !== "bun" && type !== "cf-worker") {
     return;
   }
-  return await importNodeModule("node:fs");
+  try {
+    return await import("node:fs");
+  } catch {
+    return;
+  }
 }
 export function prepareHTTPOptions(options, jar, addedOptions, config) {
   const validMethods = ["post", "put", "patch"];
@@ -596,8 +599,8 @@ function createConfig(options, jar, addedOptions) {
     }
     if (rejectUnauthorized && debug) {
       console.warn(`[WARNING] 'rejectUnauthorized' is enabled in '${type}' mode.
-` + `The built-in fetch API does not support this option directly.
-` + `As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
+The built-in fetch API does not support this option directly.
+As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
 ` + `⚠️ This disables TLS certificate verification and can expose sensitive data.
 ` + `⚠️ Avoid using 'rejectUnauthorized' in '${type}' environments unless absolutely necessary.`);
       if (typeof process !== "undefined")
@@ -827,11 +830,7 @@ async function _checkCurl() {
   if (type !== "node" && type !== "deno" && type !== "bun") {
     return { status: false };
   }
-  const childProcess = await importNodeModule("node:child_process");
-  const execSync = childProcess?.execSync;
-  if (!execSync) {
-    return curlCheckOption();
-  }
+  const { execSync } = await import("node:child_process");
   try {
     return curlCheckOption(execSync("curl --version").toString().includes("curl"));
   } catch {
@@ -843,27 +842,20 @@ async function curlCheckOption(isAvailable) {
   if (type !== "node" && type !== "deno" && type !== "bun") {
     return { status: false };
   }
-  const fs = await importNodeModule("node:fs");
-  const os = await importNodeModule("node:os");
+  const { existsSync } = await import("node:fs");
+  const os = await import("node:os");
   if (isAvailable)
     return { status: true };
   let message = "Curl is not installed. ";
-  if (!os?.platform) {
-    return {
-      status: false,
-      message: message + "Please install curl from https://curl.se/download.html"
-    };
-  }
   const platform = os.platform();
   if (platform === "darwin") {
     message += "Install curl via Homebrew with 'brew install curl' or use 'xcode-select --install' to install command line tools.";
   } else if (platform === "win32") {
     message += "Install curl by downloading it from https://curl.se/windows/ or use a package manager like Chocolatey with 'choco install curl'.";
   } else if (platform === "linux") {
-    const existsSync = fs?.existsSync;
-    const isDebian = existsSync?.("/etc/debian_version") === true;
-    const isRedHat = existsSync?.("/etc/redhat-release") === true;
-    const isArch = existsSync?.("/etc/arch-release") === true;
+    const isDebian = existsSync("/etc/debian_version");
+    const isRedHat = existsSync("/etc/redhat-release");
+    const isArch = existsSync("/etc/arch-release");
     if (isDebian) {
       message += "Install curl with 'sudo apt-get install curl'.";
     } else if (isRedHat) {
