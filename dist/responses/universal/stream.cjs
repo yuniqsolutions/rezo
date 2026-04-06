@@ -1,4 +1,5 @@
 const { UniversalEventEmitter } = require('./event-emitter.cjs');
+const { requireNodeModule } = require('../../utils/node-runtime.cjs');
 
 class UniversalStreamResponse extends UniversalEventEmitter {
   _finished = false;
@@ -51,15 +52,16 @@ class UniversalStreamResponse extends UniversalEventEmitter {
     return destination;
   }
   pipeTo(filePath) {
-    try {
-      const path = require("node:path");
-      const fs = require("node:fs");
-      const { createWriteStream } = fs;
-      const dir = path.dirname(filePath);
-      if (dir && dir !== ".")
-        fs.mkdirSync(dir, { recursive: true });
-      this.pipe(createWriteStream(filePath));
-    } catch {}
+    const path = requireNodeModule("node:path");
+    const fs = requireNodeModule("node:fs");
+    const createWriteStream = fs?.createWriteStream;
+    if (!path || !fs || !createWriteStream) {
+      return this;
+    }
+    const dir = path.dirname(filePath);
+    if (dir && dir !== ".")
+      fs.mkdirSync(dir, { recursive: true });
+    this.pipe(createWriteStream(filePath));
     return this;
   }
   emit(event, ...args) {

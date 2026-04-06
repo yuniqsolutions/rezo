@@ -1368,7 +1368,7 @@ async function request(config, fetchOptions, requestCount, timing, _stats, _resp
               const uploadStart = performance.now();
               for (let offset = 0;offset < totalSize; offset += chunkSize) {
                 const end = Math.min(offset + chunkSize, totalSize);
-                const chunk = buffer.slice(offset, end);
+                const chunk = buffer.subarray(offset, end);
                 req.write(chunk);
                 written += chunk.length;
                 const now = performance.now();
