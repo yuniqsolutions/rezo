@@ -1,8 +1,8 @@
 const { CookieJar: TouchCookieJar } = require("tough-cookie");
 const { Cookie } = require('./cookie.cjs');
 const { requireNodeModule } = require('../utils/node-runtime.cjs');
-const _mod_ojn3wu = require('./cookie.cjs');
-exports.Cookie = _mod_ojn3wu.Cookie;;
+const _mod_egd39a = require('./cookie.cjs');
+exports.Cookie = _mod_egd39a.Cookie;;
 
 class RezoCookieJar extends TouchCookieJar {
   constructor(store, options) {
@@ -481,7 +481,7 @@ class RezoCookieJar extends TouchCookieJar {
   }
 }
 const CookieJar = exports.CookieJar = RezoCookieJar;
-const _mod_3lg6nf = require("tough-cookie");
-exports.Store = _mod_3lg6nf.Store;;
+const _mod_uokl3t = require("tough-cookie");
+exports.Store = _mod_uokl3t.Store;;
 
 exports.RezoCookieJar = RezoCookieJar;

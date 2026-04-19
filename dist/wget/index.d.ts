@@ -9056,8 +9056,14 @@ export declare class Downloader {
 	 * Accepts http://, https://, and file://. Plain paths ("./foo.html", "/abs/x.html")
 	 * are auto-converted to file:// URLs so users can seed local documents.
 	 *
+	 * Local-file support is restricted to HTML / XHTML / XML / CSS — those are
+	 * the only formats where "look inside for remote assets and download them"
+	 * makes sense. Other local files (images, PDFs, binaries) are rejected so
+	 * relative references inside an HTML file don't silently succeed on bogus
+	 * local paths.
+	 *
 	 * @param url - URL or path to normalize
-	 * @returns Normalized URL or null if invalid
+	 * @returns Normalized URL or null if invalid / unsupported local type
 	 */
 	private normalizeUrl;
 	/**

@@ -74,7 +74,7 @@ class UrlFilter {
       };
     }
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      if (parsed.protocol === "ftp:" && this.options.followFTP) {} else {
+      if (parsed.protocol === "file:") {} else if (parsed.protocol === "ftp:" && this.options.followFTP) {} else {
         return {
           allowed: false,
           reason: "unsupported-protocol",
@@ -125,6 +125,9 @@ class UrlFilter {
   checkHost(parsed, sourceUrl) {
     const host = parsed.hostname.toLowerCase();
     if (this.options.spanHosts) {
+      return { allowed: true };
+    }
+    if ((parsed.protocol === "http:" || parsed.protocol === "https:") && this.startHosts.has("")) {
       return { allowed: true };
     }
     if (this.startHosts.has(host)) {

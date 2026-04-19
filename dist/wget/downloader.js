@@ -149,7 +149,13 @@ export class Downloader {
         this.debug(`  Proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
       }
     }
-    this.seedUrls = urlArray.slice();
+    const normalizedSeeds = [];
+    for (const raw of urlArray) {
+      const n = this.normalizeUrl(raw);
+      if (n)
+        normalizedSeeds.push(n);
+    }
+    this.seedUrls = normalizedSeeds.length > 0 ? normalizedSeeds : urlArray.slice();
     if (this.options.cache !== false) {
       const baseUrl = urlArray[0];
       this.cache = new DownloadCache(this.options.outputDir || ".", baseUrl);
@@ -177,7 +183,7 @@ export class Downloader {
         }
       }
     }
-    for (const url of urlArray) {
+    for (const url of this.seedUrls) {
       this.urlFilter.addStartUrl(url);
     }
     if (this.options.mirror) {
@@ -683,6 +689,8 @@ export class Downloader {
   }
   normalizeUrl(url) {
     if (url.startsWith("./") || url.startsWith("../") || /^[A-Za-z]:[\\/]/.test(url) || url.startsWith("/") && !url.startsWith("//")) {
+      if (!isSupportedLocalExtension(url))
+        return null;
       try {
         return pathToFileURL(resolvePath(url)).href;
       } catch {
@@ -691,7 +699,10 @@ export class Downloader {
     }
     try {
       const parsed = new URL(url);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "file:") {
+      if (parsed.protocol === "file:") {
+        return isSupportedLocalExtension(parsed.pathname) ? parsed.href : null;
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
         return null;
       }
       return parsed.href;
@@ -875,6 +886,14 @@ export class Downloader {
       this.cache = null;
     }
   }
+}
+function isSupportedLocalExtension(pathOrUrl) {
+  const cleanPath = pathOrUrl.split(/[?#]/, 1)[0];
+  const dot = cleanPath.lastIndexOf(".");
+  if (dot < 0)
+    return false;
+  const ext = cleanPath.slice(dot).toLowerCase();
+  return ext === ".html" || ext === ".htm" || ext === ".xhtml" || ext === ".xml" || ext === ".css";
 }
 function inferMimeFromPath(path) {
   const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
