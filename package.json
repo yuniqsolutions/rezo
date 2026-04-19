@@ -1,6 +1,6 @@
 {
   "name": "rezo",
-  "version": "1.0.131",
+  "version": "1.0.132",
   "description": "Lightning-fast, enterprise-grade HTTP client for modern JavaScript. Full HTTP/2 support, intelligent cookie management, multiple adapters (HTTP, Fetch, cURL, XHR), streaming, proxy support (HTTP/HTTPS/SOCKS), and cross-environment compatibility.",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
@@ -62,28 +62,29 @@
   },
   "dependencies": {
     "tough-cookie": "^6.0.1",
-    "ua-parser-js": "^2.0.9"
+    "ua-parser-js": "^2.0.9",
+    "linkedom": "^0.18.12"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@react-native-community/netinfo": "^12.0.1",
-    "@types/bun": "^1.3.11",
+    "@types/bun": "^1.3.12",
     "@types/deno": "^2.5.0",
-    "@types/node": "^25.5.2",
-    "@typescript-eslint/eslint-plugin": "^8.58.0",
-    "@typescript-eslint/parser": "^8.58.0",
-    "@vitest/coverage-v8": "^4.1.2",
+    "@types/node": "^25.6.0",
+    "@typescript-eslint/eslint-plugin": "^8.58.2",
+    "@typescript-eslint/parser": "^8.58.2",
+    "@vitest/coverage-v8": "^4.1.4",
     "dts-bundle-generator": "^9.5.1",
-    "eslint": "^10.2.0",
-    "expo-background-task": "^55.0.12",
-    "expo-file-system": "^55.0.14",
-    "expo-task-manager": "^55.0.12",
+    "eslint": "^10.2.1",
+    "expo-background-task": "^55.0.16",
+    "expo-file-system": "^55.0.16",
+    "expo-task-manager": "^55.0.14",
     "postcss-value-parser": "^4.2.0",
-    "puppeteer": "^24.40.0",
+    "puppeteer": "^24.41.0",
     "react-native-fs": "^2.20.0",
     "tsx": "^4.21.0",
-    "typescript": "5.9.2",
-    "vitest": "^4.1.2"
+    "typescript": "6.0.3",
+    "vitest": "^4.1.4"
   },
   "typesVersions": {
     "*": {
@@ -128,6 +129,9 @@
       ],
       "wget": [
         "dist/wget/index.d.ts"
+      ],
+      "dom": [
+        "dist/dom/index.d.ts"
       ]
     }
   },
@@ -219,6 +223,11 @@
       "types": "./dist/wget/index.d.ts",
       "import": "./dist/wget/index.js",
       "require": "./dist/wget/index.cjs"
+    },
+    "./dom": {
+      "types": "./dist/dom/index.d.ts",
+      "import": "./dist/dom/index.js",
+      "require": "./dist/dom/index.cjs"
     }
   },
   "browser": {
@@ -230,14 +239,6 @@
     "./dist/utils/cookies.cjs": "./dist/utils/cookies.browser.cjs",
     "./dist/cache/response-cache.js": "./dist/cache/universal-response-cache.js",
     "./dist/cache/response-cache.cjs": "./dist/cache/universal-response-cache.cjs"
-  },
-  "peerDependencies": {
-    "linkedom": ">=0.16.0"
-  },
-  "peerDependenciesMeta": {
-    "linkedom": {
-      "optional": true
-    }
   },
   "react-native": {
     "./dist/platform/node.js": "./dist/platform/react-native.js",

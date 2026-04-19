@@ -195,6 +195,12 @@ function flattenWgetOptions(options) {
   if (options.cache !== undefined) {
     flat.cache = options.cache;
   }
+  if (options.session !== undefined) {
+    flat.session = options.session;
+  }
+  if (options.resumeSession !== undefined) {
+    flat.resumeSession = options.resumeSession;
+  }
   if (options.extractInternalStyles !== undefined) {
     flat.extractInternalStyles = options.extractInternalStyles;
   }

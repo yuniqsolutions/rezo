@@ -1,6 +1,6 @@
-const _mod_ta19rw = require('./picker.cjs');
-exports.detectRuntime = _mod_ta19rw.detectRuntime;
-exports.getAdapterCapabilities = _mod_ta19rw.getAdapterCapabilities;
-exports.buildAdapterContext = _mod_ta19rw.buildAdapterContext;
-exports.getAvailableAdapters = _mod_ta19rw.getAvailableAdapters;
-exports.selectAdapter = _mod_ta19rw.selectAdapter;;
+const _mod_pq418y = require('./picker.cjs');
+exports.detectRuntime = _mod_pq418y.detectRuntime;
+exports.getAdapterCapabilities = _mod_pq418y.getAdapterCapabilities;
+exports.buildAdapterContext = _mod_pq418y.buildAdapterContext;
+exports.getAvailableAdapters = _mod_pq418y.getAvailableAdapters;
+exports.selectAdapter = _mod_pq418y.selectAdapter;;

@@ -1,57 +1,58 @@
-const _mod_ehuksm = require('./types.cjs');
-exports.WgetError = _mod_ehuksm.WgetError;;
-const _mod_sux9e5 = require('./asset-extractor.cjs');
-exports.AssetExtractor = _mod_sux9e5.AssetExtractor;;
-const _mod_bte36h = require('./url-filter.cjs');
-exports.UrlFilter = _mod_bte36h.UrlFilter;;
-const _mod_ae2szo = require('./file-writer.cjs');
-exports.FileWriter = _mod_ae2szo.FileWriter;;
-const _mod_ufylqx = require('./robots.cjs');
-exports.RobotsHandler = _mod_ufylqx.RobotsHandler;;
-const _mod_jgkc8o = require('./resume.cjs');
-exports.ResumeHandler = _mod_jgkc8o.ResumeHandler;;
-const _mod_yfa5xz = require('./progress.cjs');
-exports.ProgressReporter = _mod_yfa5xz.ProgressReporter;
-exports.ProgressTracker = _mod_yfa5xz.ProgressTracker;
-exports.parseSize = _mod_yfa5xz.parseSize;;
-const _mod_dtp1wq = require('./link-converter.cjs');
-exports.LinkConverter = _mod_dtp1wq.LinkConverter;;
-const _mod_o1e6qe = require('./style-extractor.cjs');
-exports.StyleExtractor = _mod_o1e6qe.StyleExtractor;;
-const _mod_cw6lcl = require('./downloader.cjs');
-exports.Downloader = _mod_cw6lcl.Downloader;;
-const _mod_vniz1k = require('./asset-organizer.cjs');
-exports.AssetOrganizer = _mod_vniz1k.AssetOrganizer;
-exports.DEFAULT_ASSET_FOLDERS = _mod_vniz1k.DEFAULT_ASSET_FOLDERS;;
-const _mod_21x904 = require('./download-cache.cjs');
-exports.DownloadCache = _mod_21x904.DownloadCache;;
-const _mod_z9wgfb = require('./filter-lists.cjs');
-exports.EXECUTABLE_EXTENSIONS = _mod_z9wgfb.EXECUTABLE_EXTENSIONS;
-exports.ARCHIVE_EXTENSIONS = _mod_z9wgfb.ARCHIVE_EXTENSIONS;
-exports.DOCUMENT_EXTENSIONS = _mod_z9wgfb.DOCUMENT_EXTENSIONS;
-exports.IMAGE_EXTENSIONS = _mod_z9wgfb.IMAGE_EXTENSIONS;
-exports.VIDEO_EXTENSIONS = _mod_z9wgfb.VIDEO_EXTENSIONS;
-exports.AUDIO_EXTENSIONS = _mod_z9wgfb.AUDIO_EXTENSIONS;
-exports.FONT_EXTENSIONS = _mod_z9wgfb.FONT_EXTENSIONS;
-exports.WEB_ASSET_EXTENSIONS = _mod_z9wgfb.WEB_ASSET_EXTENSIONS;
-exports.DATA_EXTENSIONS = _mod_z9wgfb.DATA_EXTENSIONS;
-exports.EXECUTABLE_MIME_TYPES = _mod_z9wgfb.EXECUTABLE_MIME_TYPES;
-exports.ARCHIVE_MIME_TYPES = _mod_z9wgfb.ARCHIVE_MIME_TYPES;
-exports.DOCUMENT_MIME_TYPES = _mod_z9wgfb.DOCUMENT_MIME_TYPES;
-exports.IMAGE_MIME_TYPES = _mod_z9wgfb.IMAGE_MIME_TYPES;
-exports.VIDEO_MIME_TYPES = _mod_z9wgfb.VIDEO_MIME_TYPES;
-exports.AUDIO_MIME_TYPES = _mod_z9wgfb.AUDIO_MIME_TYPES;
-exports.FONT_MIME_TYPES = _mod_z9wgfb.FONT_MIME_TYPES;
-exports.WEB_ASSET_MIME_TYPES = _mod_z9wgfb.WEB_ASSET_MIME_TYPES;
-exports.DATA_MIME_TYPES = _mod_z9wgfb.DATA_MIME_TYPES;
-exports.SAFE_WEB_PRESET = _mod_z9wgfb.SAFE_WEB_PRESET;
-exports.DOCUMENTS_ONLY_PRESET = _mod_z9wgfb.DOCUMENTS_ONLY_PRESET;
-exports.NO_MEDIA_PRESET = _mod_z9wgfb.NO_MEDIA_PRESET;
-exports.MINIMAL_MIRROR_PRESET = _mod_z9wgfb.MINIMAL_MIRROR_PRESET;
-exports.TEXT_ONLY_PRESET = _mod_z9wgfb.TEXT_ONLY_PRESET;;
+const _mod_sgo96e = require('./types.cjs');
+exports.WgetError = _mod_sgo96e.WgetError;;
+const _mod_lyzrpz = require('./asset-extractor.cjs');
+exports.AssetExtractor = _mod_lyzrpz.AssetExtractor;;
+const _mod_o3cq3p = require('./url-filter.cjs');
+exports.UrlFilter = _mod_o3cq3p.UrlFilter;;
+const _mod_g312r5 = require('./file-writer.cjs');
+exports.FileWriter = _mod_g312r5.FileWriter;;
+const _mod_f86lq8 = require('./robots.cjs');
+exports.RobotsHandler = _mod_f86lq8.RobotsHandler;;
+const _mod_5jfjlf = require('./resume.cjs');
+exports.ResumeHandler = _mod_5jfjlf.ResumeHandler;;
+const _mod_qvme7n = require('./progress.cjs');
+exports.ProgressReporter = _mod_qvme7n.ProgressReporter;
+exports.ProgressTracker = _mod_qvme7n.ProgressTracker;
+exports.parseSize = _mod_qvme7n.parseSize;;
+const _mod_p9ku6m = require('./link-converter.cjs');
+exports.LinkConverter = _mod_p9ku6m.LinkConverter;;
+const _mod_02slou = require('./style-extractor.cjs');
+exports.StyleExtractor = _mod_02slou.StyleExtractor;;
+const _mod_5wgdts = require('./downloader.cjs');
+exports.Downloader = _mod_5wgdts.Downloader;;
+const _mod_tsu36a = require('./asset-organizer.cjs');
+exports.AssetOrganizer = _mod_tsu36a.AssetOrganizer;
+exports.DEFAULT_ASSET_FOLDERS = _mod_tsu36a.DEFAULT_ASSET_FOLDERS;;
+const _mod_atk2q8 = require('./download-cache.cjs');
+exports.DownloadCache = _mod_atk2q8.DownloadCache;;
+const _mod_mecdrc = require('./filter-lists.cjs');
+exports.EXECUTABLE_EXTENSIONS = _mod_mecdrc.EXECUTABLE_EXTENSIONS;
+exports.ARCHIVE_EXTENSIONS = _mod_mecdrc.ARCHIVE_EXTENSIONS;
+exports.DOCUMENT_EXTENSIONS = _mod_mecdrc.DOCUMENT_EXTENSIONS;
+exports.IMAGE_EXTENSIONS = _mod_mecdrc.IMAGE_EXTENSIONS;
+exports.VIDEO_EXTENSIONS = _mod_mecdrc.VIDEO_EXTENSIONS;
+exports.AUDIO_EXTENSIONS = _mod_mecdrc.AUDIO_EXTENSIONS;
+exports.FONT_EXTENSIONS = _mod_mecdrc.FONT_EXTENSIONS;
+exports.WEB_ASSET_EXTENSIONS = _mod_mecdrc.WEB_ASSET_EXTENSIONS;
+exports.DATA_EXTENSIONS = _mod_mecdrc.DATA_EXTENSIONS;
+exports.EXECUTABLE_MIME_TYPES = _mod_mecdrc.EXECUTABLE_MIME_TYPES;
+exports.ARCHIVE_MIME_TYPES = _mod_mecdrc.ARCHIVE_MIME_TYPES;
+exports.DOCUMENT_MIME_TYPES = _mod_mecdrc.DOCUMENT_MIME_TYPES;
+exports.IMAGE_MIME_TYPES = _mod_mecdrc.IMAGE_MIME_TYPES;
+exports.VIDEO_MIME_TYPES = _mod_mecdrc.VIDEO_MIME_TYPES;
+exports.AUDIO_MIME_TYPES = _mod_mecdrc.AUDIO_MIME_TYPES;
+exports.FONT_MIME_TYPES = _mod_mecdrc.FONT_MIME_TYPES;
+exports.WEB_ASSET_MIME_TYPES = _mod_mecdrc.WEB_ASSET_MIME_TYPES;
+exports.DATA_MIME_TYPES = _mod_mecdrc.DATA_MIME_TYPES;
+exports.SAFE_WEB_PRESET = _mod_mecdrc.SAFE_WEB_PRESET;
+exports.DOCUMENTS_ONLY_PRESET = _mod_mecdrc.DOCUMENTS_ONLY_PRESET;
+exports.NO_MEDIA_PRESET = _mod_mecdrc.NO_MEDIA_PRESET;
+exports.MINIMAL_MIRROR_PRESET = _mod_mecdrc.MINIMAL_MIRROR_PRESET;
+exports.TEXT_ONLY_PRESET = _mod_mecdrc.TEXT_ONLY_PRESET;;
 const { Downloader } = require('./downloader.cjs');
 const rezo = require('../index.cjs');
 const { promises: fs } = require("node:fs");
+const { ProgressReporter } = require('./progress.cjs');
 const { flattenWgetOptions } = require('./types.cjs');
 const { parseProxyString } = require('../proxy/parse.cjs');
 
@@ -162,6 +163,60 @@ class Wget {
     const urls = content.split(`
 `).map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
     return this.getAll(urls, options);
+  }
+  async post(url, body, options) {
+    return this.runWithMethod("POST", url, body, options);
+  }
+  async put(url, body, options) {
+    return this.runWithMethod("PUT", url, body, options);
+  }
+  async patch(url, body, options) {
+    return this.runWithMethod("PATCH", url, body, options);
+  }
+  async delete(url, body, options) {
+    return this.runWithMethod("DELETE", url, body, options);
+  }
+  async head(url, options) {
+    return this.runWithMethod("HEAD", url, undefined, options);
+  }
+  async runWithMethod(method, url, body, options) {
+    const { encoded, contentType } = encodeWgetBody(body);
+    const merged = {
+      ...options ?? {},
+      http: {
+        ...options?.http ?? {},
+        method,
+        ...encoded !== undefined ? { postData: encoded } : {},
+        headers: {
+          ...options?.http?.headers ?? {},
+          ...contentType && !options?.http?.headers?.["Content-Type"] ? { "Content-Type": contentType } : {}
+        }
+      }
+    };
+    return this.get(url, merged);
+  }
+  clone(options = {}) {
+    const { copyEventHandlers = true } = options;
+    const sharedJar = this.options.http?.cookies?.jar;
+    const sharedSignal = this.options.misc?.signal;
+    const cloned = new Wget(deepCloneWgetOptions(this.options));
+    if (sharedJar) {
+      cloned.options.http = {
+        ...cloned.options.http,
+        cookies: { ...cloned.options.http?.cookies, jar: sharedJar }
+      };
+    }
+    if (sharedSignal) {
+      cloned.options.misc = { ...cloned.options.misc, signal: sharedSignal };
+    }
+    if (copyEventHandlers) {
+      for (const [event, handlers] of Array.from(this.eventHandlers.entries())) {
+        for (const handler of handlers) {
+          cloned.on(event, handler);
+        }
+      }
+    }
+    return cloned;
   }
   recursive(depth) {
     this.options.recursive = { ...this.options.recursive, enabled: true };
@@ -336,6 +391,30 @@ class Wget {
       this.downloader.abort();
     }
   }
+  async resume(url, options) {
+    const resumeOpts = {
+      ...options ?? {},
+      resumeSession: true
+    };
+    if (url)
+      return this.get(url, resumeOpts);
+    const outputDir = this.options.download?.outputDir ?? ".";
+    const { join } = await import("node:path");
+    try {
+      const path = join(outputDir, ".rezo-wget", "session.json");
+      const raw = await fs.readFile(path, "utf-8");
+      const parsed = JSON.parse(raw);
+      const seeds = parsed.seedUrls ?? [];
+      if (seeds.length === 0) {
+        throw new Error("resume: no saved seed URLs; pass a URL explicitly");
+      }
+      return this.getAll(seeds, resumeOpts);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("resume:"))
+        throw err;
+      throw new Error(`resume: could not read session at ${outputDir}/.rezo-wget/session.json — pass a URL to start fresh`);
+    }
+  }
   getOptions() {
     return { ...this.options };
   }
@@ -357,6 +436,49 @@ class Wget {
         this.downloader.on(event, handler);
       }
     }
+    this.attachWgetStyleReporter();
+  }
+  attachWgetStyleReporter() {
+    if (!this.downloader)
+      return;
+    const log = this.options.logging ?? {};
+    if (log.quiet)
+      return;
+    const flat = flattenWgetOptions(this.options);
+    const reporter = new ProgressReporter(flat);
+    const trackers = new Map;
+    this.downloader.on("start", (e) => {
+      trackers.set(e.url, { start: Date.now(), filename: e.filename });
+      reporter.wgetStart(e);
+    });
+    this.downloader.on("headers", (e) => {
+      const t = trackers.get(e.url);
+      reporter.wgetHeaders(e, t?.filename ?? e.url);
+    });
+    this.downloader.on("redirect", (e) => reporter.wgetRedirect(e));
+    this.downloader.on("retry", (e) => reporter.wgetRetry(e));
+    this.downloader.on("progress", (p) => {
+      if (flat.progress !== "none") {
+        reporter.reportProgress({
+          getProgress: () => p
+        });
+      }
+    });
+    this.downloader.on("complete", (e) => {
+      const t = trackers.get(e.url);
+      const duration = t ? (Date.now() - t.start) / 1000 : 0;
+      const avgSpeed = duration > 0 ? e.size / duration : 0;
+      reporter.wgetComplete(e, avgSpeed);
+      trackers.delete(e.url);
+    });
+    this.downloader.on("error", (e) => {
+      reporter.wgetError(e);
+      trackers.delete(e.url);
+    });
+    this.downloader.on("finish", () => {
+      process.stdout.write(reporter.formatStats() + `
+`);
+    });
   }
   mergeOptions(base, override) {
     if (!override)
@@ -563,7 +685,6 @@ function setOption(options, key, value) {
   options.directories = options.directories || {};
   options.http = options.http || {};
   options.filter = options.filter || {};
-  options.proxy = options.proxy;
   options.input = options.input || {};
   switch (cleanKey) {
     case "limit-rate":
@@ -633,6 +754,54 @@ function setOption(options, key, value) {
       options.input.base = value;
       break;
   }
+}
+function encodeWgetBody(body) {
+  if (body === undefined || body === null)
+    return {};
+  if (typeof body === "string")
+    return { encoded: body, contentType: "text/plain" };
+  if (body instanceof Uint8Array) {
+    return {
+      encoded: Buffer.from(body).toString("binary"),
+      contentType: "application/octet-stream"
+    };
+  }
+  if (body instanceof URLSearchParams) {
+    return {
+      encoded: body.toString(),
+      contentType: "application/x-www-form-urlencoded"
+    };
+  }
+  try {
+    return { encoded: JSON.stringify(body), contentType: "application/json" };
+  } catch {
+    return { encoded: String(body) };
+  }
+}
+function deepCloneWgetOptions(options) {
+  const sharedJar = options.http?.cookies?.jar;
+  const sharedSignal = options.misc?.signal;
+  const prepped = {
+    ...options,
+    http: options.http && {
+      ...options.http,
+      cookies: options.http.cookies && { ...options.http.cookies, jar: undefined }
+    },
+    misc: options.misc && { ...options.misc, signal: undefined }
+  };
+  let cloned;
+  try {
+    cloned = structuredClone(prepped);
+  } catch {
+    cloned = JSON.parse(JSON.stringify(prepped));
+  }
+  if (sharedJar && cloned.http) {
+    cloned.http.cookies = { ...cloned.http.cookies, jar: sharedJar };
+  }
+  if (sharedSignal && cloned.misc) {
+    cloned.misc.signal = sharedSignal;
+  }
+  return cloned;
 }
 
 exports.Wget = Wget;

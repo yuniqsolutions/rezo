@@ -1,4 +1,6 @@
-const { normalize, relative, join } = require("node:path");
+const { normalize, relative, join, resolve: resolvePath } = require("node:path");
+const { pathToFileURL, fileURLToPath } = require("node:url");
+const { promises: nodeFs } = require("node:fs");
 const { RezoQueue } = require('../queue/queue.cjs');
 const { RezoHeaders } = require('../utils/headers.cjs');
 const { WgetError: WgetErrorClass } = require('./types.cjs');
@@ -11,6 +13,7 @@ const { ProgressReporter, parseSize } = require('./progress.cjs');
 const { LinkConverter } = require('./link-converter.cjs');
 const { StyleExtractor } = require('./style-extractor.cjs');
 const { DownloadCache } = require('./download-cache.cjs');
+const { SessionCheckpoint } = require('./session.cjs');
 const DEFAULT_OPTIONS = {
   outputDir: ".",
   depth: 5,
@@ -45,7 +48,21 @@ class Downloader {
   quotaBytes = 1 / 0;
   totalDownloaded = 0;
   cache = null;
+  session = null;
+  seedUrls = [];
+  abortController = new AbortController;
   eventHandlers = new Map;
+  timeoutMs() {
+    const t = this.options.timeout;
+    if (t === undefined || t === null)
+      return;
+    if (t <= 0)
+      return 0;
+    return Math.round(t * 1000);
+  }
+  get signal() {
+    return this.abortController.signal;
+  }
   constructor(options = {}, http) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
     this.http = http;
@@ -69,6 +86,16 @@ class Downloader {
     };
     if (this.options.quota) {
       this.quotaBytes = parseSize(this.options.quota);
+    }
+    const userSignal = this.options.signal;
+    if (userSignal) {
+      if (userSignal.aborted) {
+        this.abortController.abort(userSignal.reason);
+      } else {
+        userSignal.addEventListener("abort", () => {
+          this.abortController.abort(userSignal.reason);
+        }, { once: true });
+      }
     }
   }
   on(event, handler) {
@@ -122,12 +149,33 @@ class Downloader {
         this.debug(`  Proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`);
       }
     }
+    this.seedUrls = urlArray.slice();
     if (this.options.cache !== false) {
       const baseUrl = urlArray[0];
       this.cache = new DownloadCache(this.options.outputDir || ".", baseUrl);
       await this.cache.load();
       const cacheStats = this.cache.stats();
       this.debug(`  Cache loaded: ${cacheStats.entries} entries, ${cacheStats.totalBytes} bytes`);
+    }
+    if (this.options.resumeSession || this.options.session !== false) {
+      this.session = new SessionCheckpoint(this.options.outputDir || ".");
+      const locked = await this.session.acquireLock();
+      if (!locked) {
+        this.debug(`  Session lock held by another process — disabling checkpoint`);
+        this.session = null;
+      } else if (this.options.resumeSession) {
+        const prior = await this.session.load();
+        if (prior) {
+          this.debug(`  Resuming session: ${prior.visitedUrls.length} visited, ` + `${prior.queuedUrls.length} pending`);
+          for (const u of prior.visitedUrls)
+            this.visitedUrls.add(u);
+          for (const [u, p] of prior.urlMap)
+            this.urlMap.set(u, p);
+          for (const [p, m] of prior.mimeMap)
+            this.mimeMap.set(p, m);
+          this.stats = { ...this.stats, ...prior.stats };
+        }
+      }
     }
     for (const url of urlArray) {
       this.urlFilter.addStartUrl(url);
@@ -163,6 +211,14 @@ class Downloader {
       await this.cache.save();
       this.debug(`  Cache saved: ${this.cache.filePath}`);
     }
+    if (this.session) {
+      if (!this.aborted && this.stats.urlsFailed === 0) {
+        await this.session.clear();
+      } else {
+        await this.checkpoint(true);
+      }
+      await this.session.close();
+    }
     this.emit("finish", {
       stats: this.stats,
       success: this.stats.urlsFailed === 0
@@ -193,7 +249,7 @@ class Downloader {
       this.stats.urlsSkipped++;
       return;
     }
-    if (this.options.robots !== false && !this.options.noRobots) {
+    if (!normalizedUrl.startsWith("file://") && this.options.robots !== false && !this.options.noRobots) {
       await this.fetchRobots(normalizedUrl);
       if (!this.robots.isAllowed(normalizedUrl)) {
         this.emitSkip(normalizedUrl, "robots-disallowed", "Blocked by robots.txt", depth, parentUrl);
@@ -216,7 +272,31 @@ class Downloader {
   }
   async processQueue() {
     this.debug(`Processing queue with ${this.queuedUrls.size} URLs`);
-    await this.queue.onIdle();
+    let lastSize = this.visitedUrls.size;
+    let lastProgress = Date.now();
+    const stallMs = 60000;
+    const watchdog = setInterval(() => {
+      const now = Date.now();
+      if (this.visitedUrls.size !== lastSize) {
+        lastSize = this.visitedUrls.size;
+        lastProgress = now;
+        return;
+      }
+      if (now - lastProgress > stallMs && !this.aborted) {
+        const inflight = Array.from(this.queuedUrls).filter((u) => !this.visitedUrls.has(u));
+        const sample = inflight.slice(0, 5).join(", ") || "(none)";
+        if (!this.options.quiet) {
+          console.warn(`[wget] no activity for ${Math.round((now - lastProgress) / 1000)}s — ` + `${inflight.length} URL(s) in flight: ${sample}${inflight.length > 5 ? ", ..." : ""}`);
+        }
+        lastProgress = now;
+      }
+    }, 15000);
+    watchdog.unref?.();
+    try {
+      await this.queue.onIdle();
+    } finally {
+      clearInterval(watchdog);
+    }
     this.debug(`Queue processing complete`);
   }
   async processItem(item) {
@@ -264,12 +344,17 @@ class Downloader {
         this.debug(`Extracting assets from ${item.url}`);
         await this.extractAndQueueAssets(item, result);
       }
+      this.checkpoint();
     } catch (error) {
       await this.handleError(item, error);
+      this.checkpoint();
     }
   }
   async downloadFile(item) {
     const startTime = Date.now();
+    if (item.url.startsWith("file://")) {
+      return this.loadLocalFile(item, startTime);
+    }
     const outputPath = this.fileWriter.getOutputPath(item.url);
     let resumed = false;
     if (this.cache && item.assetType !== "document") {
@@ -305,16 +390,62 @@ class Downloader {
     if (item.parentUrl) {
       headers.set("Referer", item.parentUrl);
     }
-    const response = await this.http.get(item.url, {
+    const method = (this.options.method ?? "GET").toUpperCase();
+    const reqConfig = {
       headers,
       responseType: "buffer",
-      timeout: this.options.timeout,
+      timeout: this.timeoutMs(),
       maxRedirects: this.options.maxRedirects,
       rejectUnauthorized: !this.options.noCheckCertificate,
-      proxy: this.options.proxy
-    });
+      proxy: this.options.proxy,
+      signal: this.signal
+    };
+    const body = this.options.postData;
+    let response;
+    const coerce = (v) => v;
+    if (method === "GET") {
+      response = coerce(await this.http.get(item.url, reqConfig));
+    } else if (method === "HEAD") {
+      response = coerce(await this.http.head(item.url, reqConfig));
+    } else if (method === "DELETE") {
+      response = coerce(await this.http.delete(item.url, reqConfig));
+    } else if (method === "POST") {
+      response = coerce(await this.http.post(item.url, body, reqConfig));
+    } else if (method === "PUT") {
+      response = coerce(await this.http.put(item.url, body, reqConfig));
+    } else if (method === "PATCH") {
+      response = coerce(await this.http.patch(item.url, body, reqConfig));
+    } else {
+      response = coerce(await this.http.request({
+        ...reqConfig,
+        url: item.url,
+        method,
+        data: body
+      }));
+    }
     const finalUrl = response.finalUrl || item.url;
+    const contentTypeHeader = response.headers.get("content-type");
+    const lenHeader = response.headers.get("content-length");
+    const lastModHeader = response.headers.get("last-modified");
+    const etagHeader = response.headers.get("etag");
+    this.emit("headers", {
+      url: item.url,
+      statusCode: response.status,
+      statusText: response.statusText ?? "",
+      headers: this.headersToRecord(response.headers),
+      contentLength: lenHeader ? parseInt(lenHeader, 10) : null,
+      contentType: contentTypeHeader,
+      lastModified: lastModHeader ? new Date(lastModHeader) : null,
+      etag: etagHeader
+    });
     if (finalUrl !== item.url) {
+      this.emit("redirect", {
+        fromUrl: item.url,
+        toUrl: finalUrl,
+        statusCode: response.status,
+        redirectCount: 1,
+        maxRedirects: this.options.maxRedirects ?? 20
+      });
       this.visitedUrls.add(this.normalizeUrl(finalUrl) || finalUrl);
     }
     if (response.status === 304) {
@@ -481,7 +612,8 @@ class Downloader {
     await this.robots.fetch(url, async (robotsUrl) => {
       try {
         const response = await this.http.get(robotsUrl, {
-          timeout: 1e4
+          timeout: 1e4,
+          signal: this.signal
         });
         return response.data;
       } catch {
@@ -550,15 +682,71 @@ class Downloader {
     await this.sleep(waitTime);
   }
   normalizeUrl(url) {
+    if (url.startsWith("./") || url.startsWith("../") || /^[A-Za-z]:[\\/]/.test(url) || url.startsWith("/") && !url.startsWith("//")) {
+      try {
+        return pathToFileURL(resolvePath(url)).href;
+      } catch {
+        return null;
+      }
+    }
     try {
       const parsed = new URL(url);
-      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "file:") {
         return null;
       }
       return parsed.href;
     } catch {
       return null;
     }
+  }
+  async loadLocalFile(item, startTime) {
+    const sourcePath = fileURLToPath(item.url);
+    const buf = await nodeFs.readFile(sourcePath);
+    const mimeType = inferMimeFromPath(sourcePath);
+    const writtenPath = await this.fileWriter.write(item.url, buf, mimeType);
+    const tracker = this.progressReporter.createTracker(item.url, writtenPath);
+    tracker.start(buf.length, mimeType);
+    tracker.update(buf.length);
+    this.emit("progress", tracker.getProgress());
+    if (this.cache) {
+      const outputDir = normalize(this.options.outputDir || ".");
+      const relativePath = relative(outputDir, writtenPath);
+      this.cache.set(item.url, {
+        filenames: [relativePath],
+        bytesDownloaded: buf.length,
+        totalBytes: buf.length,
+        percent: 100,
+        contentType: mimeType,
+        lastDownloaded: Date.now()
+      });
+    }
+    return {
+      url: item.url,
+      finalUrl: item.url,
+      filename: writtenPath,
+      size: buf.length,
+      mimeType,
+      statusCode: 200,
+      duration: Date.now() - startTime,
+      fromCache: false,
+      resumed: false
+    };
+  }
+  headersToRecord(headers) {
+    const out = {};
+    if (typeof headers.entries === "function") {
+      for (const [k, v] of headers.entries()) {
+        const existing = out[k];
+        if (existing === undefined) {
+          out[k] = v;
+        } else if (Array.isArray(existing)) {
+          existing.push(v);
+        } else {
+          out[k] = [existing, v];
+        }
+      }
+    }
+    return out;
   }
   getMimeType(response) {
     const contentType = response.headers.get("content-type");
@@ -569,8 +757,7 @@ class Downloader {
   }
   async readFile(path) {
     try {
-      const { promises: fs } = await import("node:fs");
-      return await fs.readFile(path, "utf-8");
+      return await nodeFs.readFile(path, "utf-8");
     } catch {
       return null;
     }
@@ -625,11 +812,50 @@ class Downloader {
     });
   }
   sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    if (this.aborted || this.signal.aborted)
+      return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
   abort() {
+    if (this.aborted)
+      return;
     this.aborted = true;
+    this.abortController.abort(new Error("wget: download aborted"));
     this.queue.clear();
+    if (this.session) {
+      this.checkpoint(true);
+    }
+  }
+  async checkpoint(immediate = false) {
+    if (!this.session)
+      return;
+    await this.session.save({
+      seedUrls: this.seedUrls,
+      visitedUrls: Array.from(this.visitedUrls),
+      queuedUrls: Array.from(this.queuedUrls).filter((u) => !this.visitedUrls.has(u)),
+      urlMap: Array.from(this.urlMap.entries()),
+      mimeMap: Array.from(this.mimeMap.entries()),
+      stats: {
+        urlsDownloaded: this.stats.urlsDownloaded,
+        urlsFailed: this.stats.urlsFailed,
+        urlsSkipped: this.stats.urlsSkipped,
+        bytesDownloaded: this.stats.bytesDownloaded,
+        filesWritten: this.stats.filesWritten,
+        startTime: this.stats.startTime,
+        endTime: this.stats.endTime,
+        duration: this.stats.duration
+      }
+    }, immediate);
   }
   getStats() {
     return { ...this.stats };
@@ -649,6 +875,37 @@ class Downloader {
       this.cache = null;
     }
   }
+}
+function inferMimeFromPath(path) {
+  const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
+  const map = {
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".xhtml": "application/xhtml+xml",
+    ".xml": "application/xml",
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".mjs": "application/javascript",
+    ".json": "application/json",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".avif": "image/avif",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mp3": "audio/mpeg",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain"
+  };
+  return map[ext] ?? "application/octet-stream";
 }
 
 exports.Downloader = Downloader;

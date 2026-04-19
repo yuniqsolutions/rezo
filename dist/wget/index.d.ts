@@ -1256,6 +1256,24 @@ export interface WgetOptions {
 	 * @default false
 	 */
 	removeJavascript?: boolean;
+	/**
+	 * Enable crash-safe session checkpointing.
+	 * When true (default), live queue state is flushed to
+	 * `{outputDir}/.rezo-wget/session.json` after each URL so an
+	 * interrupted run can be resumed. Set to false to disable.
+	 *
+	 * @default true
+	 */
+	session?: boolean;
+	/**
+	 * Resume a previously-persisted session before starting.
+	 * When true, the downloader reads the checkpoint and pre-populates its
+	 * visited/queued sets, urlMap, mimeMap, and stats. Use `.resume()` for
+	 * the common case; this flag is the underlying primitive.
+	 *
+	 * @default false
+	 */
+	resumeSession?: boolean;
 }
 /**
  * Real-time download progress information.
@@ -1678,6 +1696,23 @@ export interface FlatWgetOptions {
 	 * @default true
 	 */
 	cache?: boolean;
+	/**
+	 * Enable crash-safe session checkpointing.
+	 * When true (default), live queue state is flushed to
+	 * `{outputDir}/.rezo-wget/session.json` after each URL so an interrupted
+	 * run can be resumed. Set to false to disable entirely.
+	 *
+	 * @default true
+	 */
+	session?: boolean;
+	/**
+	 * Resume from a previously persisted session at `{outputDir}/.rezo-wget/session.json`.
+	 * When true, the Downloader reads the checkpoint and pre-populates visited
+	 * URLs, urlMap, mimeMap, and stats before starting the queue.
+	 *
+	 * @default false
+	 */
+	resumeSession?: boolean;
 }
 /**
  * DOM-based asset extractor for web documents.
@@ -1714,7 +1749,12 @@ export declare class AssetExtractor {
 	}): ExtractedAsset[];
 	/**
 	 * Extracts asset URLs from CSS content.
-	 * Parses url() functions and @import rules.
+	 * Uses a CSS-aware tokenizer that handles:
+	 *   - /* ... *\/ comments (stripped before parsing)
+	 *   - url(foo), url('foo'), url("foo") with embedded whitespace/escapes
+	 *   - @import 'foo', @import "foo", @import url(foo) with media queries
+	 *   - @font-face src: url(foo) format("woff2"), url(bar);
+	 *   - Data URIs (skipped)
 	 *
 	 * @param css - CSS content to parse
 	 * @param baseUrl - Base URL for resolving relative URLs
@@ -1722,9 +1762,12 @@ export declare class AssetExtractor {
 	 */
 	extractFromCSS(css: string, baseUrl: string): ExtractedAsset[];
 	/**
-	 * Extracts URLs from CSS text (url() functions).
+	 * Extracts URLs from CSS text (url() functions) using a proper tokenizer.
+	 * Skips bodies inside /* comments *\/ and honors string/escape rules so that
+	 * url() with embedded spaces, quoted strings, or parenthesized data URIs
+	 * are handled correctly.
 	 *
-	 * @param css - CSS text to parse
+	 * @param css - CSS text to parse (comments should already be stripped)
 	 * @param baseUrl - Base URL for resolving
 	 * @returns Array of extracted assets
 	 */
@@ -2790,11 +2833,57 @@ export declare class ProgressReporter {
 	 */
 	private displayProgress;
 	/**
-	 * Displays progress as a bar.
-	 *
-	 * @param progress - Progress event
+	 * Displays progress as a wget-style bar: `100%[===========>]   1.2M  2.3MB/s`.
+	 * Width adapts to terminal, using plain ASCII (`=`, `>`, `.`) to match
+	 * GNU wget exactly — no Unicode block glyphs.
 	 */
 	private displayBar;
+	/**
+	 * True when any console output should be produced. Matches GNU wget's
+	 * defaults: output is on unless `-q/--quiet` is set. `-nv/--no-verbose`
+	 * downgrades to completion lines only.
+	 */
+	private get showOutput();
+	/** True when per-URL request lifecycle lines should print (suppressed by -nv). */
+	private get showLifecycle();
+	/**
+	 * Emits a wget-style `--YYYY-MM-DD HH:MM:SS--  URL` banner + Resolving/Connecting
+	 * lines for each new download. On by default (like GNU wget); suppressed
+	 * by `quiet` or `noVerbose`.
+	 */
+	wgetStart(event: DownloadStartEvent): void;
+	/**
+	 * Emits wget's `HTTP request sent, awaiting response... 200 OK` plus
+	 * Length/Content-Type/Saving-to lines. In debug mode, all response headers
+	 * are printed with `  ` prefix (matches wget -d).
+	 */
+	wgetHeaders(event: HeadersReceivedEvent, savingTo: string): void;
+	/**
+	 * Emits wget's final completion line:
+	 * `2026-04-19 12:34:57 (2.3 MB/s) - 'file.pdf' saved [N/Total]`.
+	 * Prints in `noVerbose` mode too — matches `wget -nv` which keeps one
+	 * completion line per URL.
+	 */
+	wgetComplete(event: DownloadCompleteEvent, avgSpeed: number): void;
+	/**
+	 * Emits a wget-style redirect line: `Location: URL [following]`.
+	 */
+	wgetRedirect(event: RedirectEvent): void;
+	/**
+	 * Emits a wget-style retry line: `Retrying ... in N seconds (tries: N/M)`.
+	 * Shown even in `noVerbose` because a retry means something went wrong.
+	 */
+	wgetRetry(event: RetryEvent): void;
+	/**
+	 * Emits a wget-style error line: `failed: ${message}`.
+	 */
+	wgetError(event: DownloadErrorEvent): void;
+	/**
+	 * Writes one line to stdout, ensuring any in-progress progress bar is
+	 * cleared first (so the line doesn't collide with the `\r`-rewritten bar).
+	 */
+	private writeLine;
+	private formatTimestamp;
 	/**
 	 * Displays progress as dots.
 	 *
@@ -8844,7 +8933,14 @@ export declare class Downloader {
 	private quotaBytes;
 	private totalDownloaded;
 	private cache;
+	private session;
+	private seedUrls;
+	private abortController;
 	private eventHandlers;
+	/** Converts timeout option from wget seconds to HTTP-client milliseconds. */
+	private timeoutMs;
+	/** Unified signal that fires if user aborts OR internal abort() is called. */
+	private get signal();
 	/**
 	 * Creates a new downloader instance.
 	 *
@@ -8897,6 +8993,8 @@ export declare class Downloader {
 	private addToQueue;
 	/**
 	 * Processes the download queue.
+	 * Watchdog logs activity when no URL finishes for >60s and triggers
+	 * diagnostic output, so "hangs for almost forever" become visible.
 	 */
 	private processQueue;
 	/**
@@ -8955,11 +9053,25 @@ export declare class Downloader {
 	private applyRateLimit;
 	/**
 	 * Normalizes a URL for consistent handling.
+	 * Accepts http://, https://, and file://. Plain paths ("./foo.html", "/abs/x.html")
+	 * are auto-converted to file:// URLs so users can seed local documents.
 	 *
-	 * @param url - URL to normalize
+	 * @param url - URL or path to normalize
 	 * @returns Normalized URL or null if invalid
 	 */
 	private normalizeUrl;
+	/**
+	 * Loads a file:// URL from the local filesystem and wires it through the
+	 * same pipeline as an HTTP download (urlMap, cache, asset extraction, link
+	 * conversion). Content-Type is inferred from extension.
+	 */
+	private loadLocalFile;
+	/**
+	 * Converts a RezoHeaders (or similar) instance into a plain record
+	 * suitable for event payloads. Uses the .entries() iterator when
+	 * available, falling back to .get() for known headers.
+	 */
+	private headersToRecord;
 	/**
 	 * Gets the MIME type from a response.
 	 *
@@ -8996,15 +9108,23 @@ export declare class Downloader {
 	 */
 	private emitSkip;
 	/**
-	 * Sleeps for a specified duration.
+	 * Sleeps for a specified duration, bailing early if the downloader is aborted.
 	 *
 	 * @param ms - Milliseconds to sleep
 	 */
 	private sleep;
 	/**
 	 * Aborts the current download operation.
+	 * Idempotent — safe to call from multiple sources. Flushes session
+	 * checkpoint synchronously before the caller returns so resume is safe.
 	 */
 	abort(): void;
+	/**
+	 * Persists current session state. When `immediate` is true the caller
+	 * awaits the actual disk write; otherwise the flush is debounced by
+	 * SessionCheckpoint internally.
+	 */
+	private checkpoint;
 	/**
 	 * Gets the current statistics.
 	 *
@@ -9515,6 +9635,55 @@ export declare class Wget {
 	 * @returns Download statistics
 	 */
 	fromFile(inputFile: string, options?: Partial<WgetOptions>): Promise<WgetStats>;
+	/**
+	 * Issues a POST request. Body can be a string, Buffer, or any JSON-
+	 * serializable value — strings/buffers pass through, objects are
+	 * JSON-encoded and Content-Type defaults to `application/json`.
+	 *
+	 * Accepts the full WgetOptions surface so recursive crawls, verbose
+	 * output, and caching work identically to `.get()`.
+	 */
+	post(url: string, body?: unknown, options?: Partial<WgetOptions>): Promise<WgetStats>;
+	/**
+	 * Issues a PUT request. Same body semantics as `.post()`.
+	 */
+	put(url: string, body?: unknown, options?: Partial<WgetOptions>): Promise<WgetStats>;
+	/**
+	 * Issues a PATCH request. Same body semantics as `.post()`.
+	 */
+	patch(url: string, body?: unknown, options?: Partial<WgetOptions>): Promise<WgetStats>;
+	/**
+	 * Issues a DELETE request. A body is permitted but discouraged per RFC 7231.
+	 */
+	delete(url: string, body?: unknown, options?: Partial<WgetOptions>): Promise<WgetStats>;
+	/**
+	 * Issues a HEAD request. Response body is empty; useful for checking
+	 * existence, timestamp, or Content-Length without downloading.
+	 */
+	head(url: string, options?: Partial<WgetOptions>): Promise<WgetStats>;
+	/**
+	 * Core path for non-GET methods. Encodes the body once, overrides the
+	 * http.method option, and delegates to the existing download pipeline.
+	 */
+	private runWithMethod;
+	/**
+	 * Returns a new Wget instance with deep-cloned options, a fresh Rezo
+	 * HTTP client, and all registered event handlers copied over. Mutating
+	 * the clone does not affect the original — use it to spawn variants:
+	 *
+	 * ```typescript
+	 * const base = new Wget().userAgent('MyBot/1.0').noRobots();
+	 * await base.clone().outputDir('./mirror-a').mirror('https://a.example');
+	 * await base.clone().outputDir('./mirror-b').mirror('https://b.example');
+	 * ```
+	 *
+	 * Non-cloneable values (AbortSignal, RezoCookieJar instances) are shared
+	 * by reference — that matches the intent: both clones should be abortable
+	 * by the same signal and share the same cookie jar if one was given.
+	 */
+	clone(options?: {
+		copyEventHandlers?: boolean;
+	}): Wget;
 	/**
 	 * Enables recursive downloading.
 	 *
@@ -10044,8 +10213,33 @@ export declare class Wget {
 	minFileSize(bytes: number): this;
 	/**
 	 * Aborts the current download operation.
+	 * The session checkpoint is flushed before this returns so the state
+	 * is recoverable via `.resume()` on the next invocation.
 	 */
 	abort(): void;
+	/**
+	 * Resumes a previously-interrupted session. If `url` is provided, it's
+	 * passed to the underlying downloader alongside the saved state; omit
+	 * it to continue exactly where the last run stopped (the saved seed
+	 * URLs are then used).
+	 *
+	 * The checkpoint lives at `{outputDir}/.rezo-wget/session.json`. If no
+	 * checkpoint exists, behavior falls back to `.get()` — i.e. a fresh run.
+	 *
+	 * @example
+	 * ```typescript
+	 * const wg = new Wget({ download: { outputDir: './mirror' } });
+	 * try {
+	 *   await wg.mirror('https://example.com/');
+	 * } catch {
+	 *   // crashed — resume later
+	 * }
+	 * // next process:
+	 * await new Wget({ download: { outputDir: './mirror' } })
+	 *   .resume('https://example.com/');
+	 * ```
+	 */
+	resume(url?: string, options?: Partial<WgetOptions>): Promise<WgetStats>;
 	/**
 	 * Gets the current options.
 	 *
@@ -10064,8 +10258,18 @@ export declare class Wget {
 	destroy(): Promise<void>;
 	/**
 	 * Attaches registered event handlers to the downloader.
+	 * When verbose/debug is enabled (and quiet is not), auto-attaches a
+	 * ProgressReporter so the console output mirrors GNU wget's exactly.
 	 */
 	private attachEventHandlers;
+	/**
+	 * Wires the ProgressReporter's wget-style lifecycle logging into the
+	 * downloader. Mirrors GNU wget: output is **on by default** and
+	 * suppressed only by `logging.quiet`. `logging.noVerbose` keeps
+	 * completion lines but drops per-URL lifecycle output; `logging.debug`
+	 * adds full response headers.
+	 */
+	private attachWgetStyleReporter;
 	/**
 	 * Deep merges two WgetOptions objects.
 	 * The second object's properties override the first.

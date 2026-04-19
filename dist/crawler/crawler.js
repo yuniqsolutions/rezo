@@ -927,6 +927,18 @@ export class Crawler {
       }
     }
   }
+  dispatchErrorEvents(err) {
+    for (let i = 0;i < this.errorEvents.length; i++) {
+      const event = this.errorEvents[i];
+      try {
+        this[event.handler](...event.attr, err);
+      } catch (handlerErr) {
+        if (this.config.debug) {
+          console.error("[Crawler] error-event handler threw:", handlerErr);
+        }
+      }
+    }
+  }
   _runHandler(handler, arg) {
     this.eventCount++;
     new Promise(async (resolve) => {
@@ -1410,8 +1422,10 @@ export class Crawler {
         await this.waitForNavigationHistory();
       await this.executeHttp(method, url, body, options, proxyRotating, isEmail, forceRevisit, oxylabsOptions, oxylabsInstance, oxylabsQueue, decodoInstance, decodoOptions, decodoQueue, 0, undefined, skipCache, emailMetadata, stealthInstance);
     }).catch((err) => {
-      if (this.config.debug)
-        console.warn("[Crawler] execute() task error:", err?.message);
+      console.error(`[Crawler] execute() task error for ${url}:`, err?.message ?? err);
+      if (this.config.debug && err?.stack)
+        console.error(err.stack);
+      this.dispatchErrorEvents(err);
     });
   }
   async execute2(method, url, body, options = {}, forceRevisit, emailMetadata) {
@@ -1436,8 +1450,10 @@ export class Crawler {
         emailMetadata
       }, forceRevisit, true);
     }).catch((err) => {
-      if (this.config.debug)
-        console.warn("[Crawler] execute2() task error:", err?.message);
+      console.error(`[Crawler] execute2() task error for ${url}:`, err?.message ?? err);
+      if (this.config.debug && err?.stack)
+        console.error(err.stack);
+      this.dispatchErrorEvents(err);
     });
   }
   async executeHttp(method, url, body, options = {}, proxyRotating = false, isEmail, forceRevisit, oxylabsOptions, oxylabsInstance, oxylabsQueue, decodoInstance, decodoOptions, decodoQueue, retryCount = 0, parentUrl, skipCache, emailMetadata, stealthInstance) {
@@ -1726,6 +1742,10 @@ export class Crawler {
     this.rawResponseEvents.length = 0;
     this.emailDiscoveredEvents.length = 0;
     this.emailLeadsEvents.length = 0;
+    this.startHandlers.length = 0;
+    this.finishHandlers.length = 0;
+    this.redirectHandlers.length = 0;
+    this.queueChangeHandlers.length = 0;
     this.domainResponseTimes.clear();
     this.domainCurrentDelay.clear();
     this.urlDepthMap.clear();

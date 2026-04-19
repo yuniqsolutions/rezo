@@ -9373,6 +9373,13 @@ export declare class Crawler {
 	 */
 	private _subscribeToManagedQueues;
 	/**
+	 * Invokes every registered error-event handler with the given error.
+	 * Swallows per-handler throws so one misbehaving handler can't mask others.
+	 * Used from the fire-and-forget execute/execute2 catch blocks so those
+	 * errors reach the same handler chain as in-crawl errors.
+	 */
+	private dispatchErrorEvents;
+	/**
 	 * Run a handler with event tracking (not through queue).
 	 * Increments eventCount before running, decrements after completion.
 	 * This allows waitForAll() to wait for handlers without queue bloat.

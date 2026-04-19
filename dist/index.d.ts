@@ -6279,7 +6279,7 @@ export declare function listProfiles(): string[];
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.131";
+export declare const VERSION = "1.0.132";
 export declare const PACKAGE_NAME = "rezo";
 export declare const isRezoError: typeof RezoError.isRezoError;
 export declare const Cancel: typeof RezoError;

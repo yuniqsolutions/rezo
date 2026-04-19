@@ -1,4 +1,4 @@
-import { parseHTML, createDOMParser } from '../dom/index.js';
+import { parseHTML, DOMParser } from '../dom/index.js';
 const HTML_URL_ATTRIBUTES = {
   a: ["href"],
   area: ["href"],
@@ -269,13 +269,15 @@ export class AssetExtractor {
   }
   extractFromCSS(css, baseUrl) {
     const assets = [];
-    const importRegex = /@import\s+(?:url\s*\(\s*)?['"]?([^'"\)\s;]+)['"]?\s*\)?[^;]*;/gi;
-    let match;
-    while ((match = importRegex.exec(css)) !== null) {
-      const url = this.resolveUrl(match[1], baseUrl);
-      if (url) {
+    const stripped = stripCssComments(css);
+    const importRe = /@import\s+(?:url\s*\(\s*)?(['"]?)([^'")\s;]+)\1\s*\)?[^;]*;?/gi;
+    let m;
+    while ((m = importRe.exec(stripped)) !== null) {
+      const raw = unescapeCssIdentifier(m[2]);
+      const resolved = this.resolveUrl(raw, baseUrl);
+      if (resolved && !raw.startsWith("data:") && !raw.startsWith("#")) {
         assets.push({
-          url,
+          url: resolved,
           type: "stylesheet",
           source: "css",
           required: true,
@@ -283,22 +285,22 @@ export class AssetExtractor {
         });
       }
     }
-    const urlAssets = this.extractUrlsFromCSSText(css, baseUrl);
-    assets.push(...urlAssets);
+    assets.push(...this.extractUrlsFromCSSText(stripped, baseUrl));
     return assets;
   }
   extractUrlsFromCSSText(css, baseUrl) {
     const assets = [];
-    const urlRegex = /url\s*\(\s*(['"]?)([^'"\)\s]+)\1\s*\)/gi;
-    let match;
-    while ((match = urlRegex.exec(css)) !== null) {
-      const urlValue = match[2].trim();
-      if (urlValue.startsWith("data:")) {
+    const urls = tokenizeCssUrls(css);
+    for (const raw of urls) {
+      const urlValue = raw.trim();
+      if (!urlValue)
         continue;
-      }
-      if (!urlValue || urlValue.startsWith("#")) {
+      if (urlValue.startsWith("data:"))
         continue;
-      }
+      if (urlValue.startsWith("#"))
+        continue;
+      if (/^about:|^javascript:|^chrome:|^blob:/i.test(urlValue))
+        continue;
       const resolvedUrl = this.resolveUrl(urlValue, baseUrl);
       if (!resolvedUrl)
         continue;
@@ -316,8 +318,7 @@ export class AssetExtractor {
   extractFromXML(xml, baseUrl) {
     const assets = [];
     try {
-      const parser = createDOMParser();
-      const doc = parser.parseFromString(xml, "text/xml");
+      const doc = new DOMParser().parseFromString(xml, "text/xml");
       const isSVG = doc.documentElement?.tagName.toLowerCase() === "svg";
       const source = isSVG ? "svg" : "xml";
       const allElements = Array.from(doc.querySelectorAll("*"));
@@ -549,5 +550,169 @@ export class AssetExtractor {
     }
     return [];
   }
+}
+export function stripCssComments(css) {
+  let out = "";
+  let i = 0;
+  const n = css.length;
+  while (i < n) {
+    const ch = css[i];
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      out += ch;
+      i++;
+      while (i < n) {
+        const c = css[i];
+        out += c;
+        i++;
+        if (c === "\\" && i < n) {
+          out += css[i];
+          i++;
+          continue;
+        }
+        if (c === quote)
+          break;
+        if (c === `
+`)
+          break;
+      }
+      continue;
+    }
+    if (ch === "/" && i + 1 < n && css[i + 1] === "*") {
+      i += 2;
+      while (i < n && !(css[i] === "*" && i + 1 < n && css[i + 1] === "/"))
+        i++;
+      if (i < n)
+        i += 2;
+      out += " ";
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+export function tokenizeCssUrls(css) {
+  const results = [];
+  const n = css.length;
+  let i = 0;
+  let lastProgress = -1;
+  while (i < n) {
+    if (i <= lastProgress)
+      break;
+    lastProgress = i;
+    const idx = findUrlFunction(css, i);
+    if (idx < 0)
+      break;
+    i = idx + 4;
+    while (i < n && isCssWhitespace(css[i]))
+      i++;
+    if (i >= n)
+      break;
+    const first = css[i];
+    let urlValue = "";
+    if (first === '"' || first === "'") {
+      const quote = first;
+      i++;
+      while (i < n) {
+        const c = css[i];
+        if (c === "\\" && i + 1 < n) {
+          urlValue += c + css[i + 1];
+          i += 2;
+          continue;
+        }
+        if (c === quote) {
+          i++;
+          break;
+        }
+        if (c === `
+`)
+          break;
+        urlValue += c;
+        i++;
+      }
+    } else {
+      while (i < n) {
+        const c = css[i];
+        if (c === ")")
+          break;
+        if (isCssWhitespace(c))
+          break;
+        if (c === '"' || c === "'" || c === "(")
+          break;
+        if (c === "\\" && i + 1 < n) {
+          urlValue += c + css[i + 1];
+          i += 2;
+          continue;
+        }
+        urlValue += c;
+        i++;
+      }
+    }
+    while (i < n && isCssWhitespace(css[i]))
+      i++;
+    if (i < n && css[i] === ")")
+      i++;
+    const decoded = unescapeCssIdentifier(urlValue);
+    if (decoded)
+      results.push(decoded);
+  }
+  return results;
+}
+export function unescapeCssIdentifier(input) {
+  let out = "";
+  let i = 0;
+  const n = input.length;
+  while (i < n) {
+    const c = input[i];
+    if (c !== "\\" || i + 1 >= n) {
+      out += c;
+      i++;
+      continue;
+    }
+    i++;
+    if (input[i] === `
+`) {
+      i++;
+      continue;
+    }
+    const hexMatch = /^[0-9a-fA-F]{1,6}/.exec(input.slice(i));
+    if (hexMatch) {
+      const cp = parseInt(hexMatch[0], 16);
+      out += cp > 0 && cp <= 1114111 ? String.fromCodePoint(cp) : "�";
+      i += hexMatch[0].length;
+      if (input[i] === " " || input[i] === "\t")
+        i++;
+      continue;
+    }
+    out += input[i];
+    i++;
+  }
+  return out;
+}
+function findUrlFunction(css, from) {
+  const n = css.length;
+  for (let i = from;i < n - 3; i++) {
+    const c0 = css.charCodeAt(i);
+    if (c0 !== 117 && c0 !== 85)
+      continue;
+    if ((css.charCodeAt(i + 1) | 32) !== 114)
+      continue;
+    if ((css.charCodeAt(i + 2) | 32) !== 108)
+      continue;
+    if (css.charCodeAt(i + 3) !== 40)
+      continue;
+    if (i > 0) {
+      const prev = css[i - 1];
+      if (/[A-Za-z0-9_\-]/.test(prev))
+        continue;
+    }
+    return i;
+  }
+  return -1;
+}
+function isCssWhitespace(c) {
+  return c === " " || c === "\t" || c === `
+` || c === "\r" || c === "\f";
 }
 export default AssetExtractor;

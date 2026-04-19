@@ -130,19 +130,102 @@ export class ProgressReporter {
     }
   }
   displayBar(progress) {
-    const width = 40;
+    const cols = process.stdout.columns ?? 80;
+    const barWidth = Math.max(10, Math.min(60, cols - 40));
     const percent = progress.percent ?? 0;
-    const filled = Math.round(width * percent / 100);
-    const empty = width - filled;
-    const bar = "█".repeat(filled) + "░".repeat(empty);
+    const filled = Math.max(0, Math.min(barWidth, Math.round(barWidth * percent / 100)));
+    let bar;
+    if (progress.totalBytes === null) {
+      bar = ".".repeat(barWidth);
+    } else {
+      const equalsCount = Math.max(0, filled - 1);
+      const arrow = filled > 0 && filled < barWidth ? ">" : "";
+      const rest = barWidth - equalsCount - arrow.length;
+      bar = "=".repeat(equalsCount) + arrow + " ".repeat(Math.max(0, rest));
+    }
+    const percentStr = progress.totalBytes !== null ? `${percent.toFixed(0).padStart(3, " ")}%` : "    ";
     const speedStr = this.formatSpeed(progress.speed);
-    const etaStr = progress.eta !== null ? this.formatTime(progress.eta) : "--:--";
+    const etaStr = progress.eta !== null ? `eta ${this.formatTime(progress.eta)}` : "";
     const sizeStr = this.formatBytes(progress.bytesDownloaded);
-    const totalStr = progress.totalBytes !== null ? "/" + this.formatBytes(progress.totalBytes) : "";
-    const line = `[${bar}] ${percent.toFixed(1)}% ${sizeStr}${totalStr} ${speedStr} ETA: ${etaStr}`;
+    const line = `${percentStr}[${bar}] ${sizeStr.padStart(10)}  ${speedStr}  ${etaStr}`.trimEnd();
     if (this.options.showProgress || process.stdout.isTTY) {
       process.stdout.write("\r" + line);
     }
+  }
+  get showOutput() {
+    return !this.options.quiet;
+  }
+  get showLifecycle() {
+    return !this.options.quiet && !this.options.noVerbose;
+  }
+  wgetStart(event) {
+    if (!this.showLifecycle)
+      return;
+    const timestamp = this.formatTimestamp(event.timestamp);
+    this.writeLine(`--${timestamp}--  ${event.url}`);
+    try {
+      const host = new URL(event.url).hostname;
+      if (host) {
+        this.writeLine(`Resolving ${host} (${host})... `);
+        this.writeLine(`Connecting to ${host} (${host})... connected.`);
+      }
+    } catch {}
+  }
+  wgetHeaders(event, savingTo) {
+    if (!this.showLifecycle)
+      return;
+    const statusText = event.statusText || "";
+    this.writeLine(`HTTP request sent, awaiting response... ${event.statusCode} ${statusText}`.trimEnd());
+    if (this.options.debug) {
+      for (const [name, raw] of Object.entries(event.headers)) {
+        const value = Array.isArray(raw) ? raw.join(", ") : raw;
+        this.writeLine(`  ${name}: ${value}`);
+      }
+    }
+    const length = event.contentLength;
+    const ct = event.contentType ?? "unspecified";
+    const lenStr = length !== null ? `${length} (${this.formatBytes(length)})` : "unspecified";
+    this.writeLine(`Length: ${lenStr} [${ct}]`);
+    this.writeLine(`Saving to: '${savingTo}'`);
+    this.writeLine("");
+  }
+  wgetComplete(event, avgSpeed) {
+    if (!this.showOutput)
+      return;
+    const timestamp = this.formatTimestamp(Date.now());
+    const speed = this.formatSpeed(avgSpeed);
+    const saved = `[${event.size}/${event.size}]`;
+    this.newline();
+    this.writeLine(`${timestamp} (${speed}) - '${event.filename}' saved ${saved}`);
+    if (this.showLifecycle)
+      this.writeLine("");
+  }
+  wgetRedirect(event) {
+    if (!this.showLifecycle)
+      return;
+    this.writeLine(`Location: ${event.toUrl} [following]`);
+  }
+  wgetRetry(event) {
+    if (!this.showOutput)
+      return;
+    this.writeLine(`Retrying (${event.attempt}/${event.maxAttempts}) in ` + `${(event.delayMs / 1000).toFixed(1)}s: ${event.url} — ${event.error.message}`);
+  }
+  wgetError(event) {
+    if (this.options.quiet)
+      return;
+    this.writeLine(`${event.url}: failed: ${event.error.message}`);
+  }
+  writeLine(text) {
+    if (this.options.showProgress || process.stdout.isTTY) {
+      process.stdout.write("\r\x1B[2K");
+    }
+    process.stdout.write(text + `
+`);
+  }
+  formatTimestamp(ms) {
+    const d = new Date(ms);
+    const pad = (n) => n.toString().padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
   displayDot(progress) {
     const kb = Math.floor(progress.bytesDownloaded / 1024);
