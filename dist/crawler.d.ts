@@ -50,7 +50,32 @@ export interface FileCacherOptions {
 	 */
 	maxEntries?: number;
 }
-declare class FileCacher {
+/**
+ * FileCacher - High-performance response caching optimized for web crawlers
+ *
+ * Uses a SINGLE SQLite database with namespace as a column to prevent
+ * file descriptor exhaustion when crawling many domains.
+ *
+ * Performance optimizations:
+ * - WAL journal mode for non-blocking reads during writes
+ * - Single database connection (prevents FD exhaustion)
+ * - Composite index on (namespace, key) for fast lookups
+ * - LRU eviction to cap memory/disk usage
+ * - Memory-mapped I/O where supported
+ *
+ * @example
+ * ```typescript
+ * const cache = await FileCacher.create({
+ *   cacheDir: '/tmp/my-crawler/cache',
+ *   ttl: 86400000, // 24 hours
+ *   maxEntries: 100000
+ * });
+ *
+ * await cache.set(url, responseData, undefined, 'example.com');
+ * const data = await cache.get(url, 'example.com');
+ * ```
+ */
+export declare class FileCacher {
 	private db;
 	private readonly options;
 	private readonly cacheDir;
@@ -130,6 +155,28 @@ declare class FileCacher {
 	get directory(): string;
 	get databasePath(): string;
 }
+export interface NavigationHistoryOptions {
+	storeDir?: string;
+	dbFileName?: string;
+	hashUrls?: boolean;
+}
+export interface QueuedUrl {
+	url: string;
+	method: string;
+	priority: number;
+	body?: string;
+	headers?: string;
+	metadata?: string;
+	addedAt: number;
+}
+export interface VisitedUrl {
+	url: string;
+	status: number;
+	visitedAt: number;
+	finalUrl?: string;
+	contentType?: string;
+	errorMessage?: string;
+}
 export interface CrawlSession {
 	sessionId: string;
 	baseUrl: string;
@@ -140,6 +187,53 @@ export interface CrawlSession {
 	urlsQueued: number;
 	urlsFailed: number;
 	metadata?: string;
+}
+export declare class NavigationHistory {
+	private db;
+	private readonly options;
+	private readonly storeDir;
+	private readonly dbPath;
+	private closed;
+	private initPromise;
+	private constructor();
+	static create(options?: NavigationHistoryOptions): Promise<NavigationHistory>;
+	private initialize;
+	private getUrlKey;
+	createSession(sessionId: string, baseUrl: string, metadata?: Record<string, any>): Promise<CrawlSession>;
+	getSession(sessionId: string): Promise<CrawlSession | undefined>;
+	updateSessionStatus(sessionId: string, status: CrawlSession["status"]): Promise<void>;
+	updateSessionStats(sessionId: string, stats: {
+		urlsVisited?: number;
+		urlsQueued?: number;
+		urlsFailed?: number;
+	}): Promise<void>;
+	addToQueue(sessionId: string, url: string, options?: {
+		method?: string;
+		priority?: number;
+		body?: any;
+		headers?: Record<string, string>;
+		metadata?: Record<string, any>;
+	}): Promise<boolean>;
+	getNextFromQueue(sessionId: string): Promise<QueuedUrl | undefined>;
+	removeFromQueue(sessionId: string, url: string): Promise<boolean>;
+	getQueueSize(sessionId: string): Promise<number>;
+	markVisited(sessionId: string, url: string, result?: {
+		status?: number;
+		finalUrl?: string;
+		contentType?: string;
+		errorMessage?: string;
+	}): Promise<void>;
+	isVisited(sessionId: string, url: string): Promise<boolean>;
+	getVisitedCount(sessionId: string): Promise<number>;
+	getFailedUrls(sessionId: string): Promise<VisitedUrl[]>;
+	getAllQueuedUrls(sessionId: string): Promise<QueuedUrl[]>;
+	clearQueue(sessionId: string): Promise<void>;
+	clearVisited(sessionId: string): Promise<void>;
+	deleteSession(sessionId: string): Promise<void>;
+	getResumableSessions(): Promise<CrawlSession[]>;
+	close(): Promise<void>;
+	get isClosed(): boolean;
+	get databasePath(): string;
 }
 export interface RezoHttpHeaders {
 	accept?: string | undefined;
@@ -3023,6 +3117,12 @@ export interface RezoReactNativeOptions {
 	backgroundTask?: RezoReactNativeBackgroundTaskConfig | null;
 	upload?: RezoReactNativeUploadConfig | null;
 }
+export interface StagedTimeoutConfig {
+	connect?: number;
+	headers?: number;
+	body?: number;
+	total?: number;
+}
 export type queueOptions = QueueConfig;
 export interface CacheConfig {
 	/** Response cache configuration */
@@ -3098,8 +3198,12 @@ export interface RezoDefaultOptions {
 	responseEncoding?: string;
 	/** Basic authentication credentials */
 	auth?: RezoHttpRequest["auth"];
-	/** Request timeout in milliseconds */
-	timeout?: number;
+	/**
+	 * Request timeout. Pass a single number (milliseconds) to cap the entire
+	 * request, or a `StagedTimeoutConfig` object to budget each phase
+	 * independently (`connect`, `headers`, `body`, `total`).
+	 */
+	timeout?: number | StagedTimeoutConfig;
 	/** @deprecated Use `timeout` instead */
 	requestTimeout?: number;
 	/** Whether to reject requests with invalid SSL certificates */
@@ -3221,6 +3325,14 @@ export interface RezoDefaultOptions {
 	 * @default (status) => status >= 200 && status < 300
 	 */
 	validateStatus?: ((status: number) => boolean) | null;
+	/**
+	 * When `false`, non-2xx HTTP responses do NOT throw — the resolved
+	 * `RezoResponse` is returned instead. Network errors still throw.
+	 * Per-request `throwHttpErrors` overrides this default.
+	 *
+	 * @default true
+	 */
+	throwHttpErrors?: boolean;
 	/**
 	 * Custom function to serialize URL query parameters.
 	 * Replaces the default serialization logic.
@@ -3890,8 +4002,12 @@ export interface RezoRequestConfig<D = any> {
 		/** Password for authentication */
 		password: string;
 	};
-	/** Request timeout in milliseconds */
-	timeout?: number;
+	/**
+	 * Request timeout. Pass a single number (milliseconds) to cap the entire
+	 * request, or a `StagedTimeoutConfig` object to budget each phase
+	 * independently (`connect`, `headers`, `body`, `total`).
+	 */
+	timeout?: number | StagedTimeoutConfig;
 	/** Whether to reject requests with invalid SSL certificates */
 	rejectUnauthorized?: boolean;
 	/**
@@ -4416,6 +4532,26 @@ export interface RezoRequestConfig<D = any> {
 	 * ```
 	 */
 	validateStatus?: ((status: number) => boolean) | null;
+	/**
+	 * When `false`, non-2xx HTTP responses do NOT throw — the resolved `RezoResponse`
+	 * is returned instead and you handle `response.status` yourself. Network errors
+	 * (ECONNREFUSED, ETIMEDOUT, etc.) still throw.
+	 *
+	 * Takes precedence over `validateStatus` when explicitly set to `false`.
+	 *
+	 * @default true
+	 *
+	 * @example
+	 * ```ts
+	 * // Per request
+	 * const r = await rezo.get('/maybe-404', { throwHttpErrors: false });
+	 * if (r.status === 404) handleMissing();
+	 *
+	 * // Instance-wide
+	 * const client = rezo.create({ throwHttpErrors: false });
+	 * ```
+	 */
+	throwHttpErrors?: boolean;
 	/**
 	 * Custom function to serialize URL query parameters.
 	 * When provided, this replaces the default serialization logic.
@@ -8669,6 +8805,26 @@ export interface EmailDiscoveryEvent<T = Record<string, any>> {
  * @returns Boolean indicating if domain is restricted
  */
 export declare function isRestrictedDomain(url: string): boolean;
+/**
+ * HealthMetrics - Real-time crawler health monitoring
+ *
+ * Tracks key performance indicators and health statistics
+ * for production monitoring and alerting.
+ *
+ * @module crawler/plugin/health-metrics
+ */
+export interface HealthMetricsOptions {
+	/**
+	 * Window size in milliseconds for rolling averages
+	 * @default 60000 (1 minute)
+	 */
+	windowSize?: number;
+	/**
+	 * Sample interval for throughput calculation
+	 * @default 1000 (1 second)
+	 */
+	sampleInterval?: number;
+}
 export interface HealthSnapshot {
 	/** Timestamp of snapshot */
 	timestamp: number;
@@ -8694,6 +8850,80 @@ export interface HealthSnapshot {
 	totalFailures: number;
 	/** Uptime in milliseconds */
 	uptimeMs: number;
+}
+/**
+ * HealthMetrics - Track crawler performance in real-time
+ *
+ * @example
+ * ```typescript
+ * const metrics = new HealthMetrics();
+ *
+ * // Record requests
+ * metrics.recordRequest(150, true);  // 150ms, success
+ * metrics.recordRequest(500, false); // 500ms, failure
+ *
+ * // Get health snapshot
+ * const health = metrics.getSnapshot(queueDepth, activeRequests);
+ * console.log(`RPS: ${health.requestsPerSecond}, Success: ${health.successRate}%`);
+ *
+ * // Export for monitoring system
+ * console.log(metrics.toPrometheusFormat());
+ * ```
+ */
+export declare class HealthMetrics {
+	private readonly windowSize;
+	private readonly startTime;
+	/** Fixed-size ring buffer for O(1) recordRequest */
+	private readonly ringBuffer;
+	private readonly RING_SIZE;
+	private ringHead;
+	private ringCount;
+	private totalRequests;
+	private totalSuccesses;
+	private totalFailures;
+	private totalResponseTime;
+	constructor(options?: HealthMetricsOptions);
+	/**
+	 * Record a completed request — O(1), no allocations
+	 */
+	recordRequest(responseTimeMs: number, success: boolean): void;
+	/**
+	 * Get samples within the rolling window from the ring buffer
+	 */
+	private getWindowSamples;
+	/**
+	 * Get current health snapshot
+	 */
+	getSnapshot(queueDepth: number, activeRequests: number): HealthSnapshot;
+	/**
+	 * Get total statistics (all-time, not windowed)
+	 */
+	getTotals(): {
+		requests: number;
+		successes: number;
+		failures: number;
+		avgResponseTime: number;
+	};
+	/**
+	 * Check if crawler is healthy based on thresholds
+	 */
+	isHealthy(options?: {
+		minSuccessRate?: number;
+		maxAvgResponseTime?: number;
+		maxP95ResponseTime?: number;
+	}): boolean;
+	/**
+	 * Format metrics for Prometheus scraping
+	 */
+	toPrometheusFormat(prefix?: string): string;
+	/**
+	 * Format metrics as JSON for logging/monitoring
+	 */
+	toJSON(queueDepth?: number, activeRequests?: number): string;
+	/**
+	 * Reset all metrics
+	 */
+	reset(): void;
 }
 export type VisitOxylabsOverrides = Partial<Pick<OxylabsConfig, "browserType" | "locale" | "geoLocation" | "http_method" | "base64Body" | "returnAsBase64" | "successful_status_codes" | "session_id" | "follow_redirects" | "javascript_rendering" | "cookies" | "render" | "context">>;
 export type VisitDecodoOverrides = Partial<Pick<DecodoConfig, "deviceType" | "locale" | "country" | "state" | "city" | "headless" | "sessionId" | "sessionDuration" | "javascript" | "javascriptWait" | "waitForCss" | "http_method" | "base64Body" | "successful_status_codes" | "session_id" | "javascript_rendering" | "cookies">>;
@@ -9628,6 +9858,672 @@ export declare class Crawler {
 	 * ```
 	 */
 	destroy(): Promise<void>;
+}
+/**
+ * MemoryMonitor - Memory-aware processing for crawler
+ *
+ * Monitors heap usage and provides throttling recommendations
+ * to prevent OOM crashes on long-running crawls.
+ *
+ * @module crawler/plugin/memory-monitor
+ */
+export interface MemoryMonitorOptions {
+	/**
+	 * Warning threshold as ratio of max heap (0-1)
+	 * @default 0.7 (70%)
+	 */
+	warningRatio?: number;
+	/**
+	 * Critical threshold as ratio of max heap (0-1)
+	 * @default 0.85 (85%)
+	 */
+	criticalRatio?: number;
+	/**
+	 * Check interval in milliseconds
+	 * @default 10000 (10 seconds)
+	 */
+	checkInterval?: number;
+	/**
+	 * Enable automatic monitoring with callbacks
+	 * @default false
+	 */
+	autoMonitor?: boolean;
+}
+export type MemoryStatus = "ok" | "warning" | "critical";
+export interface MemoryReport {
+	status: MemoryStatus;
+	heapUsedMB: number;
+	heapTotalMB: number;
+	heapLimitMB: number;
+	usagePercent: number;
+	externalMB: number;
+	rssMB: number;
+}
+/**
+ * MemoryMonitor - Track and respond to memory pressure
+ *
+ * @example
+ * ```typescript
+ * const monitor = new MemoryMonitor({ warningRatio: 0.7 });
+ *
+ * // Manual check
+ * if (monitor.check() === 'critical') {
+ *   queue.pause();
+ *   monitor.forceGC();
+ *   await sleep(5000);
+ *   queue.resume();
+ * }
+ *
+ * // Auto-monitoring with callbacks
+ * monitor.startAutoMonitor({
+ *   onWarning: () => queue.concurrency = 5,
+ *   onCritical: () => queue.pause(),
+ *   onRecovered: () => queue.resume()
+ * });
+ * ```
+ */
+export declare class MemoryMonitor {
+	private readonly warningThreshold;
+	private readonly criticalThreshold;
+	private readonly checkInterval;
+	private readonly maxHeap;
+	private monitorInterval?;
+	private lastStatus;
+	constructor(options?: MemoryMonitorOptions);
+	/**
+	 * Check current memory status
+	 */
+	check(): MemoryStatus;
+	/**
+	 * Get detailed memory report
+	 */
+	getReport(): MemoryReport;
+	/**
+	 * Get current heap usage as percentage
+	 */
+	getUsagePercent(): number;
+	/**
+	 * Force garbage collection if available
+	 * Note: Requires Node.js to be started with --expose-gc flag
+	 */
+	forceGC(): boolean;
+	/**
+	 * Start automatic monitoring with callbacks
+	 */
+	startAutoMonitor(callbacks: {
+		onWarning?: (report: MemoryReport) => void;
+		onCritical?: (report: MemoryReport) => void;
+		onRecovered?: (report: MemoryReport) => void;
+	}): void;
+	/**
+	 * Stop automatic monitoring
+	 */
+	stopAutoMonitor(): void;
+	/**
+	 * Get recommended concurrency based on memory pressure
+	 * @param currentConcurrency Current concurrency setting
+	 * @param minConcurrency Minimum concurrency (default: 5)
+	 */
+	getRecommendedConcurrency(currentConcurrency: number, minConcurrency?: number): number;
+	/**
+	 * Clean up resources
+	 */
+	destroy(): void;
+}
+/**
+ * ResultStream - Streaming result writer for crawler output
+ *
+ * Writes results to disk in JSONL format instead of accumulating in memory.
+ * Prevents OOM on long-running crawls with many results.
+ *
+ * Features:
+ * - Append-only JSONL output
+ * - Periodic flushing for durability
+ * - Automatic file rotation (optional)
+ * - Memory-efficient streaming
+ *
+ * @module crawler/plugin/result-stream
+ */
+export interface ResultStreamOptions {
+	/**
+	 * Output file path
+	 */
+	outputPath: string;
+	/**
+	 * Output format
+	 * @default 'jsonl'
+	 */
+	format?: "jsonl" | "csv";
+	/**
+	 * Flush to disk after this many writes
+	 * @default 100
+	 */
+	flushInterval?: number;
+	/**
+	 * Maximum file size in bytes before rotation (0 = no rotation)
+	 * @default 0
+	 */
+	maxFileSize?: number;
+	/**
+	 * CSV headers (required if format is 'csv')
+	 */
+	csvHeaders?: string[];
+}
+/**
+ * ResultStream - Write crawler results directly to disk
+ *
+ * @example
+ * ```typescript
+ * const stream = new ResultStream({ outputPath: './results.jsonl' });
+ *
+ * crawler.onDocument((doc, res) => {
+ *   stream.write({ url: res.url, title: doc.title });
+ * });
+ *
+ * await crawler.done();
+ * await stream.close();
+ * ```
+ */
+export declare class ResultStream {
+	private stream;
+	private count;
+	private bytesWritten;
+	private fileIndex;
+	private readonly options;
+	private closed;
+	constructor(options: ResultStreamOptions);
+	/**
+	 * Open or rotate the output stream
+	 */
+	private openStream;
+	/**
+	 * Get current file path (with rotation index if applicable)
+	 */
+	private getFilePath;
+	/**
+	 * Write a result to the stream
+	 */
+	write(data: any): void;
+	/**
+	 * Write multiple results at once
+	 */
+	writeMany(items: any[]): void;
+	/**
+	 * Convert object to CSV line
+	 */
+	private toCSV;
+	/**
+	 * Rotate to a new file
+	 */
+	private rotate;
+	/**
+	 * Flush any buffered data
+	 */
+	flush(): void;
+	/**
+	 * Close the stream
+	 */
+	close(): Promise<void>;
+	/**
+	 * Get number of records written
+	 */
+	get recordCount(): number;
+	/**
+	 * Get total bytes written
+	 */
+	get totalBytes(): number;
+	/**
+	 * Check if stream is closed
+	 */
+	get isClosed(): boolean;
+	/**
+	 * Get output file path
+	 */
+	get outputPath(): string;
+}
+/**
+ * CappedArray - An Array-like structure with automatic LRU eviction when size limit is reached
+ *
+ * Prevents unbounded memory growth by evicting oldest entries
+ * when the array exceeds the configured maximum size.
+ *
+ * @module crawler/plugin/capped-array
+ */
+export interface CappedArrayOptions {
+	/**
+	 * Maximum number of entries before eviction
+	 * @default 100000
+	 */
+	maxSize?: number;
+	/**
+	 * Percentage of entries to evict when limit is reached (0-1)
+	 * @default 0.1 (10%)
+	 */
+	evictionRatio?: number;
+	/**
+	 * Callback when eviction occurs (useful for auto-export)
+	 */
+	onEviction?: (evictedItems: any[], remainingCount: number) => void;
+}
+/**
+ * CappedArray - LRU-evicting Array implementation
+ *
+ * @example
+ * ```typescript
+ * const arr = new CappedArray<any>({
+ *   maxSize: 100000,
+ *   onEviction: (evicted, remaining) => {
+ *     console.log(`Evicted ${evicted.length} items, ${remaining} remaining`);
+ *   }
+ * });
+ *
+ * arr.push({ url: 'https://example.com', title: 'Example' });
+ *
+ * // When maxSize is exceeded, oldest 10% are evicted
+ * ```
+ */
+export declare class CappedArray<T> {
+	private readonly items;
+	private readonly maxSize;
+	private readonly evictionCount;
+	private readonly onEviction?;
+	constructor(options?: CappedArrayOptions);
+	/**
+	 * Push an item, evicting oldest entries if at capacity
+	 */
+	push(item: T): number;
+	/**
+	 * Push multiple items
+	 */
+	pushMany(items: T[]): number;
+	/**
+	 * Get item at index
+	 */
+	get(index: number): T | undefined;
+	/**
+	 * Get current length
+	 */
+	get length(): number;
+	/**
+	 * Clear all items
+	 */
+	clear(): void;
+	/**
+	 * Get a shallow copy of all items
+	 */
+	toArray(): T[];
+	/**
+	 * Iterate over items
+	 */
+	[Symbol.iterator](): Iterator<T>;
+	/**
+	 * ForEach iteration
+	 */
+	forEach(callback: (item: T, index: number, array: T[]) => void): void;
+	/**
+	 * Map items
+	 */
+	map<U>(callback: (item: T, index: number, array: T[]) => U): U[];
+	/**
+	 * Filter items
+	 */
+	filter(predicate: (item: T, index: number, array: T[]) => boolean): T[];
+	/**
+	 * Evict oldest entries
+	 */
+	private evict;
+	/**
+	 * Get max size
+	 */
+	get maxCapacity(): number;
+	/**
+	 * Check if at capacity
+	 */
+	get isAtCapacity(): boolean;
+}
+/**
+ * RobotsTxt - robots.txt parser and validator for web crawlers
+ *
+ * Parses robots.txt files and validates URLs against the rules.
+ * Supports User-agent, Allow, Disallow, and Crawl-delay directives.
+ *
+ * @module crawler/plugin/robots-txt
+ * @author Rezo HTTP Client Library
+ */
+export interface RobotsTxtRule {
+	path: string;
+	allow: boolean;
+}
+export interface RobotsTxtDirectives {
+	rules: RobotsTxtRule[];
+	crawlDelay?: number;
+	sitemaps: string[];
+}
+export interface RobotsTxtCache {
+	[domain: string]: {
+		directives: RobotsTxtDirectives;
+		fetchedAt: number;
+		ttl: number;
+	};
+}
+/**
+ * RobotsTxt parser and validator
+ *
+ * @example
+ * ```typescript
+ * const robots = new RobotsTxt();
+ *
+ * // Fetch and parse robots.txt
+ * await robots.fetch('https://example.com', fetchFunction);
+ *
+ * // Check if URL is allowed
+ * const allowed = robots.isAllowed('https://example.com/page', 'RezoBot');
+ * ```
+ */
+export declare class RobotsTxt {
+	private cache;
+	private readonly userAgent;
+	private readonly cacheTTL;
+	constructor(options?: {
+		userAgent?: string;
+		cacheTTL?: number;
+	});
+	/**
+	 * Parse robots.txt content into directives
+	 */
+	parse(content: string, targetUserAgent?: string): RobotsTxtDirectives;
+	/**
+	 * Fetch and cache robots.txt for a domain
+	 */
+	fetch(baseUrl: string, fetcher: (url: string) => Promise<{
+		status: number;
+		data?: string;
+	}>): Promise<RobotsTxtDirectives>;
+	/**
+	 * Check if a URL is allowed by robots.txt rules
+	 */
+	isAllowed(url: string, directives?: RobotsTxtDirectives): boolean;
+	/**
+	 * Match path against robots.txt pattern
+	 * Supports * and $ wildcards
+	 */
+	private matchPath;
+	/**
+	 * Get crawl delay for a domain (in milliseconds)
+	 */
+	getCrawlDelay(url: string): number | undefined;
+	/**
+	 * Get sitemaps for a domain
+	 */
+	getSitemaps(url: string): string[];
+	/**
+	 * Clear cache for a domain or all domains
+	 */
+	clearCache(domain?: string): void;
+	/**
+	 * Check if robots.txt is cached for a domain
+	 */
+	isCached(url: string): boolean;
+}
+/**
+ * CrawlerUrlStore - High-performance SQLite-based URL tracking for web crawlers
+ *
+ * Optimized specifically for crawler workloads with:
+ * - WAL mode for high-throughput concurrent reads/writes
+ * - Batch operations for efficient bulk URL tracking
+ * - Hash-based URL storage for memory efficiency
+ * - Optimized indexes for fast lookups
+ *
+ * @module cache/url-store
+ * @author Rezo HTTP Client Library
+ */
+/**
+ * Configuration options for UrlStore
+ */
+export interface UrlStoreOptions {
+	/**
+	 * Directory path for storing the URL database
+	 * @default '/tmp/rezo-crawler/urls'
+	 */
+	storeDir?: string;
+	/**
+	 * Database filename
+	 * @default 'urls.db'
+	 */
+	dbFileName?: string;
+	/**
+	 * Default time-to-live in milliseconds for URL entries
+	 * @default 604800000 (7 days)
+	 */
+	ttl?: number;
+	/**
+	 * Maximum number of URLs to store (0 = unlimited)
+	 * @default 0
+	 */
+	maxUrls?: number;
+	/**
+	 * Use URL hashing for storage (saves space, better privacy)
+	 * @default true
+	 */
+	hashUrls?: boolean;
+	/**
+	 * Maximum number of default-namespace visited URLs to keep in memory
+	 * for fast lookups before falling back to SQLite.
+	 * @default 100000
+	 */
+	inMemoryMaxUrls?: number;
+}
+/**
+ * UrlStore - High-performance URL tracking optimized for web crawlers
+ *
+ * Designed specifically for crawler workloads to track visited URLs efficiently.
+ * Uses SQLite with WAL mode for maximum throughput during concurrent crawling.
+ *
+ * Performance optimizations:
+ * - WAL journal mode for non-blocking reads during writes
+ * - SHA-256 URL hashing for fixed-size keys (64 chars)
+ * - WITHOUT ROWID table for faster key lookups
+ * - Batch operations for bulk URL tracking
+ * - Covering indexes for common queries
+ *
+ * @example
+ * ```typescript
+ * // Create store for web crawling
+ * const store = await UrlStore.create({
+ *   storeDir: '/tmp/my-crawler/urls',
+ *   ttl: 86400000 // 24 hours
+ * });
+ *
+ * // Check and track URLs efficiently
+ * const unvisited = await store.filterUnvisited(discoveredUrls);
+ * await store.setMany(unvisited, 'example.com');
+ * ```
+ */
+export declare class UrlStore {
+	private db;
+	private readonly options;
+	private readonly storeDir;
+	private readonly dbPath;
+	private closed;
+	private initPromise;
+	/** In-memory LRU of default-namespace visited URLs with expiry */
+	private readonly inMemoryVisited;
+	/** Pending URL writes buffered for batch INSERT */
+	private pendingWrites;
+	private readonly FLUSH_THRESHOLD;
+	private flushTimer;
+	private constructor();
+	/**
+	 * Create a new UrlStore instance
+	 */
+	static create(options?: UrlStoreOptions): Promise<UrlStore>;
+	/**
+	 * Initialize the database with optimized settings
+	 */
+	private initialize;
+	/** Counter to throttle maxUrls eviction checks */
+	private urlWriteCount;
+	/** LRU cache for URL hashes to avoid repeated SHA-256 computation */
+	private urlKeyCache;
+	private readonly URL_KEY_CACHE_MAX;
+	/** Max URL length to use as-is (skip hashing). Covers most URLs. */
+	private readonly HASH_THRESHOLD;
+	/**
+	 * Get the URL key — skip SHA-256 for short URLs, use cache for long ones
+	 */
+	private getUrlKey;
+	/**
+	 * Mark a URL as visited
+	 * Uses write-behind buffer: immediately marks in-memory, batches SQLite writes
+	 */
+	set(url: string, namespace?: string, ttl?: number): Promise<void>;
+	/**
+	 * Flush pending writes to SQLite in a single transaction
+	 */
+	private flushPending;
+	/**
+	 * Mark multiple URLs as visited in a single transaction (batch operation)
+	 */
+	setMany(urls: string[], namespace?: string, ttl?: number): Promise<void>;
+	/**
+	 * Check if a URL has been visited and is not expired
+	 * Fast path: checks in-memory Set first (O(1)), falls back to SQLite
+	 */
+	has(url: string, namespace?: string): Promise<boolean>;
+	/**
+	 * Check multiple URLs at once and return visited ones (batch operation)
+	 */
+	hasMany(urls: string[], namespace?: string): Promise<Set<string>>;
+	/**
+	 * Filter out already-visited URLs from a list (crawler helper)
+	 * Returns only URLs that have NOT been visited
+	 */
+	filterUnvisited(urls: string[], namespace?: string): Promise<string[]>;
+	/**
+	 * Delete a URL from the store
+	 */
+	delete(url: string, namespace?: string): Promise<boolean>;
+	/**
+	 * Clear all URLs in a namespace
+	 */
+	clear(namespace?: string): Promise<void>;
+	/**
+	 * Remove all expired entries
+	 */
+	cleanup(): Promise<number>;
+	/**
+	 * Get URL count for a namespace
+	 */
+	count(namespace?: string): Promise<number>;
+	/**
+	 * Get statistics for the URL store
+	 */
+	stats(namespace?: string): Promise<{
+		total: number;
+		expired: number;
+		namespaces: number;
+	}>;
+	/**
+	 * Close the database connection
+	 */
+	close(): Promise<void>;
+	get isClosed(): boolean;
+	get path(): string;
+}
+/**
+ * CappedMap - A Map with automatic LRU eviction when size limit is reached
+ *
+ * Prevents unbounded memory growth by evicting oldest entries
+ * when the map exceeds the configured maximum size.
+ *
+ * @module crawler/plugin/capped-map
+ */
+export interface CappedMapOptions {
+	/**
+	 * Maximum number of entries before eviction
+	 * @default 10000
+	 */
+	maxSize?: number;
+	/**
+	 * Percentage of entries to evict when limit is reached (0-1)
+	 * @default 0.1 (10%)
+	 */
+	evictionRatio?: number;
+}
+/**
+ * CappedMap - LRU-evicting Map implementation
+ *
+ * @example
+ * ```typescript
+ * const map = new CappedMap<string, number>({ maxSize: 1000 });
+ *
+ * map.set('key1', 100);
+ * map.set('key2', 200);
+ *
+ * // When maxSize is exceeded, oldest 10% are evicted
+ * ```
+ */
+export declare class CappedMap<K, V> {
+	private readonly map;
+	private readonly maxSize;
+	private readonly evictionCount;
+	constructor(options?: CappedMapOptions);
+	private evictionRatio;
+	/**
+	 * Set a value, evicting oldest entries if at capacity
+	 */
+	set(key: K, value: V): this;
+	/**
+	 * Get a value (does not affect LRU order - use getAndTouch for that)
+	 */
+	get(key: K): V | undefined;
+	/**
+	 * Get a value and move it to most recent position
+	 */
+	getAndTouch(key: K): V | undefined;
+	/**
+	 * Check if key exists
+	 */
+	has(key: K): boolean;
+	/**
+	 * Delete a key
+	 */
+	delete(key: K): boolean;
+	/**
+	 * Clear all entries
+	 */
+	clear(): void;
+	/**
+	 * Get current size
+	 */
+	get size(): number;
+	/**
+	 * Iterate over entries
+	 */
+	entries(): IterableIterator<[
+		K,
+		V
+	]>;
+	/**
+	 * Iterate over keys
+	 */
+	keys(): IterableIterator<K>;
+	/**
+	 * Iterate over values
+	 */
+	values(): IterableIterator<V>;
+	/**
+	 * ForEach iteration
+	 */
+	forEach(callback: (value: V, key: K, map: Map<K, V>) => void): void;
+	/**
+	 * Evict oldest entries
+	 */
+	private evict;
+	/**
+	 * Get underlying Map (for iteration compatibility)
+	 */
+	toMap(): Map<K, V>;
 }
 
 export {};

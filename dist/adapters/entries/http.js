@@ -1,5 +1,6 @@
 import { executeRequest } from '../http.js';
 import { setGlobalAdapter, createRezoInstance, Rezo } from '../../core/rezo.js';
+import { getSocketTelemetry } from '../../utils/socket-telemetry.js';
 import { RezoError, RezoErrorCode } from '../../errors/rezo-error.js';
 import { RezoHeaders } from '../../utils/headers.js';
 import { RezoFormData } from '../../utils/form-data.js';
@@ -28,6 +29,7 @@ export const all = Promise.all.bind(Promise);
 export const spread = (callback) => (array) => callback(...array);
 
 export { VERSION };
+export { getSocketTelemetry };
 setGlobalAdapter(executeRequest);
 const rezo = createRezoInstance(executeRequest);
 export default rezo;

@@ -19,6 +19,7 @@ const { SocksClient } = require('../internal/agents/socks-client.cjs');
 const net = require("node:net");
 const { ResponseCache } = require('../cache/response-cache.cjs');
 const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
+const { resolveTimeoutMs } = require('../utils/staged-timeout.cjs');
 const { buildTlsOptions } = require('../stealth/tls-fingerprint.cjs');
 let zstdDecompressSync = null;
 let zstdChecked = false;
@@ -1314,7 +1315,7 @@ async function executeHttp2Stream(config, fetchOptions, requestCount, timing, _s
           method: fetchOptions.method.toUpperCase(),
           headers: new RezoHeaders(reqHeaders),
           timestamp: timing.startTime,
-          timeout: fetchOptions.timeout,
+          timeout: resolveTimeoutMs(fetchOptions.timeout),
           maxRedirects: config.maxRedirects
         };
         eventEmitter.emit("start", startEvent);

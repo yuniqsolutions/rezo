@@ -1,4 +1,4 @@
-import { executeRequest } from '../curl.js';
+import { executeRequest, CurlCapabilities, CurlCommandBuilder, CurlExecutor } from '../curl.js';
 import { setGlobalAdapter, createRezoInstance, Rezo } from '../../core/rezo.js';
 import { RezoError, RezoErrorCode } from '../../errors/rezo-error.js';
 import { RezoHeaders } from '../../utils/headers.js';
@@ -15,6 +15,7 @@ export { RezoFormData };
 export { RezoCookieJar, Cookie };
 export { createDefaultHooks };
 export { mergeHooks };
+export { CurlCapabilities, CurlCommandBuilder, CurlExecutor };
 export const isRezoError = RezoError.isRezoError;
 export const Cancel = RezoError;
 export const CancelToken = AbortController;

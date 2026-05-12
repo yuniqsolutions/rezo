@@ -1,4 +1,4 @@
-const { executeRequest } = require('../curl.cjs');
+const { executeRequest, CurlCapabilities, CurlCommandBuilder, CurlExecutor } = require('../curl.cjs');
 const { setGlobalAdapter, createRezoInstance, Rezo } = require('../../core/rezo.cjs');
 const { RezoError, RezoErrorCode } = require('../../errors/rezo-error.cjs');
 const { RezoHeaders } = require('../../utils/headers.cjs');
@@ -16,6 +16,9 @@ exports.RezoCookieJar = RezoCookieJar;
 exports.Cookie = Cookie;
 exports.createDefaultHooks = createDefaultHooks;
 exports.mergeHooks = mergeHooks;
+exports.CurlCapabilities = CurlCapabilities;
+exports.CurlCommandBuilder = CurlCommandBuilder;
+exports.CurlExecutor = CurlExecutor;
 const isRezoError = exports.isRezoError = RezoError.isRezoError;
 const Cancel = exports.Cancel = RezoError;
 const CancelToken = exports.CancelToken = AbortController;

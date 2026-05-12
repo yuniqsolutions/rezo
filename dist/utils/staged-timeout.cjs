@@ -138,8 +138,16 @@ function parseStagedTimeouts(timeout) {
   }
   return timeout;
 }
+function resolveTimeoutMs(timeout) {
+  if (timeout == null)
+    return;
+  if (typeof timeout === "number")
+    return timeout;
+  return timeout.total ?? timeout.body ?? timeout.headers ?? timeout.connect ?? undefined;
+}
 
 exports.StagedTimeoutManager = StagedTimeoutManager;
 exports.parseStagedTimeouts = parseStagedTimeouts;
+exports.resolveTimeoutMs = resolveTimeoutMs;
 exports.default = StagedTimeoutManager;
 module.exports = Object.assign(StagedTimeoutManager, exports);

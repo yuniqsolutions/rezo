@@ -11,6 +11,7 @@ const { UploadResponse } = require('../responses/universal/upload.cjs');
 const { isSameDomain, RezoPerformance } = require('../utils/tools.cjs');
 const { ResponseCache } = require('../cache/universal-response-cache.cjs');
 const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
+const { resolveTimeoutMs } = require('../utils/staged-timeout.cjs');
 const Environment = {
   isNode: typeof process !== "undefined" && process.versions?.node,
   isBrowser: typeof window !== "undefined" && typeof document !== "undefined",
@@ -808,7 +809,7 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
         method: fetchOptions.method.toUpperCase(),
         headers: new RezoHeaders(reqHeaders),
         timestamp: timing.startTime,
-        timeout: fetchOptions.timeout,
+        timeout: resolveTimeoutMs(fetchOptions.timeout),
         maxRedirects: config.maxRedirects
       };
       eventEmitter.emit("start", startEvent);

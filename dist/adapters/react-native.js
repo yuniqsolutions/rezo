@@ -12,6 +12,7 @@ import { RezoPerformance } from '../utils/tools.js';
 import { isSameDomain } from '../utils/tools.js';
 import { ResponseCache } from '../cache/universal-response-cache.js';
 import { handleRateLimitWait, shouldWaitOnStatus } from '../utils/rate-limit-wait.js';
+import { resolveTimeoutMs } from '../utils/staged-timeout.js';
 const Environment = {
   get isReactNative() {
     return typeof navigator !== "undefined" && navigator.product === "ReactNative";
@@ -1352,7 +1353,7 @@ async function executeNativeFileDownloadRequest(fetchOptions, config, downloadRe
     method,
     headers: new RezoHeaders(reqHeaders),
     timestamp: timing.startTime,
-    timeout: fetchOptions.timeout,
+    timeout: resolveTimeoutMs(fetchOptions.timeout),
     maxRedirects: fetchOptions.maxRedirects,
     retry: config.retry ? {
       maxRetries: config.retry.maxRetries,
@@ -1656,7 +1657,7 @@ async function executeNativeStreamRequest(fetchOptions, config, streamResult, st
     method,
     headers: new RezoHeaders(reqHeaders),
     timestamp: timing.startTime,
-    timeout: fetchOptions.timeout,
+    timeout: resolveTimeoutMs(fetchOptions.timeout),
     maxRedirects: fetchOptions.maxRedirects,
     retry: config.retry ? {
       maxRetries: config.retry.maxRetries,
@@ -1918,7 +1919,7 @@ async function executeNativeFileUploadRequest(fetchOptions, config, uploadResult
     method,
     headers: new RezoHeaders(reqHeaders),
     timestamp: timing.startTime,
-    timeout: fetchOptions.timeout,
+    timeout: resolveTimeoutMs(fetchOptions.timeout),
     maxRedirects: fetchOptions.maxRedirects,
     retry: config.retry ? {
       maxRetries: config.retry.maxRetries,
@@ -2227,7 +2228,7 @@ async function executeSingleRequest(config, fetchOptions, timing, networkInfoPro
         method,
         headers: new RezoHeaders(reqHeaders),
         timestamp: timing.startTime,
-        timeout: fetchOptions.timeout,
+        timeout: resolveTimeoutMs(fetchOptions.timeout),
         maxRedirects: config.maxRedirects
       };
       eventEmitter.emit("start", startEvent);

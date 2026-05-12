@@ -1669,7 +1669,12 @@ export interface DNSCacheOptions {
 	ttl?: number;
 	maxEntries?: number;
 }
-declare class DNSCache {
+export interface DNSCacheEntry {
+	addresses: string[];
+	family: 4 | 6;
+	timestamp: number;
+}
+export declare class DNSCache {
 	private cache;
 	private enabled;
 	constructor(options?: DNSCacheOptions);
@@ -1690,6 +1695,8 @@ declare class DNSCache {
 	get isEnabled(): boolean;
 	setEnabled(enabled: boolean): void;
 }
+export declare function getGlobalDNSCache(options?: DNSCacheOptions): DNSCache;
+export declare function resetGlobalDNSCache(): void;
 export interface ResponseCacheConfig {
 	enable?: boolean;
 	cacheDir?: string;
@@ -1711,7 +1718,7 @@ export interface CachedResponse {
 	etag?: string;
 	lastModified?: string;
 }
-declare class ResponseCache {
+export declare class ResponseCache {
 	private memoryCache;
 	private config;
 	private persistenceEnabled;
@@ -3026,6 +3033,12 @@ export interface RezoReactNativeOptions {
 	backgroundTask?: RezoReactNativeBackgroundTaskConfig | null;
 	upload?: RezoReactNativeUploadConfig | null;
 }
+export interface StagedTimeoutConfig {
+	connect?: number;
+	headers?: number;
+	body?: number;
+	total?: number;
+}
 export type queueOptions = QueueConfig;
 export interface CacheConfig {
 	/** Response cache configuration */
@@ -3101,8 +3114,12 @@ export interface RezoDefaultOptions {
 	responseEncoding?: string;
 	/** Basic authentication credentials */
 	auth?: RezoHttpRequest["auth"];
-	/** Request timeout in milliseconds */
-	timeout?: number;
+	/**
+	 * Request timeout. Pass a single number (milliseconds) to cap the entire
+	 * request, or a `StagedTimeoutConfig` object to budget each phase
+	 * independently (`connect`, `headers`, `body`, `total`).
+	 */
+	timeout?: number | StagedTimeoutConfig;
 	/** @deprecated Use `timeout` instead */
 	requestTimeout?: number;
 	/** Whether to reject requests with invalid SSL certificates */
@@ -3224,6 +3241,14 @@ export interface RezoDefaultOptions {
 	 * @default (status) => status >= 200 && status < 300
 	 */
 	validateStatus?: ((status: number) => boolean) | null;
+	/**
+	 * When `false`, non-2xx HTTP responses do NOT throw — the resolved
+	 * `RezoResponse` is returned instead. Network errors still throw.
+	 * Per-request `throwHttpErrors` overrides this default.
+	 *
+	 * @default true
+	 */
+	throwHttpErrors?: boolean;
 	/**
 	 * Custom function to serialize URL query parameters.
 	 * Replaces the default serialization logic.
@@ -3938,8 +3963,12 @@ export interface RezoRequestConfig<D = any> {
 		/** Password for authentication */
 		password: string;
 	};
-	/** Request timeout in milliseconds */
-	timeout?: number;
+	/**
+	 * Request timeout. Pass a single number (milliseconds) to cap the entire
+	 * request, or a `StagedTimeoutConfig` object to budget each phase
+	 * independently (`connect`, `headers`, `body`, `total`).
+	 */
+	timeout?: number | StagedTimeoutConfig;
 	/** Whether to reject requests with invalid SSL certificates */
 	rejectUnauthorized?: boolean;
 	/**
@@ -4465,6 +4494,26 @@ export interface RezoRequestConfig<D = any> {
 	 */
 	validateStatus?: ((status: number) => boolean) | null;
 	/**
+	 * When `false`, non-2xx HTTP responses do NOT throw — the resolved `RezoResponse`
+	 * is returned instead and you handle `response.status` yourself. Network errors
+	 * (ECONNREFUSED, ETIMEDOUT, etc.) still throw.
+	 *
+	 * Takes precedence over `validateStatus` when explicitly set to `false`.
+	 *
+	 * @default true
+	 *
+	 * @example
+	 * ```ts
+	 * // Per request
+	 * const r = await rezo.get('/maybe-404', { throwHttpErrors: false });
+	 * if (r.status === 404) handleMissing();
+	 *
+	 * // Instance-wide
+	 * const client = rezo.create({ throwHttpErrors: false });
+	 * ```
+	 */
+	throwHttpErrors?: boolean;
+	/**
 	 * Custom function to serialize URL query parameters.
 	 * When provided, this replaces the default serialization logic.
 	 *
@@ -4700,7 +4749,7 @@ export type NestedMode = "json" | "brackets" | "dots";
 export interface RezoURLSearchParamsOptions {
 	nestedKeys?: NestedMode;
 }
-declare class RezoURLSearchParams extends URLSearchParams {
+export declare class RezoURLSearchParams extends URLSearchParams {
 	private nestedMode;
 	constructor(init?: string | URLSearchParams | NestedObject | string[][] | RezoURLSearchParams, options?: RezoURLSearchParamsOptions);
 	constructor(init?: string | URLSearchParams | NestedObject | string[][] | RezoURLSearchParams);
@@ -6270,8 +6319,14 @@ export declare function parseLinkHeader(header: string | null | undefined): Reco
 export declare function getProfile(id: string): BrowserProfile | undefined;
 /** Get all profiles for a given browser family. */
 export declare function getProfilesByFamily(family: BrowserProfile["family"]): BrowserProfile[];
+/** Get all profiles for a given device type. */
+export declare function getProfilesByDevice(device: BrowserProfile["device"]): BrowserProfile[];
 /** List all available profile IDs. */
 export declare function listProfiles(): string[];
+/** Get a random profile from the registry. */
+export declare function getRandomProfile(): BrowserProfile;
+/** Get a random profile from a specific family. */
+export declare function getRandomProfileByFamily(family: BrowserProfile["family"]): BrowserProfile;
 /**
  * Package version and name constants
  * These are maintained here to avoid importing package.json,
@@ -6279,7 +6334,7 @@ export declare function listProfiles(): string[];
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.133";
+export declare const VERSION = "1.0.134";
 export declare const PACKAGE_NAME = "rezo";
 export declare const isRezoError: typeof RezoError.isRezoError;
 export declare const Cancel: typeof RezoError;

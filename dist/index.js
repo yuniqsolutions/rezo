@@ -6,16 +6,30 @@ export {
 export { RezoError, RezoErrorCode } from './errors/rezo-error.js';
 export { RezoHeaders } from './utils/headers.js';
 export { RezoFormData } from './utils/form-data.js';
+export { RezoURLSearchParams } from './utils/data-operations.js';
 export { RezoCookieJar, CookieJar, Cookie, Store } from './cookies/cookie-jar.js';
 export { RezoCookieStore } from './cookies/cookie-store.js';
 export { toCurl, fromCurl } from './utils/curl.js';
 export { parseLinkHeader } from './utils/link-header.js';
 export { RezoUri } from './utils/uri.js';
+export {
+  DNSCache,
+  ResponseCache,
+  getGlobalDNSCache,
+  resetGlobalDNSCache
+} from './cache/index.js';
 export { createDefaultHooks, mergeHooks } from './core/hooks.js';
 export { RequestInterceptorManager, ResponseInterceptorManager } from './core/interceptor-manager.js';
 export { ProxyManager } from './proxy/manager.js';
 export { RezoStealth } from './stealth/stealth.js';
-export { listProfiles, getProfile, getProfilesByFamily } from './stealth/profiles/index.js';
+export {
+  listProfiles,
+  getProfile,
+  getProfilesByFamily,
+  getProfilesByDevice,
+  getRandomProfile,
+  getRandomProfileByFamily
+} from './stealth/profiles/index.js';
 export { RezoQueue, HttpQueue, HttpQueue as RezoHttpQueue, Priority, HttpMethodPriority } from './queue/index.js';
 import { RezoError } from './errors/rezo-error.js';
 export const isRezoError = RezoError.isRezoError;

@@ -1,4 +1,4 @@
-const { executeRequest } = require('../http2.cjs');
+const { executeRequest, Http2SessionPool } = require('../http2.cjs');
 const { setGlobalAdapter, createRezoInstance, Rezo } = require('../../core/rezo.cjs');
 const { RezoError, RezoErrorCode } = require('../../errors/rezo-error.cjs');
 const { RezoHeaders } = require('../../utils/headers.cjs');
@@ -11,6 +11,7 @@ const { RezoStealth } = require('../../stealth/index.cjs');
 exports.RezoStealth = RezoStealth;
 exports.Rezo = Rezo;
 exports.RezoError = RezoError;
+exports.Http2SessionPool = Http2SessionPool;
 exports.RezoErrorCode = RezoErrorCode;
 exports.RezoHeaders = RezoHeaders;
 exports.RezoFormData = RezoFormData;

@@ -21,7 +21,7 @@ import { getGlobalDNSCache } from '../cache/dns-cache.js';
 import { ResponseCache } from '../cache/response-cache.js';
 import { getGlobalAgentPool } from '../utils/agent-pool.js';
 import { buildTlsOptions } from '../stealth/tls-fingerprint.js';
-import { StagedTimeoutManager, parseStagedTimeouts } from '../utils/staged-timeout.js';
+import { StagedTimeoutManager, parseStagedTimeouts, resolveTimeoutMs } from '../utils/staged-timeout.js';
 import { handleRateLimitWait, shouldWaitOnStatus } from '../utils/rate-limit-wait.js';
 import { getSocketTelemetry, beginRequestContext } from '../utils/socket-telemetry.js';
 import dns from "node:dns";
@@ -719,7 +719,7 @@ async function request(config, fetchOptions, requestCount, timing, _stats, _resp
           method: fetchOptions.method.toUpperCase(),
           headers: fetchOptions.headers instanceof RezoHeaders ? fetchOptions.headers : new RezoHeaders(fetchOptions.headers),
           timestamp: timing.startTime,
-          timeout: fetchOptions.timeout,
+          timeout: resolveTimeoutMs(fetchOptions.timeout),
           maxRedirects: config.maxRedirects,
           retry: config.retry ? {
             maxRetries: config.retry.maxRetries,
@@ -1578,7 +1578,7 @@ function buildHTTPOptions(fetchOptions, isSecure, url) {
     path: url.pathname + url.search,
     method,
     headers: headerObj,
-    timeout: timeout || 0,
+    timeout: resolveTimeoutMs(timeout) ?? 0,
     signal,
     rejectUnauthorized,
     agent,

@@ -1,5 +1,6 @@
 const { executeRequest } = require('../http.cjs');
 const { setGlobalAdapter, createRezoInstance, Rezo } = require('../../core/rezo.cjs');
+const { getSocketTelemetry } = require('../../utils/socket-telemetry.cjs');
 const { RezoError, RezoErrorCode } = require('../../errors/rezo-error.cjs');
 const { RezoHeaders } = require('../../utils/headers.cjs');
 const { RezoFormData } = require('../../utils/form-data.cjs');
@@ -28,6 +29,7 @@ const all = exports.all = Promise.all.bind(Promise);
 const spread = exports.spread = (callback) => (array) => callback(...array);
 
 exports.VERSION = VERSION;
+exports.getSocketTelemetry = getSocketTelemetry;
 setGlobalAdapter(executeRequest);
 const rezo = createRezoInstance(executeRequest);
 

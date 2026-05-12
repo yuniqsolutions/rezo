@@ -1,3 +1,12 @@
 export { Crawler } from '../crawler/crawler.js';
 export { CrawlerOptions } from '../crawler/crawler-options.js';
 export { isRestrictedDomain } from '../crawler/scraper.js';
+export { FileCacher } from '../crawler/plugin/file-cacher.js';
+export { HealthMetrics } from '../crawler/plugin/health-metrics.js';
+export { MemoryMonitor } from '../crawler/plugin/memory-monitor.js';
+export { ResultStream } from '../crawler/plugin/result-stream.js';
+export { CappedArray } from '../crawler/plugin/capped-array.js';
+export { NavigationHistory } from '../crawler/plugin/navigation-history.js';
+export { RobotsTxt } from '../crawler/plugin/robots-txt.js';
+export { UrlStore } from '../crawler/plugin/url-store.js';
+export { CappedMap } from '../crawler/plugin/capped-map.js';

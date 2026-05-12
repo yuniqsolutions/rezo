@@ -11,6 +11,7 @@ const { UploadResponse } = require('../responses/universal/upload.cjs');
 const { RezoPerformance } = require('../utils/tools.cjs');
 const { ResponseCache } = require('../cache/universal-response-cache.cjs');
 const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
+const { resolveTimeoutMs } = require('../utils/staged-timeout.cjs');
 const Environment = {
   isBrowser: typeof window !== "undefined" && typeof document !== "undefined",
   hasXHR: typeof XMLHttpRequest !== "undefined",
@@ -501,7 +502,7 @@ function executeSingleXHRRequest(config, fetchOptions, timing, streamResult, dow
           method: fetchOptions.method.toUpperCase(),
           headers: new RezoHeaders(reqHeaders),
           timestamp: timing.startTime,
-          timeout: fetchOptions.timeout,
+          timeout: resolveTimeoutMs(fetchOptions.timeout),
           maxRedirects: config.maxRedirects
         };
         eventEmitter.emit("start", startEvent);

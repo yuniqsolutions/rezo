@@ -623,6 +623,12 @@ function createConfig(options, jar, addedOptions) {
     requestOptions.paramsSerializer = defaultOptions.paramsSerializer;
   if (!requestOptions.dnsLookup)
     requestOptions.dnsLookup = defaultOptions.dnsLookup;
+  const throwHttpErrors = requestOptions.throwHttpErrors ?? defaultOptions.throwHttpErrors;
+  if (throwHttpErrors === false) {
+    requestOptions.validateStatus = null;
+  } else if (requestOptions.throwHttpErrors === true && requestOptions.validateStatus === null) {
+    requestOptions.validateStatus = undefined;
+  }
   const baseURL = requestOptions.baseURL && (requestOptions.baseURL.startsWith("http://") || requestOptions.baseURL.startsWith("https://")) ? requestOptions.baseURL : defaultOptions.baseURL && (defaultOptions.baseURL.startsWith("http://") || defaultOptions.baseURL.startsWith("https://")) ? defaultOptions.baseURL : undefined;
   const url = new URL(options.url, baseURL);
   const paramsSerializer = requestOptions.paramsSerializer;

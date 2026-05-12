@@ -67,8 +67,10 @@ export function toCurl(config) {
     }
   }
   if (config.timeout) {
-    const timeoutSeconds = Math.ceil(config.timeout / 1000);
-    parts.push("--max-time", String(timeoutSeconds));
+    const timeoutMs = typeof config.timeout === "number" ? config.timeout : config.timeout.total ?? config.timeout.body ?? config.timeout.headers ?? config.timeout.connect ?? 0;
+    if (timeoutMs > 0) {
+      parts.push("--max-time", String(Math.ceil(timeoutMs / 1000)));
+    }
   }
   if (config.maxRedirects !== undefined) {
     if (config.maxRedirects === 0) {

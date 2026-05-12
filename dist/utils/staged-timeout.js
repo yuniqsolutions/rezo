@@ -138,4 +138,11 @@ export function parseStagedTimeouts(timeout) {
   }
   return timeout;
 }
+export function resolveTimeoutMs(timeout) {
+  if (timeout == null)
+    return;
+  if (typeof timeout === "number")
+    return timeout;
+  return timeout.total ?? timeout.body ?? timeout.headers ?? timeout.connect ?? undefined;
+}
 export default StagedTimeoutManager;

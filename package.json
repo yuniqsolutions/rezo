@@ -1,6 +1,6 @@
 {
   "name": "rezo",
-  "version": "1.0.133",
+  "version": "1.0.134",
   "description": "Lightning-fast, enterprise-grade HTTP client for modern JavaScript. Full HTTP/2 support, intelligent cookie management, multiple adapters (HTTP, Fetch, cURL, XHR), streaming, proxy support (HTTP/HTTPS/SOCKS), and cross-environment compatibility.",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
@@ -132,6 +132,12 @@
       ],
       "dom": [
         "dist/dom/index.d.ts"
+      ],
+      "stealth": [
+        "dist/stealth/index.d.ts"
+      ],
+      "adapters": [
+        "dist/adapters/index.d.ts"
       ]
     }
   },
@@ -228,6 +234,16 @@
       "types": "./dist/dom/index.d.ts",
       "import": "./dist/dom/index.js",
       "require": "./dist/dom/index.cjs"
+    },
+    "./stealth": {
+      "types": "./dist/stealth/index.d.ts",
+      "import": "./dist/stealth/index.js",
+      "require": "./dist/stealth/index.cjs"
+    },
+    "./adapters": {
+      "types": "./dist/adapters/index.d.ts",
+      "import": "./dist/adapters/index.js",
+      "require": "./dist/adapters/index.cjs"
     }
   },
   "browser": {

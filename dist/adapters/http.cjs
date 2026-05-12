@@ -21,7 +21,7 @@ const { getGlobalDNSCache } = require('../cache/dns-cache.cjs');
 const { ResponseCache } = require('../cache/response-cache.cjs');
 const { getGlobalAgentPool } = require('../utils/agent-pool.cjs');
 const { buildTlsOptions } = require('../stealth/tls-fingerprint.cjs');
-const { StagedTimeoutManager, parseStagedTimeouts } = require('../utils/staged-timeout.cjs');
+const { StagedTimeoutManager, parseStagedTimeouts, resolveTimeoutMs } = require('../utils/staged-timeout.cjs');
 const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
 const { getSocketTelemetry, beginRequestContext } = require('../utils/socket-telemetry.cjs');
 const dns = require("node:dns");
@@ -719,7 +719,7 @@ async function request(config, fetchOptions, requestCount, timing, _stats, _resp
           method: fetchOptions.method.toUpperCase(),
           headers: fetchOptions.headers instanceof RezoHeaders ? fetchOptions.headers : new RezoHeaders(fetchOptions.headers),
           timestamp: timing.startTime,
-          timeout: fetchOptions.timeout,
+          timeout: resolveTimeoutMs(fetchOptions.timeout),
           maxRedirects: config.maxRedirects,
           retry: config.retry ? {
             maxRetries: config.retry.maxRetries,
@@ -1578,7 +1578,7 @@ function buildHTTPOptions(fetchOptions, isSecure, url) {
     path: url.pathname + url.search,
     method,
     headers: headerObj,
-    timeout: timeout || 0,
+    timeout: resolveTimeoutMs(timeout) ?? 0,
     signal,
     rejectUnauthorized,
     agent,

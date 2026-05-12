@@ -3,5 +3,9 @@ export {
   getAdapterCapabilities,
   buildAdapterContext,
   getAvailableAdapters,
-  selectAdapter
+  selectAdapter,
+  getAdapterDiagnostics,
+  createAdapterPicker,
+  clearAdapterCache,
+  loadAdapter
 } from './picker.js';

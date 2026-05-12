@@ -1,4 +1,4 @@
-import { executeRequest } from '../http2.js';
+import { executeRequest, Http2SessionPool } from '../http2.js';
 import { setGlobalAdapter, createRezoInstance, Rezo } from '../../core/rezo.js';
 import { RezoError, RezoErrorCode } from '../../errors/rezo-error.js';
 import { RezoHeaders } from '../../utils/headers.js';
@@ -11,6 +11,7 @@ import { RezoStealth } from '../../stealth/index.js';
 export { RezoStealth };
 export { Rezo };
 export { RezoError };
+export { Http2SessionPool };
 export { RezoErrorCode };
 export { RezoHeaders };
 export { RezoFormData };

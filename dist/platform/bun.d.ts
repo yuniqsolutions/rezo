@@ -2902,6 +2902,12 @@ export interface RezoReactNativeOptions {
 	backgroundTask?: RezoReactNativeBackgroundTaskConfig | null;
 	upload?: RezoReactNativeUploadConfig | null;
 }
+export interface StagedTimeoutConfig {
+	connect?: number;
+	headers?: number;
+	body?: number;
+	total?: number;
+}
 export type queueOptions = QueueConfig;
 export interface CacheConfig {
 	/** Response cache configuration */
@@ -2977,8 +2983,12 @@ export interface RezoDefaultOptions {
 	responseEncoding?: string;
 	/** Basic authentication credentials */
 	auth?: RezoHttpRequest["auth"];
-	/** Request timeout in milliseconds */
-	timeout?: number;
+	/**
+	 * Request timeout. Pass a single number (milliseconds) to cap the entire
+	 * request, or a `StagedTimeoutConfig` object to budget each phase
+	 * independently (`connect`, `headers`, `body`, `total`).
+	 */
+	timeout?: number | StagedTimeoutConfig;
 	/** @deprecated Use `timeout` instead */
 	requestTimeout?: number;
 	/** Whether to reject requests with invalid SSL certificates */
@@ -3100,6 +3110,14 @@ export interface RezoDefaultOptions {
 	 * @default (status) => status >= 200 && status < 300
 	 */
 	validateStatus?: ((status: number) => boolean) | null;
+	/**
+	 * When `false`, non-2xx HTTP responses do NOT throw — the resolved
+	 * `RezoResponse` is returned instead. Network errors still throw.
+	 * Per-request `throwHttpErrors` overrides this default.
+	 *
+	 * @default true
+	 */
+	throwHttpErrors?: boolean;
 	/**
 	 * Custom function to serialize URL query parameters.
 	 * Replaces the default serialization logic.
@@ -3814,8 +3832,12 @@ export interface RezoRequestConfig<D = any> {
 		/** Password for authentication */
 		password: string;
 	};
-	/** Request timeout in milliseconds */
-	timeout?: number;
+	/**
+	 * Request timeout. Pass a single number (milliseconds) to cap the entire
+	 * request, or a `StagedTimeoutConfig` object to budget each phase
+	 * independently (`connect`, `headers`, `body`, `total`).
+	 */
+	timeout?: number | StagedTimeoutConfig;
 	/** Whether to reject requests with invalid SSL certificates */
 	rejectUnauthorized?: boolean;
 	/**
@@ -4340,6 +4362,26 @@ export interface RezoRequestConfig<D = any> {
 	 * ```
 	 */
 	validateStatus?: ((status: number) => boolean) | null;
+	/**
+	 * When `false`, non-2xx HTTP responses do NOT throw — the resolved `RezoResponse`
+	 * is returned instead and you handle `response.status` yourself. Network errors
+	 * (ECONNREFUSED, ETIMEDOUT, etc.) still throw.
+	 *
+	 * Takes precedence over `validateStatus` when explicitly set to `false`.
+	 *
+	 * @default true
+	 *
+	 * @example
+	 * ```ts
+	 * // Per request
+	 * const r = await rezo.get('/maybe-404', { throwHttpErrors: false });
+	 * if (r.status === 404) handleMissing();
+	 *
+	 * // Instance-wide
+	 * const client = rezo.create({ throwHttpErrors: false });
+	 * ```
+	 */
+	throwHttpErrors?: boolean;
 	/**
 	 * Custom function to serialize URL query parameters.
 	 * When provided, this replaces the default serialization logic.
@@ -6027,7 +6069,7 @@ export interface RezoInstance extends Rezo, RezoCallable {
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.133";
+export declare const VERSION = "1.0.134";
 export declare const isRezoError: typeof RezoError.isRezoError;
 export declare const Cancel: typeof RezoError;
 export declare const CancelToken: {

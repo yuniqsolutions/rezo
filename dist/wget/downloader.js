@@ -893,7 +893,7 @@ function isSupportedLocalExtension(pathOrUrl) {
   if (dot < 0)
     return false;
   const ext = cleanPath.slice(dot).toLowerCase();
-  return ext === ".html" || ext === ".htm" || ext === ".xhtml" || ext === ".xml" || ext === ".css";
+  return ext === ".html" || ext === ".htm" || ext === ".xhtml" || ext === ".xml" || ext === ".css" || ext === ".svg";
 }
 function inferMimeFromPath(path) {
   const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
