@@ -1,7 +1,6 @@
 const http = require("node:http");
 const https = require("node:https");
 const tls = require("node:tls");
-const { URL } = require("node:url");
 const { Readable } = require("node:stream");
 const { RezoError } = require('../errors/rezo-error.cjs');
 const { RezoCookieJar } = require('../cookies/index.cjs');
@@ -1863,13 +1862,22 @@ async function updateCookies(config, headers, url, rootJar) {
   const cookies = headers["set-cookie"];
   if (cookies) {
     const jar = new RezoCookieJar;
-    const tempJar = new RezoCookieJar;
-    tempJar.setCookiesSync(cookies, url);
-    const parsedCookies = tempJar.cookies();
+    const cookieHeaderArray = Array.isArray(cookies) ? cookies : [cookies];
+    const pairs = [];
+    for (const raw of cookieHeaderArray) {
+      const singleJar = new RezoCookieJar;
+      try {
+        singleJar.setCookiesSync([raw], url);
+        const parsed = singleJar.cookies().array[0];
+        if (parsed)
+          pairs.push({ raw, cookie: parsed });
+      } catch {}
+    }
     const acceptedCookies = [];
+    const acceptedRaw = [];
     let hookError = null;
     if (config.hooks?.beforeCookie && config.hooks.beforeCookie.length > 0) {
-      for (const cookie of parsedCookies.array) {
+      for (const { raw, cookie } of pairs) {
         let shouldAccept = true;
         for (const hook of config.hooks.beforeCookie) {
           try {
@@ -1892,17 +1900,20 @@ async function updateCookies(config, headers, url, rootJar) {
         }
         if (shouldAccept) {
           acceptedCookies.push(cookie);
+          acceptedRaw.push(raw);
         }
       }
     } else {
-      acceptedCookies.push(...parsedCookies.array);
+      for (const { raw, cookie } of pairs) {
+        acceptedCookies.push(cookie);
+        acceptedRaw.push(raw);
+      }
     }
-    const acceptedCookieStrings = acceptedCookies.map((c) => c.toSetCookieString());
     const jarToUpdate = rootJar || config.jar;
     if (!config.disableJar && jarToUpdate) {
-      jarToUpdate.setCookiesSync(acceptedCookieStrings, url);
+      jarToUpdate.setCookiesSync(acceptedRaw, url);
     }
-    jar.setCookiesSync(acceptedCookieStrings, url);
+    jar.setCookiesSync(acceptedRaw, url);
     if (config.useCookies) {
       const existingArray = config.responseCookies?.array || [];
       for (const cookie of acceptedCookies) {

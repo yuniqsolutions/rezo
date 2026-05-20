@@ -1,8 +1,8 @@
 const { CookieJar: TouchCookieJar } = require("tough-cookie");
 const { Cookie } = require('./cookie.cjs');
 const { requireNodeModule } = require('../utils/node-runtime.cjs');
-const _mod_hksagi = require('./cookie.cjs');
-exports.Cookie = _mod_hksagi.Cookie;;
+const _mod_v3mnny = require('./cookie.cjs');
+exports.Cookie = _mod_v3mnny.Cookie;;
 
 class RezoCookieJar extends TouchCookieJar {
   constructor(store, options) {
@@ -310,13 +310,16 @@ class RezoCookieJar extends TouchCookieJar {
       if (parts.length < 7) {
         throw new Error(`Invalid Netscape cookie format: ${line}`);
       }
-      const [domain, _, path, secureStr, expiresStr, name, value] = parts;
+      const [rawDomain, , path, secureStr, expiresStr, name, value] = parts;
+      const hostOnly = !rawDomain.startsWith(".");
+      const domain = hostOnly ? rawDomain : rawDomain.substring(1);
       let expires = null;
       if (expiresStr !== "0" && expiresStr !== "") {
         expires = new Date(parseInt(expiresStr, 10) * 1000);
       }
       return {
         domain,
+        hostOnly,
         path,
         secure: secureStr.toUpperCase() === "TRUE",
         expires,
@@ -336,13 +339,16 @@ class RezoCookieJar extends TouchCookieJar {
         if (parts.length < 7) {
           throw new Error(`Invalid Netscape cookie format: ${line}`);
         }
-        const [domain, _, path, secureStr, expiresStr, name, value] = parts;
+        const [rawDomain, , path, secureStr, expiresStr, name, value] = parts;
+        const hostOnly = !rawDomain.startsWith(".");
+        const domain = hostOnly ? rawDomain : rawDomain.substring(1);
         let expires = null;
         if (expiresStr !== "0" && expiresStr !== "") {
           expires = new Date(parseInt(expiresStr, 10) * 1000);
         }
         return {
           domain,
+          hostOnly,
           path,
           secure: secureStr.toUpperCase() === "TRUE",
           expires,
@@ -355,7 +361,7 @@ class RezoCookieJar extends TouchCookieJar {
     };
     const cookieToSetCookieString = (cookie) => {
       let setCookie = `${cookie.name}=${cookie.value}`;
-      if (cookie.domain) {
+      if (cookie.domain && !cookie.hostOnly) {
         setCookie += `; Domain=${cookie.domain}`;
       }
       if (cookie.path) {
@@ -481,7 +487,7 @@ class RezoCookieJar extends TouchCookieJar {
   }
 }
 const CookieJar = exports.CookieJar = RezoCookieJar;
-const _mod_ktrtgf = require("tough-cookie");
-exports.Store = _mod_ktrtgf.Store;;
+const _mod_b0eiqf = require("tough-cookie");
+exports.Store = _mod_b0eiqf.Store;;
 
 exports.RezoCookieJar = RezoCookieJar;

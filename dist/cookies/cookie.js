@@ -45,7 +45,7 @@ export class Cookie extends TouchCookie {
     if (this.maxAge != null) {
       str += `; Max-Age=${this.maxAge}`;
     }
-    if (this.domain) {
+    if (this.domain && !this.hostOnly) {
       str += `; Domain=${this.domain}`;
     }
     if (this.path) {

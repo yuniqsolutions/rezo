@@ -181,13 +181,21 @@ async function parseCookiesFromHeaders(headers, url, config) {
   if (setCookieHeaders.length === 0) {
     return createEmptyCookies();
   }
-  const tempJar = new RezoCookieJar;
-  tempJar.setCookiesSync(setCookieHeaders, url);
-  const parsedCookies = tempJar.cookies();
+  const pairs = [];
+  for (const raw of setCookieHeaders) {
+    const singleJar = new RezoCookieJar;
+    try {
+      singleJar.setCookiesSync([raw], url);
+      const parsed = singleJar.cookies().array[0];
+      if (parsed)
+        pairs.push({ raw, cookie: parsed });
+    } catch {}
+  }
   const acceptedCookies = [];
+  const acceptedRaw = [];
   let hookError = null;
   if (config?.hooks?.beforeCookie && config.hooks.beforeCookie.length > 0) {
-    for (const cookie of parsedCookies.array) {
+    for (const { raw, cookie } of pairs) {
       let shouldAccept = true;
       for (const hook of config.hooks.beforeCookie) {
         try {
@@ -210,16 +218,19 @@ async function parseCookiesFromHeaders(headers, url, config) {
       }
       if (shouldAccept) {
         acceptedCookies.push(cookie);
+        acceptedRaw.push(raw);
       }
     }
   } else {
-    acceptedCookies.push(...parsedCookies.array);
+    for (const { raw, cookie } of pairs) {
+      acceptedCookies.push(cookie);
+      acceptedRaw.push(raw);
+    }
   }
-  const acceptedCookieStrings = acceptedCookies.map((cookie) => cookie.toSetCookieString());
   const jar = new RezoCookieJar;
-  jar.setCookiesSync(acceptedCookieStrings, url);
+  jar.setCookiesSync(acceptedRaw, url);
   if (!config?.disableJar && config?.jar) {
-    config.jar.setCookiesSync(acceptedCookieStrings, url);
+    config.jar.setCookiesSync(acceptedRaw, url);
   }
   const cookies = jar.cookies();
   cookies.setCookiesString = setCookieHeaders;

@@ -1,4 +1,3 @@
-import { Blob as Blob$1 } from 'node:buffer';
 import { Agent as HttpAgent, OutgoingHttpHeaders } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import { Socket } from 'node:net';
@@ -765,7 +764,10 @@ export interface RedirectEvent {
 	/** Duration of this redirect in milliseconds */
 	duration: number;
 }
-interface ProgressEvent$1 {
+/**
+ * Emitted during download/upload to track progress
+ */
+export interface RezoProgressEvent {
 	/** Bytes transferred so far */
 	loaded: number;
 	/** Total bytes (from Content-Length or file size) */
@@ -982,7 +984,7 @@ export interface RezoStreamResponse extends BaseEventEmitter {
 	on(event: "cookies", listener: (cookies: Cookie[]) => void): this;
 	on(event: "status", listener: (status: number, statusText: string) => void): this;
 	on(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	on(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
+	on(event: "progress", listener: (progress: RezoProgressEvent) => void): this;
 	on(event: string | symbol, listener: (...args: any[]) => void): this;
 	once(event: "data", listener: (chunk: Uint8Array | string) => void): this;
 	once(event: "error", listener: (err: RezoError) => void): this;
@@ -994,7 +996,7 @@ export interface RezoStreamResponse extends BaseEventEmitter {
 	once(event: "cookies", listener: (cookies: Cookie[]) => void): this;
 	once(event: "status", listener: (status: number, statusText: string) => void): this;
 	once(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	once(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
+	once(event: "progress", listener: (progress: RezoProgressEvent) => void): this;
 	once(event: string | symbol, listener: (...args: any[]) => void): this;
 	isFinished(): boolean;
 	setEncoding?(encoding: string): this;
@@ -1019,7 +1021,7 @@ export interface RezoDownloadResponse extends BaseEventEmitter {
 	on(event: "cookies", listener: (cookies: Cookie[]) => void): this;
 	on(event: "status", listener: (status: number, statusText: string) => void): this;
 	on(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	on(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
+	on(event: "progress", listener: (progress: RezoProgressEvent) => void): this;
 	on(event: string | symbol, listener: (...args: any[]) => void): this;
 	once(event: "error", listener: (err: RezoError) => void): this;
 	once(event: "finish", listener: (info: DownloadFinishEvent) => void): this;
@@ -1030,7 +1032,7 @@ export interface RezoDownloadResponse extends BaseEventEmitter {
 	once(event: "cookies", listener: (cookies: Cookie[]) => void): this;
 	once(event: "status", listener: (status: number, statusText: string) => void): this;
 	once(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	once(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
+	once(event: "progress", listener: (progress: RezoProgressEvent) => void): this;
 	once(event: string | symbol, listener: (...args: any[]) => void): this;
 	isFinished(): boolean;
 }
@@ -1053,7 +1055,7 @@ export interface RezoUploadResponse extends BaseEventEmitter {
 	on(event: "cookies", listener: (cookies: Cookie[]) => void): this;
 	on(event: "status", listener: (status: number, statusText: string) => void): this;
 	on(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	on(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
+	on(event: "progress", listener: (progress: RezoProgressEvent) => void): this;
 	on(event: string | symbol, listener: (...args: any[]) => void): this;
 	once(event: "error", listener: (err: RezoError) => void): this;
 	once(event: "finish", listener: (info: UploadFinishEvent) => void): this;
@@ -1064,7 +1066,7 @@ export interface RezoUploadResponse extends BaseEventEmitter {
 	once(event: "cookies", listener: (cookies: Cookie[]) => void): this;
 	once(event: "status", listener: (status: number, statusText: string) => void): this;
 	once(event: "redirect", listener: (info: RedirectEvent) => void): this;
-	once(event: "progress", listener: (progress: ProgressEvent$1) => void): this;
+	once(event: "progress", listener: (progress: RezoProgressEvent) => void): this;
 	once(event: string | symbol, listener: (...args: any[]) => void): this;
 	isFinished(): boolean;
 }
@@ -1917,32 +1919,23 @@ declare class ResponseCache {
 	get isPersistent(): boolean;
 	getConfig(): ResponseCacheConfig;
 }
-type BeforeProxySelectHook$1 = (context: BeforeProxySelectContext) => ProxyInfo | void;
-type AfterProxySelectHook$1 = (context: AfterProxySelectContext) => void | Promise<void>;
-type BeforeProxyErrorHook$1 = (context: BeforeProxyErrorContext) => void | Promise<void>;
-type AfterProxyErrorHook$1 = (context: AfterProxyErrorContext) => void | Promise<void>;
-type BeforeProxyDisableHook$1 = (context: BeforeProxyDisableContext) => boolean | void;
-type AfterProxyDisableHook$1 = (context: AfterProxyDisableContext) => void | Promise<void>;
-type AfterProxyRotateHook$1 = (context: AfterProxyRotateContext) => void | Promise<void>;
-type AfterProxyEnableHook$1 = (context: AfterProxyEnableContext) => void | Promise<void>;
 export type AfterProxySuccessHook = (context: AfterProxySuccessContext) => void | Promise<void>;
-type OnNoProxiesAvailableHook$1 = (context: OnNoProxiesAvailableContext) => void | Promise<void>;
 /**
  * Proxy hooks collection for ProxyManager events
  */
 export interface ProxyHooks {
-	beforeProxySelect: BeforeProxySelectHook$1[];
-	afterProxySelect: AfterProxySelectHook$1[];
-	beforeProxyError: BeforeProxyErrorHook$1[];
-	afterProxyError: AfterProxyErrorHook$1[];
-	beforeProxyDisable: BeforeProxyDisableHook$1[];
-	afterProxyDisable: AfterProxyDisableHook$1[];
-	afterProxyRotate: AfterProxyRotateHook$1[];
-	afterProxyEnable: AfterProxyEnableHook$1[];
+	beforeProxySelect: BeforeProxySelectHook[];
+	afterProxySelect: AfterProxySelectHook[];
+	beforeProxyError: BeforeProxyErrorHook[];
+	afterProxyError: AfterProxyErrorHook[];
+	beforeProxyDisable: BeforeProxyDisableHook[];
+	afterProxyDisable: AfterProxyDisableHook[];
+	afterProxyRotate: AfterProxyRotateHook[];
+	afterProxyEnable: AfterProxyEnableHook[];
 	/** Hook triggered when a request succeeds through a proxy */
 	afterProxySuccess: AfterProxySuccessHook[];
 	/** Hook triggered when no proxies are available */
-	onNoProxiesAvailable: OnNoProxiesAvailableHook$1[];
+	onNoProxiesAvailable: OnNoProxiesAvailableHook[];
 }
 declare class ProxyManager {
 	/** Internal configuration (use getter for external access) */
@@ -3193,7 +3186,7 @@ export interface RezoDefaultOptions {
 	/** Request headers as various supported formats */
 	headers?: RezoHttpRequest["headers"];
 	/** Expected response data type */
-	responseType?: ResponseType$1;
+	responseType?: RezoResponseType;
 	/** Character encoding for the response */
 	responseEncoding?: string;
 	/** Basic authentication credentials */
@@ -3868,13 +3861,12 @@ declare class RezoError<T = any> extends Error {
 	toString(): string;
 	getFullDetails(): string;
 }
-type ProxyProtocol$1 = "http" | "https" | "socks4" | "socks5";
 /**
  * Configuration options for proxy connections
  */
 export type ProxyOptions = {
 	/** The proxy protocol to use */
-	protocol: ProxyProtocol$1;
+	protocol: ProxyProtocol;
 	/** Proxy server hostname or IP address */
 	host: string;
 	/** Proxy server port number */
@@ -3915,7 +3907,52 @@ export type RezoString = string;
  * Standard HTTP methods supported by Rezo
  */
 export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS" | "TRACE" | "CONNECT";
-type ResponseType$1 = "json" | "text" | "blob" | "arrayBuffer" | "buffer" | "auto";
+/**
+ * Response data types that control how Rezo parses the response body.
+ *
+ * @description
+ * Specifies how the response body should be parsed and returned in `response.data`.
+ * Choose the type that matches your expected response format.
+ *
+ * **Available Types:**
+ *
+ * - `'json'` - Parse response as JSON. Returns parsed object/array.
+ *   Best for REST APIs that return JSON data.
+ *
+ * - `'text'` - Return response as a string. No parsing applied.
+ *   Best for HTML, XML, plain text, or when you need raw content.
+ *
+ * - `'blob'` - Return as Blob object (browser environments).
+ *   Best for binary data in browsers (images, files, etc).
+ *
+ * - `'arrayBuffer'` - Return as ArrayBuffer.
+ *   Best for binary data processing, cryptographic operations.
+ *
+ * - `'buffer'` - Return as Node.js Buffer.
+ *   Best for binary data in Node.js (files, images, binary protocols).
+ *
+ * - `'auto'` - Auto-detect based on Content-Type header (default).
+ *   JSON for `application/json`, text for `text/*`, buffer otherwise.
+ *
+ * **Streaming Operations:**
+ * For streaming, use dedicated methods instead of responseType:
+ * - `rezo.stream(url)` - Returns StreamResponse for real-time data
+ * - `rezo.download(url, saveTo)` - Returns DownloadResponse with progress
+ * - `rezo.upload(url, data)` - Returns UploadResponse with progress
+ *
+ * @example
+ * // Get JSON data (default for JSON APIs)
+ * const { data } = await rezo.get('/api/users', { responseType: 'json' });
+ *
+ * // Get HTML as text
+ * const { data: html } = await rezo.get('/page', { responseType: 'text' });
+ *
+ * // Get image as buffer
+ * const { data: imageBuffer } = await rezo.get('/image.png', { responseType: 'buffer' });
+ *
+ * @default 'auto'
+ */
+export type RezoResponseType = "json" | "text" | "blob" | "arrayBuffer" | "buffer" | "auto";
 /**
  * MIME content types for request/response bodies
  */
@@ -3974,7 +4011,7 @@ export interface RezoRequestConfig<D = any> {
 	 * // Get image as buffer
 	 * const { data: img } = await rezo.get('/image.png', { responseType: 'buffer' });
 	 */
-	responseType?: ResponseType$1;
+	responseType?: RezoResponseType;
 	/** Character encoding for the response */
 	responseEncoding?: string;
 	/** Base URL for the request (used with relative URLs) */
@@ -4694,7 +4731,7 @@ export interface httpAdapterOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	request(options: RezoRequestOptions & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	request(options: RezoRequestOptions & {
 		responseType: "text";
 	}): Promise<RezoResponse<string>>;
@@ -4726,7 +4763,7 @@ export interface httpAdapterOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	get(url: string | URL, options: RezoHttpGetRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	get(url: string | URL, options: RezoHttpGetRequest & {
 		responseType: "text";
 	}): Promise<RezoResponse<string>>;
@@ -4760,7 +4797,7 @@ export interface httpAdapterOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	delete(url: string | URL, options: RezoHttpDeleteRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	delete(url: string | URL, options: RezoHttpDeleteRequest & {
 		responseType: "text";
 	}): Promise<RezoResponse<string>>;
@@ -4849,7 +4886,7 @@ export interface httpAdapterPostOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	post(url: string | URL, data: any, options: RezoHttpPostRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	post(url: string | URL, data: any, options: RezoHttpPostRequest & {
 		responseType: "text";
 	}): Promise<RezoResponse<string>>;
@@ -4909,13 +4946,13 @@ export interface httpAdapterPostOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	postJson(url: string | URL, data: Record<any, any> | Array<any>, options: RezoHttpPostRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	postJson(url: string | URL, jsonString: string, options: RezoHttpPostRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	postJson(url: string | URL, nullData: null | undefined, options: RezoHttpPostRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	postJson(url: string | URL, data: Record<any, any> | Array<any>, options: RezoHttpPostRequest & {
 		responseType: "stream";
 	}): Promise<RezoStreamResponse>;
@@ -4969,13 +5006,13 @@ export interface httpAdapterPostOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	postForm(url: string | URL, data: URLSearchParams | RezoURLSearchParams | Record<string, any>, options: RezoHttpPostRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	postForm(url: string | URL, string: string, options: RezoHttpPostRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	postForm(url: string | URL, nullData: null | undefined, options: RezoHttpPostRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	postForm(url: string | URL, data: URLSearchParams | RezoURLSearchParams | Record<string, any>, options: RezoHttpPostRequest & {
 		responseType: "stream";
 	}): Promise<RezoStreamResponse>;
@@ -5047,13 +5084,13 @@ export interface httpAdapterPostOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	postMultipart(url: string | URL, formData: RezoFormData, options: RezoHttpPostRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	postMultipart(url: string | URL, formData: FormData, options: RezoHttpPostRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	postMultipart(url: string | URL, dataObject: Record<string, any>, options: RezoHttpPostRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 }
 export interface httpAdapterPatchOverloads {
 	patch<T = any>(url: string | URL, data?: any): Promise<RezoResponse<T>>;
@@ -5072,7 +5109,7 @@ export interface httpAdapterPatchOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	patch(url: string | URL, data: any, options: RezoHttpPatchRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	patch(url: string | URL, data: any, options: RezoHttpPatchRequest & {
 		responseType: "text";
 	}): Promise<RezoResponse<string>>;
@@ -5132,13 +5169,13 @@ export interface httpAdapterPatchOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	patchJson(url: string | URL, data: Record<any, any> | Array<any>, options: RezoHttpPatchRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	patchJson(url: string | URL, jsonString: string, options: RezoHttpPatchRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	patchJson(url: string | URL, nullData: null | undefined, options: RezoHttpPatchRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	patchJson(url: string | URL, data: Record<any, any> | Array<any>, options: RezoHttpPatchRequest & {
 		responseType: "stream";
 	}): RezoStreamResponse;
@@ -5201,13 +5238,13 @@ export interface httpAdapterPatchOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	patchForm(url: string | URL, data: URLSearchParams | RezoURLSearchParams | Record<string, any>, options: RezoHttpPatchRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	patchForm(url: string | URL, string: string, options: RezoHttpPatchRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	patchForm(url: string | URL, nullData: null | undefined, options: RezoHttpPatchRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	patchForm(url: string | URL, data: URLSearchParams | RezoURLSearchParams | Record<string, any>, options: RezoHttpPatchRequest & {
 		responseType: "stream";
 	}): RezoStreamResponse;
@@ -5279,13 +5316,13 @@ export interface httpAdapterPatchOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	patchMultipart(url: string | URL, formData: RezoFormData, options: RezoHttpPatchRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	patchMultipart(url: string | URL, formData: FormData, options: RezoHttpPatchRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	patchMultipart(url: string | URL, dataObject: Record<string, any>, options: RezoHttpPatchRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	patchMultipart(url: string | URL, formData: RezoFormData, options: RezoHttpPatchRequest & {
 		responseType: "upload";
 	}): Promise<RezoUploadResponse>;
@@ -5313,7 +5350,7 @@ export interface httpAdapterPutOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	put(url: string | URL, data: any, options: RezoHttpPutRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	put(url: string | URL, data: any, options: RezoHttpPutRequest & {
 		responseType: "text";
 	}): Promise<RezoResponse<string>>;
@@ -5373,13 +5410,13 @@ export interface httpAdapterPutOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	putJson(url: string | URL, data: Record<any, any> | Array<any>, options: RezoHttpPutRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	putJson(url: string | URL, jsonString: string, options: RezoHttpPutRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	putJson(url: string | URL, nullData: null | undefined, options: RezoHttpPutRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	putJson(url: string | URL, data: Record<any, any> | Array<any>, options: RezoHttpPutRequest & {
 		responseType: "stream";
 	}): RezoStreamResponse;
@@ -5442,13 +5479,13 @@ export interface httpAdapterPutOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	putForm(url: string | URL, data: URLSearchParams | RezoURLSearchParams | Record<string, any>, options: RezoHttpPutRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	putForm(url: string | URL, string: string, options: RezoHttpPutRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	putForm(url: string | URL, nullData: null | undefined, options: RezoHttpPutRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	putForm(url: string | URL, data: URLSearchParams | RezoURLSearchParams | Record<string, any>, options: RezoHttpPutRequest & {
 		responseType: "stream";
 	}): RezoStreamResponse;
@@ -5520,13 +5557,13 @@ export interface httpAdapterPutOverloads {
 	}): Promise<RezoResponse<Buffer>>;
 	putMultipart(url: string | URL, formData: RezoFormData, options: RezoHttpPutRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	putMultipart(url: string | URL, formData: FormData, options: RezoHttpPutRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	putMultipart(url: string | URL, dataObject: Record<string, any>, options: RezoHttpPutRequest & {
 		responseType: "blob";
-	}): Promise<RezoResponse<Blob$1>>;
+	}): Promise<RezoResponse<Blob>>;
 	putMultipart(url: string | URL, formData: RezoFormData, options: RezoHttpPutRequest & {
 		responseType: "upload";
 	}): Promise<RezoUploadResponse>;
@@ -6158,7 +6195,15 @@ declare class Rezo {
  * supporting HTTP, HTTPS, and SOCKS proxies with authentication.
  */
 export type IProxy = RezoRequestConfig["proxy"];
-interface queueOptions$1 {
+/**
+ * Limiter queue configuration options for rate limiting.
+ * @description Configuration options for RezoQueue instances used as crawler limiters.
+ *
+ * Includes the limiter-specific `randomDelay` field for per-domain jitter, which
+ * is why this is distinct from the base `queueOptions` (aliased to `QueueConfig`)
+ * exported from `types/options.ts`.
+ */
+export interface LimiterQueueOptions {
 	/** Queue name (optional) - if not provided, a random name will be generated */
 	name?: string;
 	/** Maximum concurrent requests */
@@ -6214,7 +6259,7 @@ export interface CrawlerResponse<T = any> {
 	/** Serialized cookies from response */
 	cookies?: string;
 }
-declare const options: {
+declare const OXYLABS_OPTIONS: {
 	readonly user_agent_type: {
 		readonly label: "Browser";
 		readonly options: {
@@ -6864,15 +6909,15 @@ declare const options: {
 		};
 	};
 };
-export type GeoLocation = keyof typeof options.geo_location.options;
-export type Locale = keyof typeof options.locale.options;
-export type BrowserType = keyof typeof options.user_agent_type.options;
+export type OxylabsGeoLocation = keyof typeof OXYLABS_OPTIONS.geo_location.options;
+export type OxylabsLocale = keyof typeof OXYLABS_OPTIONS.locale.options;
+export type OxylabsBrowserType = keyof typeof OXYLABS_OPTIONS.user_agent_type.options;
 export interface OxylabsOptions {
 	username: string;
 	password: string;
-	browserType?: BrowserType | string;
-	locale?: Locale | string;
-	geoLocation?: GeoLocation | string;
+	browserType?: OxylabsBrowserType | string;
+	locale?: OxylabsLocale | string;
+	geoLocation?: OxylabsGeoLocation | string;
 	http_method?: "get" | "post";
 	base64Body?: string;
 	returnAsBase64?: boolean;
@@ -7161,7 +7206,7 @@ export interface DecodoResponse {
 	/** Error code */
 	error_code?: string;
 }
-declare const options$1: {
+declare const DECODO_OPTIONS: {
 	readonly user_agent_type: {
 		readonly label: "Browser";
 		readonly options: {
@@ -7757,16 +7802,16 @@ declare const options$1: {
 		};
 	};
 };
-type GeoLocation$1 = keyof typeof options$1.geo_location.options;
-type Locale$1 = keyof typeof options$1.locale.options;
-type BrowserType$1 = keyof typeof options$1.user_agent_type.options;
+export type DecodoGeoLocation = keyof typeof DECODO_OPTIONS.geo_location.options;
+export type DecodoLocale = keyof typeof DECODO_OPTIONS.locale.options;
+export type DecodoBrowserType = keyof typeof DECODO_OPTIONS.user_agent_type.options;
 export type DecodoHeadlessMode = "html" | "png" | "pdf";
 export interface IOptions {
 	username: string;
 	password: string;
-	browserType?: BrowserType$1 | string;
-	locale?: Locale$1 | string;
-	geoLocation?: GeoLocation$1 | string;
+	browserType?: DecodoBrowserType | string;
+	locale?: DecodoLocale | string;
+	geoLocation?: DecodoGeoLocation | string;
 	http_method?: "get" | "post";
 	base64Body?: string;
 	successful_status_codes?: number[];
@@ -7777,8 +7822,8 @@ export interface IOptions {
 		key: string;
 		value: string;
 	}[];
-	deviceType?: BrowserType$1 | string;
-	country?: GeoLocation$1 | string;
+	deviceType?: DecodoBrowserType | string;
+	country?: DecodoGeoLocation | string;
 	state?: string;
 	city?: string;
 	headless?: DecodoHeadlessMode;
@@ -8005,7 +8050,7 @@ export interface LimiterRetryOptions {
 export interface StableThroughputLimiterConfig {
 	domain?: Domain;
 	isGlobal?: boolean;
-	options?: queueOptions$1;
+	options?: LimiterQueueOptions;
 	retry?: LimiterRetryOptions;
 }
 export interface StableThroughputPresetOptions {
@@ -8026,11 +8071,11 @@ export interface StableThroughputPresetOptions {
 	/** Whether to wait on long 429 Retry-After values regardless of cap */
 	alwaysWaitOn429?: boolean;
 	/** Optional global limiter applied to all domains */
-	globalLimiter?: queueOptions$1 | false;
+	globalLimiter?: LimiterQueueOptions | false;
 	/** Domain to treat as the primary crawl target. Defaults to the baseUrl hostname. */
 	domain?: Domain;
 	/** Domain-specific limiter for the primary crawl target */
-	domainLimiter?: queueOptions$1 | false;
+	domainLimiter?: LimiterQueueOptions | false;
 	/** Domain-specific retry policy for the primary crawl target */
 	domainRetry?: LimiterRetryOptions | false;
 	/** Additional limiter configs to append */
@@ -8103,7 +8148,7 @@ export interface ICrawlerOptions {
 				domain: Domain;
 				isGlobal?: boolean;
 				options: OxylabsOptions;
-				queueOptions: queueOptions$1;
+				queueOptions: LimiterQueueOptions;
 			}
 		];
 	} | {
@@ -8122,7 +8167,7 @@ export interface ICrawlerOptions {
 		limiters: Array<{
 			domain?: Domain;
 			isGlobal?: boolean;
-			options?: queueOptions$1;
+			options?: LimiterQueueOptions;
 			retry?: LimiterRetryOptions;
 		}>;
 	} | {
@@ -8149,7 +8194,7 @@ export interface ICrawlerOptions {
 				domain: Domain;
 				isGlobal?: boolean;
 				options: DecodoOptions;
-				queueOptions: queueOptions$1;
+				queueOptions: LimiterQueueOptions;
 			}
 		];
 	} | {
@@ -8548,11 +8593,11 @@ export declare class CrawlerOptions {
 		domain: Domain;
 		isGlobal?: boolean;
 	} & ({
-		options: queueOptions$1;
+		options: LimiterQueueOptions;
 		retry?: LimiterRetryOptions;
 	} | {
 		retry: LimiterRetryOptions;
-		options?: queueOptions$1;
+		options?: LimiterQueueOptions;
 	})): this;
 	/**
 	 * Add Oxylabs proxy service configuration for specific domains or globally
@@ -8577,7 +8622,7 @@ export declare class CrawlerOptions {
 		domain: Domain;
 		isGlobal?: boolean;
 		options: OxylabsOptions;
-		queueOptions: queueOptions$1;
+		queueOptions: LimiterQueueOptions;
 	}): CrawlerOptions;
 	/**
  * Add Decodo proxy service configuration for specific domains or globally
@@ -8602,7 +8647,7 @@ export declare class CrawlerOptions {
 		domain: Domain;
 		isGlobal?: boolean;
 		options: DecodoOptions;
-		queueOptions: queueOptions$1;
+		queueOptions: LimiterQueueOptions;
 	}): CrawlerOptions;
 	/**
 	 * Add a stealth profile for specific domains or globally
@@ -8927,7 +8972,10 @@ export declare class HealthMetrics {
 }
 export type VisitOxylabsOverrides = Partial<Pick<OxylabsConfig, "browserType" | "locale" | "geoLocation" | "http_method" | "base64Body" | "returnAsBase64" | "successful_status_codes" | "session_id" | "follow_redirects" | "javascript_rendering" | "cookies" | "render" | "context">>;
 export type VisitDecodoOverrides = Partial<Pick<DecodoConfig, "deviceType" | "locale" | "country" | "state" | "city" | "headless" | "sessionId" | "sessionDuration" | "javascript" | "javascriptWait" | "waitForCss" | "http_method" | "base64Body" | "successful_status_codes" | "session_id" | "javascript_rendering" | "cookies">>;
-interface RedirectEvent$1 {
+/**
+ * Redirect event data passed to onRedirect handler
+ */
+export interface CrawlerRedirectEvent {
 	originalUrl: string;
 	finalUrl: string;
 	redirectCount: number;
@@ -9368,7 +9416,7 @@ export declare class Crawler {
 	 * });
 	 * ```
 	 */
-	onRedirect(handler: (event: RedirectEvent$1) => Promise<void>): Crawler;
+	onRedirect(handler: (event: CrawlerRedirectEvent) => Promise<void>): Crawler;
 	/**
 	 * Registers a handler called when any queue's state changes.
 	 * Fires for the main crawler queue, scraper queue, and all limiter queues.

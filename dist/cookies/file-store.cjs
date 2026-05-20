@@ -178,13 +178,16 @@ class RezoFileCookieStore extends RezoMemoryCookieStore {
         const parts = line.split("\t");
         if (parts.length < 7)
           continue;
-        const [domain, , cookiePath, secureStr, expiresStr, name, value] = parts;
+        const [rawDomain, , cookiePath, secureStr, expiresStr, name, value] = parts;
+        const hostOnly = !rawDomain.startsWith(".");
+        const domain = hostOnly ? rawDomain : rawDomain.substring(1);
         let expires;
         if (expiresStr && expiresStr !== "0") {
           expires = new Date(parseInt(expiresStr, 10) * 1000);
         }
         const cookie = new Cookie({
           domain,
+          hostOnly,
           path: cookiePath,
           secure: secureStr.toUpperCase() === "TRUE",
           expires,

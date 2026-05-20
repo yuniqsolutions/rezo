@@ -309,13 +309,16 @@ export class RezoCookieJar extends TouchCookieJar {
       if (parts.length < 7) {
         throw new Error(`Invalid Netscape cookie format: ${line}`);
       }
-      const [domain, _, path, secureStr, expiresStr, name, value] = parts;
+      const [rawDomain, , path, secureStr, expiresStr, name, value] = parts;
+      const hostOnly = !rawDomain.startsWith(".");
+      const domain = hostOnly ? rawDomain : rawDomain.substring(1);
       let expires = null;
       if (expiresStr !== "0" && expiresStr !== "") {
         expires = new Date(parseInt(expiresStr, 10) * 1000);
       }
       return {
         domain,
+        hostOnly,
         path,
         secure: secureStr.toUpperCase() === "TRUE",
         expires,
@@ -335,13 +338,16 @@ export class RezoCookieJar extends TouchCookieJar {
         if (parts.length < 7) {
           throw new Error(`Invalid Netscape cookie format: ${line}`);
         }
-        const [domain, _, path, secureStr, expiresStr, name, value] = parts;
+        const [rawDomain, , path, secureStr, expiresStr, name, value] = parts;
+        const hostOnly = !rawDomain.startsWith(".");
+        const domain = hostOnly ? rawDomain : rawDomain.substring(1);
         let expires = null;
         if (expiresStr !== "0" && expiresStr !== "") {
           expires = new Date(parseInt(expiresStr, 10) * 1000);
         }
         return {
           domain,
+          hostOnly,
           path,
           secure: secureStr.toUpperCase() === "TRUE",
           expires,
@@ -354,7 +360,7 @@ export class RezoCookieJar extends TouchCookieJar {
     };
     const cookieToSetCookieString = (cookie) => {
       let setCookie = `${cookie.name}=${cookie.value}`;
-      if (cookie.domain) {
+      if (cookie.domain && !cookie.hostOnly) {
         setCookie += `; Domain=${cookie.domain}`;
       }
       if (cookie.path) {
