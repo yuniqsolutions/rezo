@@ -6136,7 +6136,7 @@ export declare function getSocketTelemetry(socket: Socket): SocketTelemetry | un
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.135";
+export declare const VERSION = "1.0.136";
 /**
  * Type guard to check if an error is a RezoError instance.
  */

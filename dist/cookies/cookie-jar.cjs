@@ -1,8 +1,8 @@
 const { CookieJar: TouchCookieJar } = require("tough-cookie");
 const { Cookie } = require('./cookie.cjs');
 const { requireNodeModule } = require('../utils/node-runtime.cjs');
-const _mod_v3mnny = require('./cookie.cjs');
-exports.Cookie = _mod_v3mnny.Cookie;;
+const _mod_1suq73 = require('./cookie.cjs');
+exports.Cookie = _mod_1suq73.Cookie;;
 
 class RezoCookieJar extends TouchCookieJar {
   constructor(store, options) {
@@ -213,7 +213,11 @@ class RezoCookieJar extends TouchCookieJar {
             }
           }
         });
-      } else if (cookiesData.includes("\t") && /^\S+\t/.test(cookiesData)) {
+      } else if (cookiesData.includes("\t") && (() => {
+        const firstDataLine = cookiesData.split(`
+`).find((l) => l.trim() !== "" && !l.startsWith("#"));
+        return !!firstDataLine && /^\S+\t/.test(firstDataLine);
+      })()) {
         const netscapeCookies = this.parseNetscapeCookies(cookiesData);
         netscapeCookies.forEach((c) => {
           const cookie = new Cookie(c);
@@ -487,7 +491,7 @@ class RezoCookieJar extends TouchCookieJar {
   }
 }
 const CookieJar = exports.CookieJar = RezoCookieJar;
-const _mod_b0eiqf = require("tough-cookie");
-exports.Store = _mod_b0eiqf.Store;;
+const _mod_mkjwzn = require("tough-cookie");
+exports.Store = _mod_mkjwzn.Store;;
 
 exports.RezoCookieJar = RezoCookieJar;

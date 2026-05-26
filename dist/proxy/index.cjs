@@ -1,9 +1,9 @@
 const { Agent, HttpProxyAgent, HttpsProxyAgent, SocksProxyAgent } = require('../internal/agents/index.cjs');
 const { parseProxyString } = require('./parse.cjs');
-const _mod_3bjd43 = require('./manager.cjs');
-exports.ProxyManager = _mod_3bjd43.ProxyManager;;
-const _mod_217hr8 = require('./parse.cjs');
-exports.parseProxyString = _mod_217hr8.parseProxyString;;
+const _mod_0xba22 = require('./manager.cjs');
+exports.ProxyManager = _mod_0xba22.ProxyManager;;
+const _mod_8v8mdx = require('./parse.cjs');
+exports.parseProxyString = _mod_8v8mdx.parseProxyString;;
 function createOptions(uri, opts) {
   if (uri instanceof URL || typeof uri === "string") {
     return {

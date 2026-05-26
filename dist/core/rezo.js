@@ -756,9 +756,22 @@ export function createRezoInstance(adapter, config) {
     return instance.request({ ...options, url, method });
   };
   const proto = Object.getPrototypeOf(instance);
-  const protoMethods = Object.getOwnPropertyNames(proto).filter((name) => name !== "constructor" && typeof proto[name] === "function");
-  for (const method of protoMethods) {
-    callable[method] = instance[method].bind(instance);
+  for (const name of Object.getOwnPropertyNames(proto)) {
+    if (name === "constructor")
+      continue;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+    if (!descriptor)
+      continue;
+    if (descriptor.get || descriptor.set) {
+      Object.defineProperty(callable, name, {
+        get: descriptor.get ? descriptor.get.bind(instance) : undefined,
+        set: descriptor.set ? descriptor.set.bind(instance) : undefined,
+        enumerable: descriptor.enumerable,
+        configurable: descriptor.configurable
+      });
+    } else if (typeof descriptor.value === "function") {
+      callable[name] = descriptor.value.bind(instance);
+    }
   }
   const instanceProps = Object.getOwnPropertyNames(instance);
   for (const prop of instanceProps) {

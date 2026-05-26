@@ -13,7 +13,7 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Cookie, RezoCookieJar } from '../src';
+import { Cookie, Rezo, RezoCookieJar } from '../src';
 import { RezoFileCookieStore } from '../src/cookies/file-store';
 
 const ORIGIN = 'https://example.com';
@@ -217,3 +217,56 @@ describe('Host-only cookies — RezoFileCookieStore round-trip (regression: issu
   });
 });
 
+describe('Cookie dump → save → load round-trip (real-world session restore)', () => {
+  // Mirrors the user-reported flow:
+  //   1) Authenticate against https://api.domain.com — host-only session cookie set
+  //   2) Dump cookies (e.g. to a .txt file) via rezo.getCookies().netscape
+  //   3) Later, load them back into a fresh Rezo instance via rezo.setCookies(content)
+  //   4) Subsequent requests to api.domain.com must include the session cookie
+  //
+  // Earlier versions silently dropped every cookie on reload because the
+  // Netscape format detector (`/^\S+\t/` at position 0) tripped on the
+  // "# Netscape HTTP Cookie File" header line that toNetscape itself emits.
+  const API = 'https://api.domain.com';
+  const ME = 'https://api.domain.com/me';
+  const OTHER_SUB = 'https://other.domain.com/me';
+
+  it('Netscape dump → rezo.setCookies(dumpedString) restores a host-only session cookie', () => {
+    const session = new Rezo();
+    session.cookieJar.setCookiesSync(
+      ['session=abc; Path=/; Secure; HttpOnly'],
+      API
+    );
+    expect(session.cookieJar.getCookieHeader(ME)).toContain('session=abc');
+
+    const dumped = session.getCookies().netscape;
+    expect(dumped).toContain('# Netscape HTTP Cookie File');
+    expect(dumped).toMatch(/api\.domain\.com\t/);
+
+    const restored = new Rezo();
+    restored.setCookies(dumped);
+
+    expect(restored.getCookies().array.length).toBe(1);
+    expect(restored.getCookies().array[0].hostOnly).toBe(true);
+    expect(restored.cookieJar.getCookieHeader(ME)).toContain('session=abc');
+    // No leak to a sibling subdomain of the parent
+    expect(restored.cookieJar.getCookieHeader(OTHER_SUB)).toBe('');
+  });
+
+  it('Serialized JSON dump → rezo.setCookies(parsed) restores a host-only session cookie', () => {
+    const session = new Rezo();
+    session.cookieJar.setCookiesSync(
+      ['session=abc; Path=/; Secure; HttpOnly'],
+      API
+    );
+
+    const json = JSON.stringify(session.getCookies().serialized);
+    const restored = new Rezo();
+    restored.setCookies(JSON.parse(json));
+
+    expect(restored.getCookies().array.length).toBe(1);
+    expect(restored.getCookies().array[0].hostOnly).toBe(true);
+    expect(restored.cookieJar.getCookieHeader(ME)).toContain('session=abc');
+    expect(restored.cookieJar.getCookieHeader(OTHER_SUB)).toBe('');
+  });
+});

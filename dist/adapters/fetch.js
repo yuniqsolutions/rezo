@@ -12,6 +12,7 @@ import { isSameDomain, RezoPerformance } from '../utils/tools.js';
 import { ResponseCache } from '../cache/universal-response-cache.js';
 import { handleRateLimitWait, shouldWaitOnStatus } from '../utils/rate-limit-wait.js';
 import { resolveTimeoutMs } from '../utils/staged-timeout.js';
+import { importNodeModule } from '../utils/node-runtime.js';
 const Environment = {
   isNode: typeof process !== "undefined" && process.versions?.node,
   isBrowser: typeof window !== "undefined" && typeof document !== "undefined",
@@ -1054,8 +1055,11 @@ async function executeSingleFetchRequest(config, fetchOptions, requestCount, tim
     };
     if (downloadResult && config.fileName && Environment.isNode) {
       try {
-        const fs = await import("node:fs");
-        const { dirname } = await import("node:path");
+        const fs = await importNodeModule("node:fs");
+        const pathMod = await importNodeModule("node:path");
+        if (!fs || !pathMod)
+          throw new Error("node:fs and node:path are required for file downloads");
+        const { dirname } = pathMod;
         const dir = dirname(config.fileName);
         if (dir && dir !== ".")
           fs.mkdirSync(dir, { recursive: true });

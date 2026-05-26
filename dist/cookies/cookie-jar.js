@@ -212,7 +212,11 @@ export class RezoCookieJar extends TouchCookieJar {
             }
           }
         });
-      } else if (cookiesData.includes("\t") && /^\S+\t/.test(cookiesData)) {
+      } else if (cookiesData.includes("\t") && (() => {
+        const firstDataLine = cookiesData.split(`
+`).find((l) => l.trim() !== "" && !l.startsWith("#"));
+        return !!firstDataLine && /^\S+\t/.test(firstDataLine);
+      })()) {
         const netscapeCookies = this.parseNetscapeCookies(cookiesData);
         netscapeCookies.forEach((c) => {
           const cookie = new Cookie(c);

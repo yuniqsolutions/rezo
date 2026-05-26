@@ -6061,7 +6061,7 @@ export interface RezoInstance extends Rezo, RezoCallable {
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.135";
+export declare const VERSION = "1.0.136";
 export interface ExpoFileSystemFileLike {
 	uri?: string;
 	size?: number;
