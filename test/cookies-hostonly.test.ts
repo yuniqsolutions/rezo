@@ -110,6 +110,73 @@ describe('Host-only cookies (regression: issue #1)', () => {
   });
 });
 
+describe('__Host- cookie key normalization', () => {
+  it('stores __Host- cookies under a tough-cookie-safe key and returns the public key on reads', async () => {
+    const jar = new RezoCookieJar();
+
+    const accepted = jar.setCookieSync(
+      '__Host-single=abc; Domain=example.com; Path=/; Secure; HttpOnly',
+      ORIGIN
+    );
+    const callbackCookieString = await new Promise<string | undefined>((resolve, reject) => {
+      jar.getCookieString(ORIGIN_PATH, (error, cookieString) => {
+        if (error) reject(error);
+        else resolve(cookieString);
+      });
+    });
+    const callbackCookies = await new Promise<Cookie[]>((resolve, reject) => {
+      jar.getCookies(ORIGIN_PATH, (error, cookies) => {
+        if (error) reject(error);
+        else resolve(cookies as Cookie[]);
+      });
+    });
+
+    expect(accepted?.key).toBe('__Host-single');
+    expect((await jar.getCookies(ORIGIN_PATH))[0].key).toBe('__Host-single');
+    expect(callbackCookies[0].key).toBe('__Host-single');
+    expect(jar.getCookieStringSync(ORIGIN_PATH)).toBe('__Host-single=abc');
+    expect(await jar.getCookieString(ORIGIN_PATH)).toBe('__Host-single=abc');
+    expect(callbackCookieString).toBe('__Host-single=abc');
+    expect(jar.getSetCookieStringsSync(ORIGIN_PATH)[0]).toContain('__Host-single=abc');
+    expect((await jar.getSetCookieStrings(ORIGIN_PATH))?.[0]).toContain('__Host-single=abc');
+    expect(jar.getCookieHeader(ORIGIN_PATH)).toBe('__Host-single=abc');
+    expect(jar.cookies().array[0].key).toBe('__Host-single');
+    expect(jar.cookies().serialized[0].key).toBe('__Host-single');
+    expect(jar.cookies().setCookiesString[0]).toContain('__Host-single=abc');
+    expect(jar.serializeSync()?.cookies?.[0]?.key).toBe('__Host-single');
+    expect((await jar.serialize())?.cookies?.[0]?.key).toBe('__Host-single');
+    expect(jar.toJSON()?.cookies?.[0]?.key).toBe('__Host-single');
+  });
+
+  it('normalizes __Host- cookies through async setCookie too', async () => {
+    const jar = new RezoCookieJar();
+
+    const accepted = await jar.setCookie(
+      '__Host-async=abc; Domain=example.com; Path=/; Secure; HttpOnly',
+      ORIGIN
+    );
+
+    expect(accepted?.key).toBe('__Host-async');
+    expect(await jar.getCookieString(ORIGIN_PATH)).toBe('__Host-async=abc');
+  });
+
+  it('returns the public __Host- key after restoring a stored Rezo_prx_Host- key', () => {
+    const jar = new RezoCookieJar();
+
+    jar.setCookiesSync([{
+      key: 'Rezo_prx_Host-loaded',
+      value: 'abc',
+      domain: 'example.com',
+      path: '/',
+      secure: true,
+      httpOnly: true,
+    }], ORIGIN);
+
+    expect(jar.getCookieStringSync(ORIGIN_PATH)).toBe('__Host-loaded=abc');
+    expect(jar.cookies().serialized[0].key).toBe('__Host-loaded');
+  });
+});
+
 describe('Host-only cookies — Netscape round-trip (regression: issue #1)', () => {
   it('toNetscapeFormat → netscapeCookiesToSetCookieArray preserves host-only', () => {
     const first = new RezoCookieJar();

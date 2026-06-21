@@ -43,16 +43,16 @@ function getRandomProfileByFamily(family) {
     throw new Error(`No profiles found for family: ${family}`);
   return profiles[Math.floor(Math.random() * profiles.length)];
 }
-const _mod_qcb7pe = require('./constants.cjs');
-exports.expandPseudoOrder = _mod_qcb7pe.expandPseudoOrder;;
-const _mod_u9pmfk = require('./chrome-profiles.cjs');
-exports.CHROME_PROFILES = _mod_u9pmfk.CHROME_PROFILES;;
-const _mod_quyobm = require('./firefox-profiles.cjs');
-exports.FIREFOX_PROFILES = _mod_quyobm.FIREFOX_PROFILES;;
-const _mod_jig8en = require('./safari-profiles.cjs');
-exports.SAFARI_PROFILES = _mod_jig8en.SAFARI_PROFILES;;
-const _mod_enfewb = require('./edge-profiles.cjs');
-exports.EDGE_PROFILES = _mod_enfewb.EDGE_PROFILES;;
+const _mod_t0q59h = require('./constants.cjs');
+exports.expandPseudoOrder = _mod_t0q59h.expandPseudoOrder;;
+const _mod_48objk = require('./chrome-profiles.cjs');
+exports.CHROME_PROFILES = _mod_48objk.CHROME_PROFILES;;
+const _mod_j46uml = require('./firefox-profiles.cjs');
+exports.FIREFOX_PROFILES = _mod_j46uml.FIREFOX_PROFILES;;
+const _mod_hihqfd = require('./safari-profiles.cjs');
+exports.SAFARI_PROFILES = _mod_hihqfd.SAFARI_PROFILES;;
+const _mod_jhdv45 = require('./edge-profiles.cjs');
+exports.EDGE_PROFILES = _mod_jhdv45.EDGE_PROFILES;;
 
 exports.getProfile = getProfile;
 exports.getProfilesByFamily = getProfilesByFamily;

@@ -148,6 +148,9 @@ class RezoHeaders extends Headers {
     }
     return result;
   }
+  toJSON() {
+    return this.toObject();
+  }
   toObject(omit) {
     const headers = Object.create(null);
     omit = (omit ? typeof omit === "string" ? [omit] : omit : []).map((key) => key.toLowerCase());

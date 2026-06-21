@@ -2,7 +2,7 @@ import { Agent as HttpAgent, OutgoingHttpHeaders } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import { Socket } from 'node:net';
 import { SecureContext, TLSSocket } from 'node:tls';
-import { Cookie as TouchCookie, CookieJar as TouchCookieJar, CreateCookieJarOptions, CreateCookieOptions, Nullable, Store } from 'tough-cookie';
+import { Callback, Cookie as TouchCookie, CookieJar as TouchCookieJar, CreateCookieJarOptions, CreateCookieOptions, GetCookiesOptions, Nullable, SerializedCookieJar, SetCookieOptions, Store } from 'tough-cookie';
 
 export interface RezoHttpHeaders {
 	accept?: string | undefined;
@@ -137,6 +137,9 @@ declare class RezoHeaders extends Headers {
 	 * Used by stealth adapters to match browser header ordering.
 	 */
 	toOrderedObject(order: string[]): Record<string, string | string[]>;
+	toJSON(): Record<string, string> & {
+		"set-cookie"?: string[];
+	};
 	toObject(omit?: Array<keyof RezoHttpHeaders> | keyof RezoHttpHeaders): Record<string, string | string[]>;
 	toString(): string;
 	set(name: keyof RezoHttpHeaders, value: string): void;
@@ -214,6 +217,38 @@ declare class RezoCookieJar extends TouchCookieJar {
 	constructor(cookies: Cookie[], url: string);
 	constructor(store: Nullable<Store>, options?: CreateCookieJarOptions | boolean);
 	private generateCookies;
+	setCookieSync(cookie: string | Cookie, url: string, options?: SetCookieOptions): Cookie | undefined;
+	setCookie(cookie: string | TouchCookie, url: string | URL, callback: Callback<TouchCookie | undefined>): void;
+	setCookie(cookie: string | TouchCookie, url: string | URL, options: SetCookieOptions, callback: Callback<TouchCookie | undefined>): void;
+	setCookie(cookie: string | TouchCookie, url: string | URL, options?: SetCookieOptions): Promise<TouchCookie | undefined>;
+	setCookie(cookie: string | TouchCookie, url: string | URL, options: SetCookieOptions | Callback<TouchCookie | undefined>, callback?: Callback<TouchCookie | undefined>): unknown;
+	getCookies(url: string, callback: Callback<TouchCookie[]>): void;
+	getCookies(url: string | URL, options: GetCookiesOptions | undefined, callback: Callback<TouchCookie[]>): void;
+	getCookies(url: string | URL, options?: GetCookiesOptions): Promise<TouchCookie[]>;
+	getCookies(url: string | URL, options: GetCookiesOptions | undefined | Callback<TouchCookie[]>, callback?: Callback<TouchCookie[]>): unknown;
+	getCookiesSync(url: string, options?: GetCookiesOptions): Cookie[];
+	getCookieString(url: string, callback: Callback<string | undefined>): void;
+	getCookieString(url: string, options: GetCookiesOptions, callback: Callback<string | undefined>): void;
+	getCookieString(url: string, options?: GetCookiesOptions): Promise<string>;
+	getCookieString(url: string, options: GetCookiesOptions | Callback<string | undefined>, callback?: Callback<string | undefined>): unknown;
+	getCookieStringSync(url: string, options?: GetCookiesOptions): string;
+	getSetCookieStrings(url: string, callback: Callback<string[] | undefined>): void;
+	getSetCookieStrings(url: string, options: GetCookiesOptions, callback: Callback<string[] | undefined>): void;
+	getSetCookieStrings(url: string, options?: GetCookiesOptions): Promise<string[] | undefined>;
+	getSetCookieStrings(url: string, options: GetCookiesOptions, callback?: Callback<string[] | undefined>): unknown;
+	getSetCookieStringsSync(url: string, options?: GetCookiesOptions): string[];
+	serialize(callback: Callback<SerializedCookieJar>): void;
+	serialize(): Promise<SerializedCookieJar>;
+	serializeSync(): SerializedCookieJar | undefined;
+	toJSON(): ReturnType<TouchCookieJar["toJSON"]>;
+	private toPublicSerializedJar;
+	private toStoredCookie;
+	private toPublicCookies;
+	private toPublicCookie;
+	private toStoredCookieKey;
+	private toPublicCookieKey;
+	private cookiesToCookieString;
+	private cookiesToSetCookieStrings;
 	/**
 	 * Get all cookies from the cookie jar.
 	 *
