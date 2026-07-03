@@ -218,7 +218,8 @@ export async function getDefaultConfig(config = {}, proxyManager) {
     proxyManager: proxyManager || null,
     decompress: config.decompress,
     keepAlive: config.keepAlive,
-    keepAliveMsecs: config.keepAliveMsecs
+    keepAliveMsecs: config.keepAliveMsecs,
+    acceptPartialBody: config.acceptPartialBody
   };
 }
 export async function getFS() {
@@ -545,6 +546,9 @@ export function prepareHTTPOptions(options, jar, addedOptions, config) {
   const keepAliveMsecsOpt = options.keepAliveMsecs ?? addedOptions?.defaultOptions?.keepAliveMsecs;
   if (keepAliveMsecsOpt !== undefined)
     fetchOptions.keepAliveMsecs = keepAliveMsecsOpt;
+  const acceptPartialBodyOpt = options.acceptPartialBody ?? addedOptions?.defaultOptions?.acceptPartialBody;
+  if (acceptPartialBodyOpt !== undefined)
+    fetchOptions.acceptPartialBody = acceptPartialBodyOpt;
   if (options.sessionId) {
     fetchOptions.sessionId = options.sessionId;
   }

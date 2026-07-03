@@ -13,6 +13,7 @@ const { isSameDomain } = require('../utils/tools.cjs');
 const { ResponseCache } = require('../cache/universal-response-cache.cjs');
 const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
 const { resolveTimeoutMs } = require('../utils/staged-timeout.cjs');
+const { debugErrorDump } = require('../utils/debug-error-dump.cjs');
 const Environment = {
   get isReactNative() {
     return typeof navigator !== "undefined" && navigator.product === "ReactNative";
@@ -115,6 +116,8 @@ const debugLog = {
   error: (config, error) => {
     if (config.debug) {
       console.log(`[Rezo Debug] Error: ${error instanceof Error ? error.message : error}`);
+      if (error instanceof Error)
+        debugErrorDump(config, error);
     }
     if (config.trackUrl) {
       console.log(`[Rezo Track]   ✗ Error: ${error instanceof Error ? error.message : error}`);
@@ -1313,16 +1316,19 @@ async function executeRequest(options, defaultOptions, jar) {
   })();
   if (streamResponse) {
     res.catch((err) => {
+      debugErrorDump(mainConfig, err);
       streamResponse.emit("error", err);
     });
     return streamResponse;
   } else if (downloadResponse) {
     res.catch((err) => {
+      debugErrorDump(mainConfig, err);
       downloadResponse.emit("error", err);
     });
     return downloadResponse;
   } else if (uploadResponse) {
     res.catch((err) => {
+      debugErrorDump(mainConfig, err);
       uploadResponse.emit("error", err);
     });
     return uploadResponse;

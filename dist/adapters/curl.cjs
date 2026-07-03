@@ -11,6 +11,7 @@ const { RezoCookieJar, Cookie } = require('../cookies/cookie-jar.cjs');
 const RezoFormData = require('../utils/form-data.cjs');
 const { existsSync } = require("node:fs");
 const { getDefaultConfig, prepareHTTPOptions, calculateRetryDelay, shouldRetry } = require('../utils/http-config.cjs');
+const { debugErrorDump } = require('../utils/debug-error-dump.cjs');
 const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
 const { RezoHeaders } = require('../utils/headers.cjs');
 const { StreamResponse } = require('../responses/stream.cjs');
@@ -2470,12 +2471,15 @@ async function executeRequest(options, defaultOptions, jar) {
             }
           }
         }
+        debugErrorDump(config, error);
         throw error;
       }
       if (proxyManager && selectedProxy) {
         proxyManager.reportFailure(selectedProxy, error);
       }
-      throw buildSmartError(config, originalRequest, error);
+      const smartError = buildSmartError(config, originalRequest, error);
+      debugErrorDump(config, smartError);
+      throw smartError;
     }
   }
 }

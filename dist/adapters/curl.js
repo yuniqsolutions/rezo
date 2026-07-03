@@ -11,6 +11,7 @@ import { RezoCookieJar, Cookie } from '../cookies/cookie-jar.js';
 import RezoFormData from '../utils/form-data.js';
 import { existsSync } from "node:fs";
 import { getDefaultConfig, prepareHTTPOptions, calculateRetryDelay, shouldRetry } from '../utils/http-config.js';
+import { debugErrorDump } from '../utils/debug-error-dump.js';
 import { handleRateLimitWait, shouldWaitOnStatus } from '../utils/rate-limit-wait.js';
 import { RezoHeaders } from '../utils/headers.js';
 import { StreamResponse } from '../responses/stream.js';
@@ -2470,12 +2471,15 @@ export async function executeRequest(options, defaultOptions, jar) {
             }
           }
         }
+        debugErrorDump(config, error);
         throw error;
       }
       if (proxyManager && selectedProxy) {
         proxyManager.reportFailure(selectedProxy, error);
       }
-      throw buildSmartError(config, originalRequest, error);
+      const smartError = buildSmartError(config, originalRequest, error);
+      debugErrorDump(config, smartError);
+      throw smartError;
     }
   }
 }

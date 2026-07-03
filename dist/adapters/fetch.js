@@ -12,6 +12,7 @@ import { isSameDomain, RezoPerformance } from '../utils/tools.js';
 import { ResponseCache } from '../cache/universal-response-cache.js';
 import { handleRateLimitWait, shouldWaitOnStatus } from '../utils/rate-limit-wait.js';
 import { resolveTimeoutMs } from '../utils/staged-timeout.js';
+import { debugErrorDump } from '../utils/debug-error-dump.js';
 import { importNodeModule } from '../utils/node-runtime.js';
 const Environment = {
   isNode: typeof process !== "undefined" && process.versions?.node,
@@ -476,16 +477,19 @@ export async function executeRequest(options, defaultOptions, jar) {
     const res = executeFetchRequest(fetchOptions, mainConfig, options, perform, streamResponse, downloadResponse, uploadResponse, jar);
     if (streamResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         streamResponse.emit("error", err);
       });
       return streamResponse;
     } else if (downloadResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         downloadResponse.emit("error", err);
       });
       return downloadResponse;
     } else if (uploadResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         uploadResponse.emit("error", err);
       });
       return uploadResponse;
@@ -506,6 +510,7 @@ export async function executeRequest(options, defaultOptions, jar) {
     }
     return response;
   } catch (error) {
+    debugErrorDump(mainConfig, error);
     throw error;
   }
 }

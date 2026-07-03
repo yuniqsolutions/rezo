@@ -21,6 +21,7 @@ import { ResponseCache } from '../cache/response-cache.js';
 import { getGlobalAgentPool } from '../utils/agent-pool.js';
 import { buildTlsOptions } from '../stealth/tls-fingerprint.js';
 import { StagedTimeoutManager, parseStagedTimeouts, resolveTimeoutMs } from '../utils/staged-timeout.js';
+import { debugErrorDump } from '../utils/debug-error-dump.js';
 import { handleRateLimitWait, shouldWaitOnStatus } from '../utils/rate-limit-wait.js';
 import { getSocketTelemetry, beginRequestContext } from '../utils/socket-telemetry.js';
 import dns from "node:dns";
@@ -70,6 +71,7 @@ const debugLog = {
       console.log(`[Rezo Track]   ✗ Max retries reached`);
     }
   },
+  errorDump: (config, error) => debugErrorDump(config, error),
   response: (config, status, statusText, duration) => {
     if (config.debug) {
       console.log(`[Rezo Debug] Response: ${status} ${statusText} (${duration.toFixed(2)}ms)`);
@@ -312,16 +314,19 @@ export async function executeRequest(options, defaultOptions, jar) {
     const res = executeHttp1Request(config.fetchOptions, mainConfig, config.options, perform, d_options.fs, streamResponse, downloadResponse, uploadResponse, jar);
     if (streamResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         streamResponse.emit("error", err);
       });
       return streamResponse;
     } else if (downloadResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         downloadResponse.emit("error", err);
       });
       return downloadResponse;
     } else if (uploadResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         uploadResponse.emit("error", err);
       });
       return uploadResponse;
@@ -366,6 +371,7 @@ export async function executeRequest(options, defaultOptions, jar) {
         }
       }
     }
+    debugErrorDump(mainConfig, error);
     throw error;
   }
 }
@@ -1105,6 +1111,16 @@ async function request(config, fetchOptions, requestCount, timing, _stats, _resp
                 const partialResponse = buildResponseFromIncoming(res, data, config, url.toString(), buildUrlTree(config, url.toString()), undefined, undefined, contentLengthCounter);
                 resolve(partialResponse);
                 return;
+              }
+              if (fetchOptions.acceptPartialBody && data.length > 0 && statusCode) {
+                const _validateStatus = fetchOptions.validateStatus ?? ((s) => s >= 200 && s < 300);
+                if (fetchOptions.validateStatus === null || _validateStatus(statusCode)) {
+                  _stats.statusOnNext = "success";
+                  const salvagedResponse = buildResponseFromIncoming(res, data, config, url.toString(), buildUrlTree(config, url.toString()), undefined, undefined, contentLengthCounter);
+                  salvagedResponse.truncated = true;
+                  resolve(salvagedResponse);
+                  return;
+                }
               }
               const isNetworkError = err.code && ["ECONNRESET", "ECONNABORTED", "ETIMEDOUT", "EPIPE", "ENOTFOUND", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "ERR_STREAM_PREMATURE_CLOSE"].includes(err.code);
               if (isNetworkError) {

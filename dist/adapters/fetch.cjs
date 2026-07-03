@@ -12,6 +12,7 @@ const { isSameDomain, RezoPerformance } = require('../utils/tools.cjs');
 const { ResponseCache } = require('../cache/universal-response-cache.cjs');
 const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
 const { resolveTimeoutMs } = require('../utils/staged-timeout.cjs');
+const { debugErrorDump } = require('../utils/debug-error-dump.cjs');
 const { importNodeModule } = require('../utils/node-runtime.cjs');
 const Environment = {
   isNode: typeof process !== "undefined" && process.versions?.node,
@@ -476,16 +477,19 @@ async function executeRequest(options, defaultOptions, jar) {
     const res = executeFetchRequest(fetchOptions, mainConfig, options, perform, streamResponse, downloadResponse, uploadResponse, jar);
     if (streamResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         streamResponse.emit("error", err);
       });
       return streamResponse;
     } else if (downloadResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         downloadResponse.emit("error", err);
       });
       return downloadResponse;
     } else if (uploadResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         uploadResponse.emit("error", err);
       });
       return uploadResponse;
@@ -506,6 +510,7 @@ async function executeRequest(options, defaultOptions, jar) {
     }
     return response;
   } catch (error) {
+    debugErrorDump(mainConfig, error);
     throw error;
   }
 }

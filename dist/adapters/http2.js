@@ -19,6 +19,7 @@ import * as net from "node:net";
 import { ResponseCache } from '../cache/response-cache.js';
 import { handleRateLimitWait, shouldWaitOnStatus } from '../utils/rate-limit-wait.js';
 import { resolveTimeoutMs } from '../utils/staged-timeout.js';
+import { debugErrorDump } from '../utils/debug-error-dump.js';
 import { buildTlsOptions } from '../stealth/tls-fingerprint.js';
 let zstdDecompressSync = null;
 let zstdChecked = false;
@@ -901,16 +902,19 @@ export async function executeRequest(options, defaultOptions, jar) {
     const res = executeHttp2Request(fetchOptions, mainConfig, options, perform, fs, streamResponse, downloadResponse, uploadResponse, jar);
     if (streamResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         streamResponse.emit("error", err);
       });
       return streamResponse;
     } else if (downloadResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         downloadResponse.emit("error", err);
       });
       return downloadResponse;
     } else if (uploadResponse) {
       res.catch((err) => {
+        debugErrorDump(mainConfig, err);
         uploadResponse.emit("error", err);
       });
       return uploadResponse;
@@ -955,6 +959,7 @@ export async function executeRequest(options, defaultOptions, jar) {
         }
       }
     }
+    debugErrorDump(mainConfig, error);
     throw error;
   }
 }

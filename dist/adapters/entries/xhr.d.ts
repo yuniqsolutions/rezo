@@ -759,6 +759,12 @@ export interface RezoResponse<T = any> {
 	contentLength: number;
 	urls: string[];
 	config: RezoConfig;
+	/**
+	 * Present (true) only when `acceptPartialBody: true` salvaged a body whose
+	 * connection was torn down before a clean end-of-stream — the data may be
+	 * complete or may be missing its tail.
+	 */
+	truncated?: boolean;
 }
 /**
  * Platform-agnostic base interface for event-emitting responses
@@ -3035,6 +3041,8 @@ export interface RezoDefaultOptions {
 	decompress?: boolean;
 	/** Whether to keep the connection alive for reuse */
 	keepAlive?: boolean;
+	/** Accept bodies whose connection was torn down before a clean end-of-stream (response gets `truncated: true`) */
+	acceptPartialBody?: boolean;
 	/** Whether to detect and prevent redirect cycles */
 	enableRedirectCycleDetection?: boolean;
 	/** Whether to send cookies and authorization headers with cross-origin requests */
@@ -4094,6 +4102,31 @@ export interface RezoRequestConfig<D = any> {
 	maxRedirects?: number;
 	/** Whether to automatically decompress response data */
 	decompress?: boolean;
+	/**
+	 * Accept response bodies that arrive without a clean end-of-stream.
+	 *
+	 * Some servers send the complete payload and then reset the connection
+	 * instead of closing it cleanly (or advertise a Content-Length larger than
+	 * what they send). Node reports this as `aborted`/`ECONNRESET` even though
+	 * the data may be complete and usable.
+	 *
+	 * With `acceptPartialBody: true`, if response headers passed validation and
+	 * at least one body byte arrived, the request **resolves normally** with
+	 * whatever was received instead of throwing. The response is marked with
+	 * `truncated: true` so you can decide whether to trust it.
+	 *
+	 * Off by default: a torn connection usually means missing data, and
+	 * silently returning an incomplete body is the more dangerous default.
+	 *
+	 * @example
+	 * ```typescript
+	 * const res = await rezo.get(url, { acceptPartialBody: true });
+	 * if (res.truncated) console.warn('body may be incomplete');
+	 * ```
+	 *
+	 * @default false
+	 */
+	acceptPartialBody?: boolean;
 	/**
 	 * Whether to keep TCP connections alive for reuse across multiple requests.
 	 *
@@ -6098,7 +6131,7 @@ export interface RezoInstance extends Rezo, RezoCallable {
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.138";
+export declare const VERSION = "1.0.139";
 export declare const isRezoError: typeof RezoError.isRezoError;
 export declare const Cancel: typeof RezoError;
 export declare const CancelToken: {

@@ -12,6 +12,7 @@ const { RezoPerformance } = require('../utils/tools.cjs');
 const { ResponseCache } = require('../cache/universal-response-cache.cjs');
 const { handleRateLimitWait, shouldWaitOnStatus } = require('../utils/rate-limit-wait.cjs');
 const { resolveTimeoutMs } = require('../utils/staged-timeout.cjs');
+const { debugErrorDump } = require('../utils/debug-error-dump.cjs');
 const Environment = {
   isBrowser: typeof window !== "undefined" && typeof document !== "undefined",
   hasXHR: typeof XMLHttpRequest !== "undefined",
@@ -455,9 +456,12 @@ async function executeXHRRequest(fetchOptions, config, options, perform, streamR
       return response;
     } catch (error) {
       if (error instanceof RezoError) {
+        debugErrorDump(config, error);
         throw error;
       }
-      throw buildSmartError(config, fetchOptions, error);
+      const smartError = buildSmartError(config, fetchOptions, error);
+      debugErrorDump(config, smartError);
+      throw smartError;
     }
   }
 }

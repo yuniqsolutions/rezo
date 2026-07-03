@@ -13,6 +13,7 @@ import { isSameDomain } from '../utils/tools.js';
 import { ResponseCache } from '../cache/universal-response-cache.js';
 import { handleRateLimitWait, shouldWaitOnStatus } from '../utils/rate-limit-wait.js';
 import { resolveTimeoutMs } from '../utils/staged-timeout.js';
+import { debugErrorDump } from '../utils/debug-error-dump.js';
 const Environment = {
   get isReactNative() {
     return typeof navigator !== "undefined" && navigator.product === "ReactNative";
@@ -115,6 +116,8 @@ const debugLog = {
   error: (config, error) => {
     if (config.debug) {
       console.log(`[Rezo Debug] Error: ${error instanceof Error ? error.message : error}`);
+      if (error instanceof Error)
+        debugErrorDump(config, error);
     }
     if (config.trackUrl) {
       console.log(`[Rezo Track]   ✗ Error: ${error instanceof Error ? error.message : error}`);
@@ -1313,16 +1316,19 @@ export async function executeRequest(options, defaultOptions, jar) {
   })();
   if (streamResponse) {
     res.catch((err) => {
+      debugErrorDump(mainConfig, err);
       streamResponse.emit("error", err);
     });
     return streamResponse;
   } else if (downloadResponse) {
     res.catch((err) => {
+      debugErrorDump(mainConfig, err);
       downloadResponse.emit("error", err);
     });
     return downloadResponse;
   } else if (uploadResponse) {
     res.catch((err) => {
+      debugErrorDump(mainConfig, err);
       uploadResponse.emit("error", err);
     });
     return uploadResponse;
