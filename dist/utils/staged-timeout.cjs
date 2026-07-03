@@ -112,10 +112,9 @@ class StagedTimeoutManager {
       total: `Total timeout: Request exceeded maximum duration of ${elapsed}ms`
     };
     const message = phaseMessages[phaseName] || `Timeout in ${phaseName} phase after ${elapsed}ms`;
-    const error = new RezoError(message, this.config || {}, phaseName === "connect" ? "ETIMEDOUT" : phaseName === "headers" ? "ESOCKETTIMEDOUT" : "ECONNRESET", this.requestConfig || undefined);
+    const error = new RezoError(message, this.config || {}, phaseName === "connect" ? "ETIMEDOUT" : phaseName === "total" ? "ECONNABORTED" : "ESOCKETTIMEDOUT", this.requestConfig || undefined);
     error.phase = phaseName;
     error.elapsed = elapsed;
-    error.isRetryable = phaseName === "connect" || phaseName === "headers";
     return error;
   }
   getPhaseTimeout(phaseName) {

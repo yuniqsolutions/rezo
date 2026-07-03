@@ -7,7 +7,7 @@ const DEFAULT_CONFIG = {
   keepAliveMsecs: 1000,
   maxSockets: 256,
   maxFreeSockets: 64,
-  timeout: 30000,
+  timeout: 5000,
   scheduling: "lifo",
   dnsCache: true,
   idleEvictionMs: 60000

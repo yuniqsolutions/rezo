@@ -382,6 +382,7 @@ async function executeHttp1Request(fetchOptions, config, options, perform, fs, s
   const ABSOLUTE_MAX_ATTEMPTS = 50;
   const visitedUrls = new Set;
   let totalAttempts = 0;
+  let staleSocketRetried = false;
   config.setSignal();
   const timeoutClearInstance = config.timeoutClearInstance;
   delete config.timeoutClearInstance;
@@ -414,6 +415,15 @@ async function executeHttp1Request(fetchOptions, config, options, perform, fs, s
           duration: perform.now()
         });
         perform.reset();
+        if (response.isStaleSocketReset && !staleSocketRetried) {
+          const staleMethod = (fetchOptions.method || "GET").toUpperCase();
+          const staleBody = fetchOptions.body;
+          const bodyReplayable = staleBody === undefined || staleBody === null || typeof staleBody === "string" || Buffer.isBuffer(staleBody);
+          if (["GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE"].includes(staleMethod) && bodyReplayable) {
+            staleSocketRetried = true;
+            continue;
+          }
+        }
         if (!retryConfig) {
           throw response;
         }
@@ -734,8 +744,11 @@ async function request(config, fetchOptions, requestCount, timing, _stats, _resp
       if (timeoutManager.hasPhase("total")) {
         timeoutManager.startPhase("total");
       }
+      let connectionWasReused = false;
+      let responseReceived = false;
       try {
         const req = httpModule.request(requestOptions, async (res) => {
+          responseReceived = true;
           timeoutManager.clearPhase("headers");
           if (timeoutManager.hasPhase("body")) {
             timeoutManager.startPhase("body");
@@ -859,6 +872,8 @@ async function request(config, fetchOptions, requestCount, timing, _stats, _resp
           let contentLengthCounter = 0;
           if (streamResult) {
             if (isRedirected) {
+              timeoutManager.clearAll();
+              res.resume();
               resolve(null);
               return;
             }
@@ -1134,6 +1149,9 @@ async function request(config, fetchOptions, requestCount, timing, _stats, _resp
             }
           }
           const error = buildSmartError(config, fetchOptions, err);
+          if (err?.code === "ECONNRESET" && connectionWasReused && !responseReceived) {
+            error.isStaleSocketReset = true;
+          }
           resolve(error);
         });
         req.on("socket", (socket) => {
@@ -1164,6 +1182,7 @@ async function request(config, fetchOptions, requestCount, timing, _stats, _resp
           });
           const reqContext = beginRequestContext(socket, isSecure);
           const telemetry = getSocketTelemetry(socket);
+          connectionWasReused = reqContext.connectionReused;
           if (reqContext.connectionReused) {
             timeoutManager.clearPhase("connect");
             if (timeoutManager.hasPhase("headers")) {
@@ -1531,6 +1550,13 @@ function buildHTTPOptions(fetchOptions, isSecure, url) {
       keepAlive,
       keepAliveMsecs: keepAlive ? keepAliveMsecs : undefined
     });
+  } else if (keepAlive === false) {
+    agent = isSecure ? new https.Agent({
+      keepAlive: false,
+      ...useSecureContext ? { secureContext: createSecureContext() } : {},
+      servername: url.hostname,
+      rejectUnauthorized
+    }) : new http.Agent({ keepAlive: false });
   } else if (useAgentPool) {
     const agentPool = getGlobalAgentPool({
       keepAlive: true,

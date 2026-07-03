@@ -4103,34 +4103,36 @@ export interface RezoRequestConfig<D = any> {
 	 * TLS negotiation for HTTPS).
 	 *
 	 * **Behavior:**
-	 * - `false` (default) - Connection closes after each request. Process exits immediately.
-	 * - `true` - Connection stays open for reuse. Idle connections close after `keepAliveMsecs`.
+	 * - `true` (default) - Connections are pooled and reused across requests to the
+	 *   same host. Idle pooled sockets are closed after ~5 seconds.
+	 * - `false` - A fresh connection is opened for every request and closed after
+	 *   the response. No pooling, no reuse.
 	 *
-	 * **When to use `keepAlive: true`:**
+	 * **When to keep the default (`keepAlive: true`):**
 	 * - Making multiple requests to the same host in sequence
 	 * - Long-running applications (servers, bots, scrapers)
 	 * - Performance-critical applications where connection overhead matters
 	 *
-	 * **When to use `keepAlive: false` (default):**
-	 * - Single requests or scripts that should exit immediately
-	 * - CLI tools that make one-off requests
-	 * - When you need predictable process termination
+	 * **When to use `keepAlive: false`:**
+	 * - Hosts that reset reused connections aggressively
+	 * - Debugging connection-level issues (isolates every request)
+	 * - One-off requests where connection reuse buys nothing
 	 *
 	 * @example
 	 * ```typescript
-	 * // Default: process exits immediately after request
+	 * // Default: pooled keep-alive connections
 	 * const { data } = await rezo.get('https://api.example.com/data');
 	 *
-	 * // Keep connection alive for 1 minute (default) for subsequent requests
-	 * const client = new Rezo({ keepAlive: true });
+	 * // Fresh connection per request for this instance
+	 * const client = rezo.create({ keepAlive: false });
 	 * await client.get('https://api.example.com/users');
-	 * await client.get('https://api.example.com/posts'); // Reuses connection
+	 * await client.get('https://api.example.com/posts'); // New connection again
 	 *
-	 * // Custom keep-alive timeout (30 seconds)
-	 * const client = new Rezo({ keepAlive: true, keepAliveMsecs: 30000 });
+	 * // Or per request
+	 * await rezo.get('https://api.example.com/data', { keepAlive: false });
 	 * ```
 	 *
-	 * @default false
+	 * @default true
 	 */
 	keepAlive?: boolean;
 	/**
@@ -6096,7 +6098,7 @@ export interface RezoInstance extends Rezo, RezoCallable {
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.137";
+export declare const VERSION = "1.0.138";
 export declare const isRezoError: typeof RezoError.isRezoError;
 export declare const Cancel: typeof RezoError;
 export declare const CancelToken: {

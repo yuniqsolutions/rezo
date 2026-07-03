@@ -216,7 +216,9 @@ async function getDefaultConfig(config = {}, proxyManager) {
     cookieFile: config.cookieFile,
     encoding: config.encoding,
     proxyManager: proxyManager || null,
-    decompress: config.decompress
+    decompress: config.decompress,
+    keepAlive: config.keepAlive,
+    keepAliveMsecs: config.keepAliveMsecs
   };
 }
 async function getFS() {
@@ -532,6 +534,17 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
     config.originalRequest = fetchOptions;
   }
   fetchOptions.rejectUnauthorized = options.rejectUnauthorized;
+  fetchOptions.timeout = options.timeout;
+  if (options.signal)
+    fetchOptions.signal = options.signal;
+  if (options.auth)
+    fetchOptions.auth = options.auth;
+  const keepAliveOpt = options.keepAlive ?? addedOptions?.defaultOptions?.keepAlive;
+  if (keepAliveOpt !== undefined)
+    fetchOptions.keepAlive = keepAliveOpt;
+  const keepAliveMsecsOpt = options.keepAliveMsecs ?? addedOptions?.defaultOptions?.keepAliveMsecs;
+  if (keepAliveMsecsOpt !== undefined)
+    fetchOptions.keepAliveMsecs = keepAliveMsecsOpt;
   if (options.sessionId) {
     fetchOptions.sessionId = options.sessionId;
   }
@@ -900,7 +913,7 @@ const NETWORK_ERROR_CODES = exports.NETWORK_ERROR_CODES = [
   "EHOSTUNREACH",
   "ENETUNREACH"
 ];
-const TIMEOUT_ERROR_CODES = exports.TIMEOUT_ERROR_CODES = ["ETIMEDOUT", "ECONNABORTED", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT"];
+const TIMEOUT_ERROR_CODES = exports.TIMEOUT_ERROR_CODES = ["ETIMEDOUT", "ESOCKETTIMEDOUT", "ECONNABORTED", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT"];
 function normalizeRetryConfig(retry, defaults) {
   if (retry === undefined || retry === false) {
     return null;

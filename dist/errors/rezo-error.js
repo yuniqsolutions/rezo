@@ -597,7 +597,7 @@ export class RezoError extends Error {
     if (code) {
       Object.defineProperty(this, "code", { value: code, enumerable: true });
     }
-    const timeoutCodes = ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_REQUEST_TIMEOUT", "ERR_TLS_HANDSHAKE_TIMEOUT", "REZ_PROXY_TIMEOUT"];
+    const timeoutCodes = ["ETIMEDOUT", "ESOCKETTIMEDOUT", "ECONNABORTED", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_REQUEST_TIMEOUT", "ERR_TLS_HANDSHAKE_TIMEOUT", "REZ_PROXY_TIMEOUT"];
     const abortCodes = ["ABORT_ERR", "UND_ERR_ABORTED"];
     const networkCodes = ["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "EAI_AGAIN", "EPIPE", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_SOCKET"];
     const proxyCodes = ["REZ_PROXY_CONNECTION_FAILED", "REZ_PROXY_AUTHENTICATION_FAILED", "REZ_PROXY_TARGET_UNREACHABLE", "REZ_PROXY_ERROR", "REZ_PROXY_TIMEOUT", "REZ_PROXY_INVALID_PROTOCOL", "REZ_PROXY_INVALID_HOSTPORT"];
@@ -616,7 +616,8 @@ export class RezoError extends Error {
       const errorInfo = getCode(code);
       Object.defineProperty(this, "errno", { value: errorInfo.errno, enumerable: false });
       Object.defineProperty(this, "suggestion", { value: errorInfo.suggestion, enumerable: false });
-      this.message = errorInfo.message;
+      this.message = message || errorInfo.message;
+      Object.defineProperty(this, "details", { value: errorInfo.details, enumerable: false, configurable: true });
     } else {
       this.message = message;
       Object.defineProperty(this, "suggestion", { value: "Check the error for more information.", enumerable: false });
