@@ -1,4 +1,4 @@
-const { executeRequest } = require('../adapters/fetch.cjs');
+const { executeRequest } = require('../adapters/xhr.cjs');
 const { setGlobalAdapter, createRezoInstance, Rezo } = require('../core/rezo.cjs');
 const { RezoError, RezoErrorCode } = require('../errors/rezo-error.cjs');
 const { RezoHeaders } = require('../utils/headers.cjs');
@@ -27,7 +27,12 @@ const spread = exports.spread = (callback) => (array) => callback(...array);
 
 exports.VERSION = VERSION;
 setGlobalAdapter(executeRequest);
-const rezo = createRezoInstance(executeRequest);
+const pageLocation = typeof location !== "undefined" && typeof location.href === "string" && /^https?:\/\//.test(location.href) ? location.href : undefined;
+const rezo = createRezoInstance(executeRequest, pageLocation ? { baseURL: pageLocation } : undefined);
+if (pageLocation) {
+  const createWithoutBase = rezo.create;
+  rezo.create = (config) => createWithoutBase({ baseURL: pageLocation, ...config ?? {} });
+}
 
 exports.default = rezo;
 module.exports = Object.assign(rezo, exports);

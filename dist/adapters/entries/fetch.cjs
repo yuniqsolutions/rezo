@@ -27,7 +27,12 @@ const spread = exports.spread = (callback) => (array) => callback(...array);
 
 exports.VERSION = VERSION;
 setGlobalAdapter(executeRequest);
-const rezo = createRezoInstance(executeRequest);
+const entryLocation = typeof location !== "undefined" && typeof location.href === "string" && /^https?:\/\//.test(location.href) ? location.href : undefined;
+const rezo = createRezoInstance(executeRequest, entryLocation ? { baseURL: entryLocation } : undefined);
+if (entryLocation) {
+  const createWithoutBase = rezo.create;
+  rezo.create = (config) => createWithoutBase({ baseURL: entryLocation, ...config ?? {} });
+}
 
 exports.default = rezo;
 module.exports = Object.assign(rezo, exports);

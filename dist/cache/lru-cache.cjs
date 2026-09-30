@@ -5,6 +5,9 @@ class LRUCache {
   onEvict;
   constructor(options = {}) {
     this.maxEntries = options.maxEntries ?? 500;
+    if (!Number.isInteger(this.maxEntries) || this.maxEntries < 0) {
+      throw new RangeError("maxEntries must be a non-negative integer");
+    }
     this.defaultTTL = options.ttl ?? 3000000;
     this.onEvict = options.onEvict;
   }
@@ -22,6 +25,8 @@ class LRUCache {
     return entry.value;
   }
   set(key, value, ttl) {
+    if (this.maxEntries === 0)
+      return;
     if (this.cache.has(key)) {
       this.cache.delete(key);
     }

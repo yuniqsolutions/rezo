@@ -46,6 +46,7 @@ const SOCKS5_RESPONSE = {
   AddressTypeNotSupported: 8
 };
 const DEFAULT_TIMEOUT = 30000;
+const SOCKS_PROXY_CONNECTION_TIMEOUT_MESSAGE = exports.SOCKS_PROXY_CONNECTION_TIMEOUT_MESSAGE = "Proxy connection timed out";
 var SocksState;
 ((SocksState) => {
   SocksState[SocksState["Created"] = 0] = "Created";
@@ -236,7 +237,7 @@ class SocksClient extends EventEmitter {
   }
   onEstablishedTimeout() {
     if (this.state !== 8 /* Established */ && this.state !== 10 /* BoundWaitingForConnection */) {
-      this.closeSocket("Proxy connection timed out");
+      this.closeSocket(SOCKS_PROXY_CONNECTION_TIMEOUT_MESSAGE);
     }
   }
   onConnectHandler() {

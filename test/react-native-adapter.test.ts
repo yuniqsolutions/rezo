@@ -144,7 +144,7 @@ describe('react-native adapter', () => {
     expect(response.contentLength).toBeGreaterThan(0);
   });
 
-  it('runs timeout and abort hooks when the request times out', async () => {
+  it('runs only the owning timeout hook when the request times out', async () => {
     const onTimeout = vi.fn();
     const onAbort = vi.fn();
 
@@ -170,10 +170,7 @@ describe('react-native adapter', () => {
     } as any, {}, new RezoCookieJar())).rejects.toBeInstanceOf(Error);
 
     expect(onTimeout).toHaveBeenCalledTimes(1);
-    expect(onAbort).toHaveBeenCalledTimes(1);
-    expect(onAbort.mock.calls[0][0]).toMatchObject({
-      reason: 'timeout'
-    });
+    expect(onAbort).not.toHaveBeenCalled();
   });
 
   it('handles manual redirects on the RN fetch path and rebuilds cookies from the jar', async () => {
@@ -693,7 +690,7 @@ describe('react-native adapter', () => {
     });
   });
 
-  it('runs timeout and abort hooks when a configured RN file upload provider times out', async () => {
+  it('runs only the owning timeout hook when a configured RN file upload provider times out', async () => {
     const onTimeout = vi.fn();
     const onAbort = vi.fn();
     let providerSignal: AbortSignal | undefined;
@@ -734,10 +731,7 @@ describe('react-native adapter', () => {
 
     expect(providerSignal?.aborted).toBe(true);
     expect(onTimeout).toHaveBeenCalledTimes(1);
-    expect(onAbort).toHaveBeenCalledTimes(1);
-    expect(onAbort.mock.calls[0][0]).toMatchObject({
-      reason: 'timeout'
-    });
+    expect(onAbort).not.toHaveBeenCalled();
   });
 
   it('rejects stream mode explicitly in react native', async () => {
@@ -975,7 +969,7 @@ describe('react-native adapter', () => {
     });
   });
 
-  it('runs timeout and abort hooks when a configured RN stream transport times out', async () => {
+  it('runs only the owning timeout hook when a configured RN stream transport times out', async () => {
     const onTimeout = vi.fn();
     const onAbort = vi.fn();
 
@@ -1011,10 +1005,7 @@ describe('react-native adapter', () => {
     })).rejects.toBeInstanceOf(Error);
 
     expect(onTimeout).toHaveBeenCalledTimes(1);
-    expect(onAbort).toHaveBeenCalledTimes(1);
-    expect(onAbort.mock.calls[0][0]).toMatchObject({
-      reason: 'timeout'
-    });
+    expect(onAbort).not.toHaveBeenCalled();
   });
 
   it('rejects file download mode explicitly in react native', async () => {
@@ -1180,7 +1171,7 @@ describe('react-native adapter', () => {
     expect(finish.cookies.array.map((cookie: any) => cookie.key).sort()).toEqual(['session', 'token']);
   });
 
-  it('runs timeout and abort hooks when a configured RN file download provider times out', async () => {
+  it('runs only the owning timeout hook when a configured RN file download provider times out', async () => {
     const onTimeout = vi.fn();
     const onAbort = vi.fn();
     let providerSignal: AbortSignal | undefined;
@@ -1217,10 +1208,7 @@ describe('react-native adapter', () => {
 
     expect(providerSignal?.aborted).toBe(true);
     expect(onTimeout).toHaveBeenCalledTimes(1);
-    expect(onAbort).toHaveBeenCalledTimes(1);
-    expect(onAbort.mock.calls[0][0]).toMatchObject({
-      reason: 'timeout'
-    });
+    expect(onAbort).not.toHaveBeenCalled();
   });
 
   it('retries provider-backed file downloads and runs beforeRetry hooks', async () => {

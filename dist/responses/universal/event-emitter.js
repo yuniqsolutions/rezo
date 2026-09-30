@@ -1,3 +1,16 @@
+export function invokeUniversalEventListener(listener, args, kind = "listener") {
+  try {
+    const result = listener(...args);
+    if (result !== null && (typeof result === "object" || typeof result === "function")) {
+      Promise.resolve(result).catch((error) => {
+        console.error(`EventEmitter ${kind} error:`, error);
+      });
+    }
+  } catch (error) {
+    console.error(`EventEmitter ${kind} error:`, error);
+  }
+}
+
 export class UniversalEventEmitter {
   _listeners = new Map;
   _onceListeners = new Map;
@@ -48,11 +61,7 @@ export class UniversalEventEmitter {
     if (listeners && listeners.size > 0) {
       hasListeners = true;
       for (const listener of listeners) {
-        try {
-          listener(...args);
-        } catch (err) {
-          console.error("EventEmitter listener error:", err);
-        }
+        invokeUniversalEventListener(listener, args);
       }
     }
     const onceListeners = this._onceListeners.get(event);
@@ -61,11 +70,7 @@ export class UniversalEventEmitter {
       const toCall = [...onceListeners];
       onceListeners.clear();
       for (const listener of toCall) {
-        try {
-          listener(...args);
-        } catch (err) {
-          console.error("EventEmitter once listener error:", err);
-        }
+        invokeUniversalEventListener(listener, args, "once listener");
       }
     }
     return hasListeners;

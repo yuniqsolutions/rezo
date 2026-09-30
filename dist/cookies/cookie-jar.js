@@ -1,6 +1,7 @@
 import { CookieJar as TouchCookieJar } from "tough-cookie";
 import { Cookie } from './cookie.js';
 import { requireNodeModule } from '../utils/node-runtime.js';
+import { RezoError } from '../errors/rezo-error.js';
 export { Cookie } from './cookie.js';
 const REZO_COOKIE_PREFIX_KEY = "Rezo_prx_";
 const HOST_PREFIX = "__Host-";
@@ -559,7 +560,7 @@ export class RezoCookieJar extends TouchCookieJar {
   loadFromFile(filePath, _defaultUrl) {
     const fs = requireNodeModule("node:fs");
     if (!fs) {
-      throw new Error("loadFromFile() requires Node.js, Bun, or Deno. Not available in browsers or React Native.");
+      throw new RezoError("loadFromFile() needs synchronous filesystem access, which this runtime does not provide.", { adapterUsed: null }, "REZ_UNSUPPORTED_CAPABILITY");
     }
     if (!fs.existsSync(filePath)) {
       this._cookieFile = filePath;
@@ -611,7 +612,7 @@ export class RezoCookieJar extends TouchCookieJar {
     }
     const fs = requireNodeModule("node:fs");
     if (!fs) {
-      throw new Error("saveToFile() requires Node.js, Bun, or Deno. Not available in browsers or React Native.");
+      throw new RezoError("saveToFile() needs synchronous filesystem access, which this runtime does not provide.", { adapterUsed: null }, "REZ_UNSUPPORTED_CAPABILITY");
     }
     const isJson = targetPath.toLowerCase().endsWith(".json");
     const cookies = this.cookies();

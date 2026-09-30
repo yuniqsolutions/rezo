@@ -6,6 +6,7 @@ import {
 } from '../internal/agents/index.js';
 import { parseProxyString } from './parse.js';
 export { ProxyManager } from './manager.js';
+export { destroyPendingProxyHandshake } from '../internal/agents/index.js';
 export { parseProxyString } from './parse.js';
 function createOptions(uri, opts) {
   if (uri instanceof URL || typeof uri === "string") {
@@ -54,15 +55,16 @@ export function rezoProxy(uri, over, opts) {
       throw new Error("Invalid proxy protocol");
     }
   }
+  const agentOptions = opts ?? (typeof over === "object" ? over : undefined);
   if (uri.client) {
     delete uri.client;
-    const config = createOptions(uri, opts);
+    const config = createOptions(uri, agentOptions);
     if (over === "http") {
       return new HttpProxyAgent(config.uri, config.opts);
     }
     return new HttpsProxyAgent(config.uri, { ...config.opts, rejectUnauthorized: config.opts?.rejectUnauthorized ?? false });
   }
-  const config = createOptions(uri, opts);
+  const config = createOptions(uri, agentOptions);
   return new SocksProxyAgent(config.uri, config.opts);
 }
 

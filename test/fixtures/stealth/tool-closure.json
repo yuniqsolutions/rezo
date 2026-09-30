@@ -1,0 +1,177 @@
+{
+ "schema": "rezo.stealth.tool-closure/v4",
+ "tools": {
+  "node": {
+   "path": "/opt/homebrew/Cellar/node/25.9.0_2/bin/node",
+   "realpath": "/opt/homebrew/Cellar/node/25.9.0_2/bin/node",
+   "sha256": "a8797df8016acac522da6e203ffa45f51522f96e25f0fb68664cfa1e387b89bc",
+   "version": "v25.9.0",
+   "openssl": "3.6.2",
+   "role": "Node current leg"
+  },
+  "node24": {
+   "path": "/opt/homebrew/opt/node@24/bin/node",
+   "realpath": "/opt/homebrew/Cellar/node/25.9.0_2/bin/node",
+   "sha256": "a8797df8016acac522da6e203ffa45f51522f96e25f0fb68664cfa1e387b89bc",
+   "version": "v25.9.0",
+   "role": "oldest installed supported runtime (Q9-B exception leg)"
+  },
+  "bun": {
+   "path": "/Users/jmathew/.bun/bin/bun",
+   "realpath": "/Users/jmathew/.bun/bin/bun",
+   "sha256": "e0c90ec15d33363e6b70713d56bc3b2c7585c17f40a0fe0f8fd9305901d4e233",
+   "version": "1.3.14",
+   "role": "Bun leg"
+  },
+  "deno": {
+   "path": "/opt/local/bin/deno",
+   "realpath": "/opt/local/bin/deno",
+   "sha256": "80c83cdfb20289f8818a71220b570df363f6f0ba93580c29c70f08ab14e93568",
+   "version": "deno 2.9.3 (stable, release, aarch64-apple-darwin)",
+   "role": "ESH-03 packed public subpath"
+  },
+  "chrome": {
+   "path": "/Users/jmathew/.cache/puppeteer/chrome/mac_arm-146.0.7680.153/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+   "realpath": "/Users/jmathew/.cache/puppeteer/chrome/mac_arm-146.0.7680.153/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+   "sha256": "ab6bca093f68ea66490c2438ca58fdfe13941fe9399ef3f62e0359ec17c01a82",
+   "version": "146.0.7680.153",
+   "role": "ESH-05/08 execution; parser golden source \u2014 certifies Chrome 146 only"
+  },
+  "esbuild": {
+   "path": "/Users/jmathew/Trae Project/Rezo/node_modules/.bin/esbuild",
+   "realpath": "/Users/jmathew/Trae Project/Rezo/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+   "sha256": "79fffbb53be7306c1505f97281b63a01902f53ac56682c61f673c78011c5dd14",
+   "version": "0.27.3",
+   "role": "bundle-shape rows"
+  },
+  "curl": {
+   "path": "/opt/local/bin/curl",
+   "realpath": "/opt/local/bin/curl",
+   "sha256": "d19a8ac33d27d3fd828184cd693df514e23e11a588cf0f4f045cb0e1c62cdf56",
+   "version": "curl 8.8.0 (aarch64-apple-darwin23.2.0) libcurl/8.8.0 OpenSSL/3.3.1 zlib/1.3.1 brotli/1.1.0 zstd/1.5.6 libidn2/2.3.7 libpsl/0.21.5 nghttp2/1.62.1",
+   "dylibs": [
+    {
+     "path": "/opt/local/lib/libcurl.4.dylib",
+     "sha256": "9d9b8edd96ea9e171be7f9ccb43e99f3fdc8a2e5912fdf7b8fff58013a7933d1"
+    },
+    {
+     "path": "/opt/local/lib/libnghttp2.14.dylib",
+     "sha256": "23ead35f094d83f7547be103591b13a2dba47554aa2869f9da043a9be954d5a0"
+    },
+    {
+     "path": "/opt/local/lib/libidn2.0.dylib",
+     "sha256": "bae6267c6bec04cc22a5fd01e1caa3daf43296eff205be1ba59ca632fbed2758"
+    },
+    {
+     "path": "/opt/local/lib/libpsl.5.dylib",
+     "sha256": "7365189d9771c04ff1b59c21f205b85f46c3bb5241dbff7462b7c1b076e14dd1"
+    },
+    {
+     "path": "/opt/local/libexec/openssl3/lib/libssl.3.dylib",
+     "sha256": "7e24789f132c35eea4df430fa86046db861d5fe633401e995d62f5f66f2f3275"
+    },
+    {
+     "path": "/opt/local/libexec/openssl3/lib/libcrypto.3.dylib",
+     "sha256": "71986a93dc506a94d165c4019739d47e3b7b1ae83af6af3d24089331253af41b"
+    },
+    {
+     "path": "/opt/local/lib/libzstd.1.5.6.dylib",
+     "sha256": "dd9c5f52f95385fb4784fa12064455188adf78e0fbdf6304b49674c34e9561be"
+    },
+    {
+     "path": "/opt/local/lib/libbrotlidec.1.1.0.dylib",
+     "sha256": "e0b43dad8692a06ef67b046d249f0208f0e53b68883d5d56eb1c89cdcd509c2c"
+    },
+    {
+     "path": "/opt/local/lib/libz.1.3.1.dylib",
+     "sha256": "03a4b30b20da008b6d8963d5d6ff81a4d6963276bed549939d1b72d20bec099c"
+    }
+   ],
+   "role": "SRP-curl-* rows and the Q4 probe"
+  },
+  "openssl": {
+   "path": "/opt/homebrew/bin/openssl",
+   "realpath": "/opt/homebrew/Cellar/openssl@3/3.6.2/bin/openssl",
+   "sha256": "eeda83433814f804ccf24e07056a583be0c2b177a8aff655bb11b889a23812f6",
+   "version": "OpenSSL 3.6.2 7 Apr 2026 (Library: OpenSSL 3.6.2 7 Apr 2026)",
+   "role": "SAN certificate generation for the observers"
+  },
+  "vitest": {
+   "path": "node_modules/vitest/vitest.mjs",
+   "sha256": "39db22f579acf5639bbb17a261408debbde03f4692c0c439e77e7f13aeba74d6",
+   "version": "4.1.4",
+   "role": "runner"
+  }
+ },
+ "stealthSources": [
+  {
+   "path": "src/stealth/index.ts",
+   "sha256": "f9f8fd857543fc9e0837e30b42b0f74f0fbad9e197ead719a4f6a47dc87468c3"
+  },
+  {
+   "path": "src/stealth/resolver.ts",
+   "sha256": "20d9d21a074f0167bec68c84d88c7bd912a811782b6fe8c486ad6174ff4833be"
+  },
+  {
+   "path": "src/stealth/stealth.ts",
+   "sha256": "34e81e06592946747277a59fe632f918a825d07532c3a4c86725810f064a9e80"
+  },
+  {
+   "path": "src/stealth/tls-fingerprint.ts",
+   "sha256": "2f7d79721c47b9561df39bfa9d2692be236729dc5b7097b9c201f3e9394eef28"
+  },
+  {
+   "path": "src/stealth/tls-fingerprint.universal.ts",
+   "sha256": "b0e2349ca6c890441d9a6854af052e8191983048556493fe2601f56a96e02920"
+  },
+  {
+   "path": "src/stealth/types.ts",
+   "sha256": "db2027942b08ec7b33605c6a327d9430ce7a0f72b66623db3da5776922e6e6f3"
+  },
+  {
+   "path": "src/stealth/universal.ts",
+   "sha256": "454ffb0ea5a5f44e34d26d99a5f40b525fb2e1670421d0d16636b889ebd0e9cc"
+  },
+  {
+   "path": "src/stealth/profiles/chrome-profiles.ts",
+   "sha256": "69859395fd7199f63c4878f680dde34b97ef138261171e0cb9d6a677fecb01ae"
+  },
+  {
+   "path": "src/stealth/profiles/constants.ts",
+   "sha256": "dcf83572b275a6a585c7a5e4da517b0fa4bd7114b2df3d500382f98fb48e090a"
+  },
+  {
+   "path": "src/stealth/profiles/edge-profiles.ts",
+   "sha256": "f5f222f682225e19ff359285fcb0664b12fb68e3c4a8cc144537851b526c8e38"
+  },
+  {
+   "path": "src/stealth/profiles/firefox-profiles.ts",
+   "sha256": "025d7513d002c64fbd637c544ea83a4ebe2b80359eaea595c726bf20fe6a737a"
+  },
+  {
+   "path": "src/stealth/profiles/index.ts",
+   "sha256": "7762f5c6811fbdf70ae289cabfc5156b65507ca457357388b9185be59f0061c4"
+  },
+  {
+   "path": "src/stealth/profiles/safari-profiles.ts",
+   "sha256": "5359e3301ee4a6e4b7dc7eb11ccdcb4db998f911a3d6e10365faaaedf2eb9189"
+  },
+  {
+   "path": "src/stealth/profiles/types.ts",
+   "sha256": "1a88368cc0d1eba32995794b506254b2a22b7b68f2332acc9f714db01bec2582"
+  }
+ ],
+ "pins": {
+  "src/adapters/http.ts": "a26715a4df7953c99e977d9e159eedf8c25de2549f22405f768e262708678e92",
+  "src/adapters/http2.ts": "fdf5df4e6138b48abcd696fb462dff69ccd041f4d4b83c856aa7356ea0bc47a7",
+  "src/adapters/curl.ts": "5c8dc5a6d4e6f171021117a26751866875daeb695532176ba0013f26480dfd99",
+  "package.json": "e88317c8981471c782700195a12ceac472e926242650e200a4c9d3e9c9e5d6a8",
+  "tsconfig.json": "8a2a14cf84e31dbf8d9ff0f414ef162ece1d85cc59385bc66d8af2dd3687eb7a"
+ },
+ "fixtures": {
+  "test/fixtures/stealth/wire-observer.mjs": "67ed154f2d9285d6a8ad3bb7a9a44ce91adf5c7b1c3a7cc562891db6b0f64566",
+  "test/fixtures/stealth/entry-shape.mjs": "ecccaa7a1c0f12ef3ade41d7b6ff11b57ca299bad0ee22698b5d4ab3d16809fe",
+  "test/fixtures/stealth/chromium-grease.mjs": "24ff0f4357ffaf76fa2a011ac3141f5b3d7ca315b7e006972c08f1c787534311",
+  "test/fixtures/stealth/expected/identities.json": "23b6de7054c84827919e4ba0e74c3c43308ba0b3966d963d2f0e7008b70548c2"
+ }
+}

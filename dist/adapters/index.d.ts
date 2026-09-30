@@ -368,8 +368,7 @@ declare class RezoCookieJar extends TouchCookieJar {
 }
 declare class RezoFormData {
 	private _fd;
-	private _cachedContentType;
-	private _cachedBuffer;
+	private _encoding;
 	private _boundary;
 	constructor();
 	/**
@@ -411,10 +410,6 @@ declare class RezoFormData {
 	 * Invalidate cached values when form data changes
 	 */
 	private _invalidateCache;
-	/**
-	 * Build and cache the Response for extracting headers and body
-	 */
-	private _buildResponse;
 	/**
 	 * Get boundary extracted from Content-Type header
 	 * Must be called after getContentTypeAsync() to get accurate value
@@ -731,13 +726,79 @@ export interface UploadFinishEvent {
 	config: SanitizedRezoConfig;
 }
 /**
- * Sanitized RezoConfig for event emission
- * Excludes only request body/data, includes all metadata
+ * The detached execution snapshot a finish event carries as `config`.
+ *
+ * It owns exactly these thirteen keys — never the live request config, its
+ * jar, signal, hooks, callbacks, credentials or body — and every nested
+ * value is a fresh copy: mutable, but detached in both directions.
+ * `RezoResponse.config` and `RezoError.config` remain the live config.
  */
-export type SanitizedRezoConfig = Omit<RezoConfig, "data"> & {
-	/** Data field explicitly removed */
-	data?: never;
-};
+export interface SanitizedRezoConfig {
+	/** Adapter metadata without capability objects (undefined when the adapter reported none) */
+	adapterMetadata: {
+		version?: string;
+		features?: string[];
+	} | undefined;
+	/** HTTP adapter that executed the request */
+	adapterUsed: RezoConfig["adapterUsed"];
+	/** Retry error history as plain data — no Error identity, stack, cause, or carried config/request/response */
+	errors: Array<{
+		attempt: number;
+		duration: number;
+		error: {
+			name: string;
+			message: string;
+			code: string | null;
+			status: number | null;
+		};
+	}>;
+	/** Final URL with any userinfo credentials removed */
+	finalUrl: string;
+	/** Fresh request headers with credential headers removed */
+	headers: RezoHeaders;
+	/** HTTP method */
+	method: string;
+	/** Network connection scalars (never the custom lookup function) */
+	network: {
+		localAddress?: string;
+		localPort?: number;
+		remoteAddress?: string;
+		remotePort?: number;
+		protocol: string;
+		httpVersion?: string;
+		family?: 4 | 6;
+	};
+	/** Number of redirects followed */
+	redirectCount: number;
+	/** Requested response type (undefined when defaulted) */
+	responseType: RezoConfig["responseType"];
+	/** Number of retry attempts made */
+	retryAttempts: number;
+	/** Timing snapshot (finite numbers) */
+	timing: {
+		startTime: number;
+		domainLookupStart: number;
+		domainLookupEnd: number;
+		connectStart: number;
+		secureConnectionStart: number;
+		connectEnd: number;
+		requestStart: number;
+		responseStart: number;
+		responseEnd: number;
+	};
+	/** Transfer statistics snapshot (finite numbers) */
+	transfer: {
+		requestSize: number;
+		requestHeaderSize?: number;
+		requestBodySize?: number;
+		responseSize: number;
+		headerSize: number;
+		bodySize: number;
+		compressionRatio?: number;
+	};
+	/** Request URL with any userinfo credentials removed */
+	url: string;
+}
 /**
  * Standard RezoResponse for non-streaming requests
  * Contains response data, status, headers, cookies, and execution metadata
@@ -816,7 +877,13 @@ export interface RezoStreamResponse extends BaseEventEmitter {
 /**
  * RezoDownloadResponse - For fileName/saveTo options
  * Platform-agnostic interface for file downloads
- * Streams response body directly to file
+ * Writes to a private same-directory stage, then commits an accepted transfer
+ * after applicable validation and physical writer close with one rename.
+ * Failure removes only the owned stage and preserves any existing destination;
+ * successful replacement may change the destination inode and metadata.
+ * This is a local rename-boundary guarantee, not crash durability or remote or
+ * network-filesystem atomicity. It adds no hook, API, or option and leaves the
+ * HTTP/1 raw-wire and HTTP/2 decoded byte mappings unchanged.
  */
 export interface RezoDownloadResponse extends BaseEventEmitter {
 	fileName: string;
@@ -1777,6 +1844,12 @@ declare class ProxyManager {
 	 */
 	select(url: string): ProxySelectionResult;
 	/**
+	 * Adapter-only retry selection. Excluding the failed proxy makes
+	 * `retryWithNextProxy` independent of the ordinary scheduling quota.
+	 */
+	private selectForRetryInternal;
+	private selectInternal;
+	/**
 	 * Select proxy based on rotation strategy
 	 * All proxies in activeProxies have guaranteed ids (assigned on construction/add)
 	 */
@@ -2490,21 +2563,34 @@ export interface TlsFingerprint {
 	/** TLS session timeout in seconds */
 	sessionTimeout: number;
 }
+/**
+ * HTTP/2 SETTINGS a browser sends on its connection preface. Every field is optional: a field that is absent is
+ * NOT sent (browsers omit most of them — Chrome sends 1/2/4/6 only, Firefox 1/2/4/5, Safari 2/4/3), so presence
+ * is part of the fingerprint. `connectionWindowSize` is the connection-level WINDOW_UPDATE increment sent right
+ * after SETTINGS (absent = no WINDOW_UPDATE).
+ */
 export interface Http2Settings {
 	/** SETTINGS_HEADER_TABLE_SIZE (0x01) */
-	headerTableSize: number;
+	headerTableSize?: number;
 	/** SETTINGS_ENABLE_PUSH (0x02) */
-	enablePush: boolean;
-	/** SETTINGS_MAX_CONCURRENT_STREAMS (0x03) — 0 = not sent (use server default) */
-	maxConcurrentStreams: number;
+	enablePush?: boolean;
+	/** SETTINGS_MAX_CONCURRENT_STREAMS (0x03) */
+	maxConcurrentStreams?: number;
 	/** SETTINGS_INITIAL_WINDOW_SIZE (0x04) */
-	initialWindowSize: number;
+	initialWindowSize?: number;
 	/** SETTINGS_MAX_FRAME_SIZE (0x05) */
-	maxFrameSize: number;
-	/** SETTINGS_MAX_HEADER_LIST_SIZE (0x06) — 0 = not sent */
-	maxHeaderListSize: number;
-	/** WINDOW_UPDATE on connection level sent after SETTINGS */
-	connectionWindowSize: number;
+	maxFrameSize?: number;
+	/** SETTINGS_MAX_HEADER_LIST_SIZE (0x06) */
+	maxHeaderListSize?: number;
+	/** Connection-level WINDOW_UPDATE increment sent after SETTINGS */
+	connectionWindowSize?: number;
+}
+/** Headers a browser adds only on one HTTP version (e.g. Chrome's `priority` and Firefox's `te: trailers` on HTTP/2). */
+export interface AdapterSpecificHeaders {
+	/** Sent on HTTP/1.1 requests only */
+	h1?: Record<string, string>;
+	/** Sent on HTTP/2 requests only */
+	h2?: Record<string, string>;
 }
 export interface ClientHints {
 	/** sec-ch-ua header value (brand list). null for non-Chromium browsers. */
@@ -2577,12 +2663,33 @@ export interface BrowserProfile {
 	clientHints: ClientHints;
 	/** Navigator properties */
 	navigator: NavigatorProperties;
+	/** Headers this browser adds only on one HTTP version; when absent the family default applies */
+	extraHeaders?: AdapterSpecificHeaders;
+	/** Extended-support release: stays in the random pools even when older than the family's current major − 2 */
+	esr?: boolean;
+}
+/**
+ * What the current runtime could and could not express of the profile's TLS material. Recorded on every
+ * resolved profile so that "stealth is configured" is never mistaken for "stealth is on the wire".
+ */
+export interface TlsBoundary {
+	/** The runtime that resolved the profile and whether its TLS stack honours cipher/group/sigalg shaping */
+	runtime: {
+		name: "node" | "bun" | "deno" | "browser" | "unknown";
+		tlsShaping: "available" | "unavailable";
+	};
+	/** Post-quantum hybrid group: expressible, rejected by the TLS stack (fallback list used), or not part of the profile */
+	hybridGroup: "supported" | "unsupported" | "not-requested";
+	/** The supported-group list actually configured after probing (OpenSSL names, key-share groups first) */
+	groups: string[];
+	/** ClientHello dimensions this runtime cannot express at all (documented, never hidden) */
+	notExpressible: string[];
 }
 /**
  * Union type of all built-in browser profile IDs.
  * Provides full autocomplete in IDEs.
  */
-export type BrowserProfileName = "chrome-120" | "chrome-124" | "chrome-128" | "chrome-131" | "chrome-131-android" | "firefox-115" | "firefox-121" | "firefox-128" | "firefox-133" | "safari-16.6" | "safari-17.4" | "safari-18.2" | "safari-17-ios" | "safari-18-ios" | "edge-120" | "edge-131" | "opera-115" | "brave-1.73";
+export type BrowserProfileName = "chrome-120" | "chrome-124" | "chrome-128" | "chrome-131" | "chrome-151" | "chrome-131-android" | "chrome-151-android" | "firefox-115" | "firefox-121" | "firefox-128" | "firefox-133" | "firefox-140-esr" | "firefox-154" | "safari-16.6" | "safari-17.4" | "safari-18.2" | "safari-26.6" | "safari-17-ios" | "safari-18-ios" | "safari-26-ios" | "edge-120" | "edge-131" | "edge-151" | "opera-115" | "opera-135" | "brave-1.73" | "brave-1.93";
 /**
  * Configuration options for RezoStealth.
  *
@@ -2628,8 +2735,17 @@ export interface ResolvedStealthProfile {
 	pseudoHeaderOrder: string[];
 	/** Default headers to apply (User-Agent, Accept, etc.) — lowercase keys */
 	defaultHeaders: Record<string, string>;
+	/** Headers added only on one HTTP version (Chrome `priority` on H2, Firefox `te: trailers` on H2, …) */
+	extraHeaders: AdapterSpecificHeaders;
 	/** Navigator properties for JS environment emulation */
 	navigator: BrowserProfile["navigator"];
+	/** What this runtime could express of the TLS material (probe results, fallbacks, boundaries) */
+	tlsBoundary: TlsBoundary;
+	/**
+	 * Deterministic digest of the transport fingerprint material (TLS ciphers, sigalgs, groups, versions, ALPN,
+	 * HTTP/2 settings and window). Two profiles with equal material share HTTP/2 sessions; different material never does.
+	 */
+	transportDigest: string;
 }
 declare class RezoStealth {
 	private readonly _input;
@@ -2937,7 +3053,7 @@ export interface RezoDefaultOptions {
 	/** Request headers as various supported formats */
 	headers?: RezoHttpRequest["headers"];
 	/** Expected response data type */
-	responseType?: RezoResponseType;
+	responseType?: RezoDefaultResponseType;
 	/** Character encoding for the response */
 	responseEncoding?: string;
 	/** Basic authentication credentials */
@@ -2970,7 +3086,7 @@ export interface RezoDefaultOptions {
 	acceptPartialBody?: boolean;
 	/** Whether to detect and prevent redirect cycles */
 	enableRedirectCycleDetection?: boolean;
-	/** Whether to send cookies and authorization headers with cross-origin requests */
+	/** Whether to send cookies with cross-origin requests. Default: false */
 	withCredentials?: boolean;
 	/** Proxy configuration (URL string or detailed options) */
 	proxy?: RezoHttpRequest["proxy"];
@@ -3089,6 +3205,11 @@ export interface RezoDefaultOptions {
 	 * Replaces the default `dns.lookup` used by Node.js.
 	 */
 	dnsLookup?: RezoHttpRequest["dnsLookup"];
+	/**
+	 * Default DNS cache policy for requests that set no `dnsCache` of their own:
+	 * `false` disables caching, `true` uses the cache, an object configures it.
+	 */
+	dnsCache?: RezoHttpRequest["dnsCache"];
 	/** Browser fingerprint stealth configuration (instance-level only) */
 	stealth?: RezoStealth;
 }
@@ -3155,8 +3276,11 @@ export interface RezoConfig {
 	params?: RezoRequestConfig["params"];
 	/** @description Request timeout in milliseconds (null when not set) */
 	timeout?: number | null;
-	/** @description Expected response data type */
-	responseType?: "json" | "text" | "blob" | "arrayBuffer" | "stream" | "download" | "upload" | "buffer" | "binary";
+	/**
+	 * @description The canonical mode this request resolved to. Aliases are
+	 * canonicalized at intake, so `arraybuffer` and `binary` never appear here.
+	 */
+	responseType?: RezoCanonicalResponseMode;
 	/** @description Basic authentication credentials (null when not set) */
 	auth?: RezoRequestConfig["auth"] | null;
 	/** @description Proxy configuration (null when not set) */
@@ -3305,7 +3429,15 @@ export interface RezoConfig {
 	/** @description Final resolved URL after redirects and processing */
 	finalUrl: string;
 	/** @description HTTP adapter used for the request */
-	adapterUsed: "http" | "https" | "http2" | "fetch" | "xhr" | "curl" | "react-native";
+	/**
+	 * The adapter that executed this request.
+	 *
+	 * `null` when no adapter ran: a shared-core refusal raised before adapter
+	 * selection (for example an invalid `responseType`) reports `null` rather
+	 * than naming an adapter that never executed. A direct raw-adapter call
+	 * keeps its concrete adapter, because selection already happened there.
+	 */
+	adapterUsed: "http" | "https" | "http2" | "fetch" | "xhr" | "curl" | "react-native" | null;
 	/** @description Metadata about the adapter used */
 	adapterMetadata?: {
 		/** @description Adapter version */
@@ -3547,7 +3679,11 @@ declare enum RezoErrorCode {
 	UNDICI_INVALID_INFO = "UND_ERR_INFO",
 	NO_PROXY_AVAILABLE = "REZ_NO_PROXY_AVAILABLE",
 	RATE_LIMITED = "REZ_RATE_LIMITED",
-	UNKNOWN_ERROR = "REZ_UNKNOWN_ERROR"
+	UNKNOWN_ERROR = "REZ_UNKNOWN_ERROR",
+	UNSUPPORTED_CAPABILITY = "REZ_UNSUPPORTED_CAPABILITY",
+	STEALTH_PLATFORM_UNSUPPORTED = "REZ_STEALTH_PLATFORM_UNSUPPORTED",
+	INVALID_RESPONSE_TYPE = "REZ_INVALID_RESPONSE_TYPE",
+	CACHE_PERSISTENCE_UNAVAILABLE = "REZ_CACHE_PERSISTENCE_UNAVAILABLE"
 }
 /**
  * Union of all known Rezo error code strings.
@@ -3659,7 +3795,7 @@ export type RezoString = string;
 /**
  * Standard HTTP methods supported by Rezo
  */
-export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS" | "TRACE" | "CONNECT";
+export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS" | "TRACE" | "CONNECT" | (string & {});
 /**
  * Response data types that control how Rezo parses the response body.
  *
@@ -3705,7 +3841,26 @@ export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | 
  *
  * @default 'auto'
  */
-export type RezoResponseType = "json" | "text" | "blob" | "arrayBuffer" | "buffer" | "auto";
+export type RezoResponseType = "auto" | "json" | "text" | "blob" | "arrayBuffer"
+/** Alias of `arrayBuffer`; canonicalizes to it and never survives intake. */
+ | "arraybuffer" | "buffer"
+/** Alias of `buffer`; canonicalizes to it and never survives intake. */
+ | "binary" | "stream" | "download" | "upload";
+/**
+ * What an INSTANCE DEFAULT may set (DECISION-063 C).
+ *
+ * The eight buffered inputs only. A facade mode is ill-formed as a default —
+ * a targetless default download cannot become a synchronous dedicated facade,
+ * and an ordinary call must never be escalated into a facade by a hidden
+ * default. Per-request, all eleven tokens remain valid.
+ */
+export type RezoDefaultResponseType = "auto" | "json" | "text" | "blob" | "arrayBuffer" | "arraybuffer" | "buffer" | "binary";
+/**
+ * What an EFFECTIVE config records after intake: the nine canonical modes.
+ * Aliases are canonicalized away, so `arraybuffer` and `binary` never appear
+ * here, and `auto` is a real recorded mode rather than an absent value.
+ */
+export type RezoCanonicalResponseMode = "auto" | "json" | "text" | "blob" | "arrayBuffer" | "buffer" | "stream" | "download" | "upload";
 /**
  * MIME content types for request/response bodies
  */
@@ -4230,7 +4385,7 @@ export interface RezoRequestConfig<D = any> {
 	 * @see beforeRedirect
 	 */
 	onRedirect?: (options: OnRedirectOptions) => OnRedirectResponse;
-	/** Whether to send cookies and authorization headers with cross-origin requests */
+	/** Whether to send cookies with cross-origin requests. Default: false */
 	withCredentials?: boolean;
 	/** Proxy configuration (URL string or detailed options) */
 	proxy?: string | ProxyOptions;

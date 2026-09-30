@@ -1,4 +1,6 @@
 import { LRUCache } from './lru-cache.js';
+import { createResponseCacheIdentity, identityMatchesTarget } from './response-cache-identity.js';
+import { registerResponseCacheBackend } from './bound-response-cache.js';
 const DEFAULT_TTL = 3000000;
 const DEFAULT_MAX_ENTRIES = 500;
 const DEFAULT_METHODS = ["GET", "HEAD"];
@@ -20,18 +22,15 @@ export class UniversalResponseCache {
       maxEntries: this.config.maxEntries,
       ttl: this.config.ttl
     });
+    registerResponseCacheBackend(this, {
+      getByIdentity: (identity) => this.getByIdentity(identity),
+      setByIdentity: (identity, method, url, response, headers) => void this.storeEntry(method, url, response, headers, identity),
+      conditionalHeadersByIdentity: (identity) => this.conditionalHeadersByIdentity(identity),
+      updateRevalidatedByIdentity: (identity, responseHeaders) => this.updateRevalidatedByIdentity(identity, responseHeaders)
+    });
   }
   generateCacheKey(method, url, headers) {
-    const varyHeader = headers?.["vary"];
-    let key = `${method}:${url}`;
-    if (varyHeader && headers) {
-      const varyFields = varyHeader.split(",").map((f) => f.trim().toLowerCase());
-      for (const field of varyFields) {
-        const value = headers[field] || "";
-        key += `:${field}=${value}`;
-      }
-    }
-    return key;
+    return createResponseCacheIdentity({ method, url, mode: null, headers });
   }
   parseCacheControl(headers) {
     const cacheControl = headers["cache-control"] || "";
@@ -50,22 +49,27 @@ export class UniversalResponseCache {
     };
   }
   get(method, url, requestHeaders) {
-    if (!this.config.enable)
-      return;
     if (!this.config.methods.includes(method.toUpperCase()))
       return;
-    const key = this.generateCacheKey(method, url, requestHeaders);
-    const cached = this.memoryCache.get(key);
+    return this.getByIdentity(this.generateCacheKey(method, url, requestHeaders));
+  }
+  getByIdentity(identity) {
+    if (!this.config.enable)
+      return;
+    const cached = this.memoryCache.get(identity);
     if (!cached)
       return;
     const now = Date.now();
     if (now - cached.timestamp > cached.ttl) {
-      this.memoryCache.delete(key);
+      this.memoryCache.delete(identity);
       return;
     }
     return cached;
   }
   set(method, url, response, requestHeaders) {
+    return this.storeEntry(method, url, response, requestHeaders);
+  }
+  storeEntry(method, url, response, requestHeaders, identity) {
     if (!this.config.enable)
       return false;
     if (!this.config.methods.includes(method.toUpperCase()))
@@ -96,7 +100,9 @@ export class UniversalResponseCache {
         ttl = cacheControl.maxAge * 1000;
       }
     }
-    const key = this.generateCacheKey(method, url, requestHeaders);
+    if ((responseHeaders["vary"] ?? "").trim() === "*")
+      return false;
+    const key = identity ?? this.generateCacheKey(method, url, requestHeaders);
     const cached = {
       status: response.status,
       statusText: response.statusText,
@@ -112,18 +118,23 @@ export class UniversalResponseCache {
     return true;
   }
   getConditionalHeaders(method, url, requestHeaders) {
-    const cached = this.get(method, url, requestHeaders);
+    return this.conditionalHeadersByIdentity(this.generateCacheKey(method, url, requestHeaders));
+  }
+  conditionalHeadersByIdentity(identity) {
+    const cached = this.getByIdentity(identity);
     if (!cached)
-      return null;
-    if (!cached.etag && !cached.lastModified)
-      return null;
-    return {
-      etag: cached.etag,
-      lastModified: cached.lastModified
-    };
+      return;
+    const headers = {};
+    if (cached.etag)
+      headers["If-None-Match"] = cached.etag;
+    if (cached.lastModified)
+      headers["If-Modified-Since"] = cached.lastModified;
+    return Object.keys(headers).length > 0 ? headers : undefined;
   }
   updateRevalidated(method, url, responseHeaders, requestHeaders) {
-    const key = this.generateCacheKey(method, url, requestHeaders);
+    return this.updateRevalidatedByIdentity(this.generateCacheKey(method, url, requestHeaders), responseHeaders);
+  }
+  updateRevalidatedByIdentity(key, responseHeaders) {
     const cached = this.memoryCache.get(key);
     if (!cached)
       return null;
@@ -147,8 +158,23 @@ export class UniversalResponseCache {
   clear() {
     this.memoryCache.clear();
   }
-  size() {
+  get size() {
     return this.memoryCache.size;
+  }
+  invalidate(url, method) {
+    for (const key of this.memoryCache.keys()) {
+      if (identityMatchesTarget(key, method, url))
+        this.memoryCache.delete(key);
+    }
+  }
+  get isEnabled() {
+    return this.config.enable;
+  }
+  get isPersistent() {
+    return false;
+  }
+  getConfig() {
+    return { ...this.config };
   }
 }
 

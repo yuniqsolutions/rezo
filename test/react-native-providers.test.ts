@@ -270,8 +270,10 @@ describe('react-native provider factories', () => {
       body: '{"ok":true}'
     });
 
-    await requestPromise;
-
+    await expect(requestPromise).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'Expo FileSystem upload was aborted.'
+    });
     expect(cancelAsync).toHaveBeenCalledTimes(1);
   });
 
@@ -438,7 +440,10 @@ describe('react-native provider factories', () => {
       }
     });
 
-    const result = await requestPromise;
+    await expect(requestPromise).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'react-native-fs download was aborted; partial output was retained at /tmp/file.bin (2 bytes).'
+    });
 
     expect(adapter.capabilities).toMatchObject({
       fileDownload: true,
@@ -454,11 +459,6 @@ describe('react-native provider factories', () => {
       loaded: 2,
       total: 5
     }));
-    expect(result).toMatchObject({
-      status: 200,
-      filePath: '/tmp/file.bin',
-      fileSize: 5
-    });
   });
 
   it('rejects react-native-fs downloads that are not plain GET requests', async () => {
@@ -538,7 +538,10 @@ describe('react-native provider factories', () => {
       body: '{"ok":true}'
     });
 
-    const result = await requestPromise;
+    await expect(requestPromise).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'react-native-fs upload was aborted.'
+    });
 
     expect(adapter.capabilities).toMatchObject({
       uploadFromFile: true,
@@ -568,17 +571,8 @@ describe('react-native provider factories', () => {
       loaded: 3,
       total: 9
     }));
-    expect(onHeaders).toHaveBeenCalledWith(expect.objectContaining({
-      status: 201,
-      contentType: 'application/json'
-    }));
+    expect(onHeaders).not.toHaveBeenCalled();
     expect((adapter as any).uploadFiles).toBeUndefined();
-    expect(result).toMatchObject({
-      status: 201,
-      body: '{"ok":true}',
-      fileName: 'photo.jpg',
-      uploadSize: 9
-    });
   });
 
   it('creates a NetInfo provider that maps fetch and subscription state', async () => {

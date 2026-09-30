@@ -1,9 +1,11 @@
 const { Agent, HttpProxyAgent, HttpsProxyAgent, SocksProxyAgent } = require('../internal/agents/index.cjs');
 const { parseProxyString } = require('./parse.cjs');
-const _mod_onqru7 = require('./manager.cjs');
-exports.ProxyManager = _mod_onqru7.ProxyManager;;
-const _mod_4vzmjm = require('./parse.cjs');
-exports.parseProxyString = _mod_4vzmjm.parseProxyString;;
+const _mod_8fvpwn = require('./manager.cjs');
+exports.ProxyManager = _mod_8fvpwn.ProxyManager;;
+const _mod_jteja3 = require('../internal/agents/index.cjs');
+exports.destroyPendingProxyHandshake = _mod_jteja3.destroyPendingProxyHandshake;;
+const _mod_glfdnx = require('./parse.cjs');
+exports.parseProxyString = _mod_glfdnx.parseProxyString;;
 function createOptions(uri, opts) {
   if (uri instanceof URL || typeof uri === "string") {
     return {
@@ -51,15 +53,16 @@ function rezoProxy(uri, over, opts) {
       throw new Error("Invalid proxy protocol");
     }
   }
+  const agentOptions = opts ?? (typeof over === "object" ? over : undefined);
   if (uri.client) {
     delete uri.client;
-    const config = createOptions(uri, opts);
+    const config = createOptions(uri, agentOptions);
     if (over === "http") {
       return new HttpProxyAgent(config.uri, config.opts);
     }
     return new HttpsProxyAgent(config.uri, { ...config.opts, rejectUnauthorized: config.opts?.rejectUnauthorized ?? false });
   }
-  const config = createOptions(uri, opts);
+  const config = createOptions(uri, agentOptions);
   return new SocksProxyAgent(config.uri, config.opts);
 }
 

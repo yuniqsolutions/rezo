@@ -31,10 +31,16 @@ describe('StagedTimeoutManager.createTimeoutError (unit)', () => {
   });
 
   it('does not throw when constructing a timeout error (ESM read-only crash regression)', () => {
-    expect(() => manager.createTimeoutError('total', 100)).not.toThrow();
-    expect(() => manager.createTimeoutError('body', 100)).not.toThrow();
-    expect(() => manager.createTimeoutError('headers', 100)).not.toThrow();
-    expect(() => manager.createTimeoutError('connect', 100)).not.toThrow();
+    // The factory returns the error; it must never throw. (Bun's toThrow treats a
+    // returned Error as thrown, so the return value is captured explicitly.)
+    let created: unknown;
+    expect(() => { created = manager.createTimeoutError('total', 100); }).not.toThrow();
+    expect(created).toBeInstanceOf(RezoError);
+    for (const phase of ['body', 'headers', 'connect'] as const) {
+      let phaseError: unknown;
+      expect(() => { phaseError = manager.createTimeoutError(phase, 100); }).not.toThrow();
+      expect(phaseError).toBeInstanceOf(RezoError);
+    }
   });
 
   it('maps each phase to a timeout code — never ECONNRESET', () => {

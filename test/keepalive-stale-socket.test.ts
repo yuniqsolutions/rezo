@@ -22,7 +22,10 @@ describe('Keep-alive stale socket transparent retry', () => {
   let connCount = 0;
   const requestsPerConn: number[] = [];
 
+  const sockets = new Set<net.Socket>();
   const server = net.createServer(socket => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
     const idx = connCount++;
     requestsPerConn[idx] = 0;
     let buf = '';
@@ -55,6 +58,9 @@ describe('Keep-alive stale socket transparent retry', () => {
   });
 
   afterAll(async () => {
+    // Bun's node:http keeps a pooled keep-alive socket open past the client's
+    // last request; the server can only close once every connection is gone.
+    for (const socket of sockets) socket.destroy();
     await new Promise<void>(resolve => server.close(() => resolve()));
   });
 

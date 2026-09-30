@@ -1,3 +1,4 @@
+const { sanitizeDiagnosticText, sanitizeDiagnosticUrl } = require('../utils/tools.cjs');
 const ERROR_INFO = exports.ERROR_INFO = {
   ECONNREFUSED: {
     code: -111,
@@ -370,6 +371,30 @@ const ERROR_INFO = exports.ERROR_INFO = {
     message: "No Proxy Available",
     details: "All proxies in ProxyManager are exhausted, disabled, or in cooldown. The URL may also not match whitelist/blacklist rules.",
     suggestion: "Add more proxies, enable cooldown for auto-recovery, increase maxFailures, or set failWithoutProxy: false to allow direct connections."
+  },
+  REZ_UNSUPPORTED_CAPABILITY: {
+    code: -1075,
+    message: "Unsupported Capability",
+    details: "The selected adapter or runtime cannot provide a capability requested by this operation.",
+    suggestion: "Choose an adapter or runtime that supports the requested capability, or remove the unsupported requirement."
+  },
+  REZ_STEALTH_PLATFORM_UNSUPPORTED: {
+    code: -1076,
+    message: "Stealth Platform Unsupported",
+    details: "The chosen browser profile has no identity for the requested platform (for example Safari on Windows or Linux, or a desktop profile on iOS), so a consistent User-Agent, client hints and navigator cannot be produced.",
+    suggestion: "Pick a platform the profile ships (see the profile's userAgents keys), choose another profile, or omit `platform` to let the profile infer one."
+  },
+  REZ_INVALID_RESPONSE_TYPE: {
+    code: -1077,
+    message: "Invalid Response Type",
+    details: "The responseType option is not one of Rezo's supported case-sensitive response modes.",
+    suggestion: "Use exactly one of: auto, json, text, blob, arrayBuffer, arraybuffer, buffer, binary, stream, download, or upload."
+  },
+  REZ_CACHE_PERSISTENCE_UNAVAILABLE: {
+    code: -1078,
+    message: "Cache Persistence Unavailable",
+    details: "The persistent response-cache directory could not be exclusively acquired, so disk persistence is disabled fail-closed for this instance while the in-memory tier remains correct.",
+    suggestion: "Stop the competing process using this cacheDir, clean a stale lease left by a crashed process, or configure a cacheDir this process can own exclusively."
   }
 };
 var RezoErrorCode; exports.RezoErrorCode = RezoErrorCode;
@@ -436,6 +461,10 @@ var RezoErrorCode; exports.RezoErrorCode = RezoErrorCode;
   RezoErrorCode["NO_PROXY_AVAILABLE"] = "REZ_NO_PROXY_AVAILABLE";
   RezoErrorCode["RATE_LIMITED"] = "REZ_RATE_LIMITED";
   RezoErrorCode["UNKNOWN_ERROR"] = "REZ_UNKNOWN_ERROR";
+  RezoErrorCode["UNSUPPORTED_CAPABILITY"] = "REZ_UNSUPPORTED_CAPABILITY";
+  RezoErrorCode["STEALTH_PLATFORM_UNSUPPORTED"] = "REZ_STEALTH_PLATFORM_UNSUPPORTED";
+  RezoErrorCode["INVALID_RESPONSE_TYPE"] = "REZ_INVALID_RESPONSE_TYPE";
+  RezoErrorCode["CACHE_PERSISTENCE_UNAVAILABLE"] = "REZ_CACHE_PERSISTENCE_UNAVAILABLE";
 })(RezoErrorCode ||= {});
 function getHttpErrorMessage(statusCode) {
   const statusMessages = {
@@ -586,13 +615,35 @@ function cleanStackTrace(stack) {
   return cleanedLines.join(`
 `);
 }
+function safeDiagnosticProperty(value, key) {
+  if (value === null || value === undefined)
+    return;
+  try {
+    return Reflect.get(Object(value), key);
+  } catch {
+    return;
+  }
+}
+function sanitizeDiagnosticUrlList(value) {
+  try {
+    return Array.isArray(value) ? value.map((entry) => sanitizeDiagnosticUrl(entry)) : sanitizeDiagnosticUrl(value);
+  } catch {
+    return sanitizeDiagnosticUrl(undefined);
+  }
+}
+function sanitizeDiagnosticStack(stack) {
+  if (!stack)
+    return;
+  return stack.split(/\r\n|\r|\n|\u2028|\u2029/).map((line) => sanitizeDiagnosticText(line)).join(`
+`);
+}
 
 class RezoError extends Error {
   constructor(message, config, code, request, response) {
     super();
-    Object.defineProperty(this, "config", { value: config, enumerable: !!config });
-    Object.defineProperty(this, "request", { value: request, enumerable: !!request });
-    Object.defineProperty(this, "response", { value: response, enumerable: !!response });
+    Object.defineProperty(this, "config", { value: config, enumerable: false });
+    Object.defineProperty(this, "request", { value: request, enumerable: false });
+    Object.defineProperty(this, "response", { value: response, enumerable: false });
     Object.defineProperty(this, "isRezoError", { value: true, enumerable: false });
     if (code) {
       Object.defineProperty(this, "code", { value: code, enumerable: true });
@@ -632,7 +683,7 @@ class RezoError extends Error {
       Error.captureStackTrace(this, this.constructor);
     }
     if (this.stack) {
-      const cleaned = cleanStackTrace(this.stack);
+      const cleaned = sanitizeDiagnosticStack(cleanStackTrace(this.stack));
       if (cleaned) {
         Object.defineProperty(this, "stack", { value: cleaned, enumerable: false, writable: true });
       }
@@ -645,7 +696,8 @@ class RezoError extends Error {
     const code = "code" in error ? error.code : undefined;
     const rezoError = new RezoError(error.message, config, code, request, response);
     Object.defineProperty(rezoError, "cause", { value: error, enumerable: false });
-    const cleaned = cleanStackTrace(error.stack);
+    const rawStack = safeDiagnosticProperty(error, "stack");
+    const cleaned = sanitizeDiagnosticStack(typeof rawStack === "string" ? cleanStackTrace(rawStack) : undefined);
     if (cleaned) {
       Object.defineProperty(rezoError, "stack", { value: cleaned, enumerable: false });
     }
@@ -668,10 +720,14 @@ class RezoError extends Error {
   }
   static createHttpError(statusCode, config, request, response) {
     const method = (config.method || request?.method || "GET").toUpperCase();
-    const url = config.fullUrl || config.url || request?.url || "unknown";
-    const statusText = response?.statusText || getHttpStatusText(statusCode);
-    const finalUrl = response?.finalUrl || url;
-    const urls = response?.urls || [url];
+    const rawUrl = config.fullUrl || config.url || request?.url || "unknown";
+    const rawStatusText = response?.statusText || getHttpStatusText(statusCode);
+    const rawFinalUrl = response?.finalUrl || rawUrl;
+    const rawUrls = response?.urls || [rawUrl];
+    const url = sanitizeDiagnosticUrl(rawUrl);
+    const statusText = sanitizeDiagnosticText(rawStatusText);
+    const finalUrl = sanitizeDiagnosticUrl(rawFinalUrl);
+    const urls = Array.isArray(rawUrls) ? rawUrls.map((entry) => sanitizeDiagnosticUrl(entry)) : [sanitizeDiagnosticUrl(rawUrls)];
     const message = `Request failed with status code ${statusCode}`;
     const error = new RezoError(message, config, "REZ_HTTP_ERROR", request, response);
     error.message = message;
@@ -731,74 +787,135 @@ class RezoError extends Error {
     return error;
   }
   toJSON() {
+    const name = safeDiagnosticProperty(this, "name");
+    const message = safeDiagnosticProperty(this, "message");
     const result = {
-      name: this.name,
-      message: this.message
+      name: sanitizeDiagnosticText(name ?? "RezoError"),
+      message: sanitizeDiagnosticText(message)
     };
-    if (this.code !== undefined)
-      result.code = this.code;
-    if (this.method !== undefined)
-      result.method = this.method;
-    if (this.url !== undefined)
-      result.url = this.url;
-    if (this.finalUrl !== undefined)
-      result.finalUrl = this.finalUrl;
-    if (this.status !== undefined)
-      result.status = this.status;
-    if (this.statusText !== undefined)
-      result.statusText = this.statusText;
-    if (this.urls !== undefined)
-      result.urls = this.urls;
-    if (this.cause)
-      result.cause = typeof this.cause === "string" ? this.cause : this.cause?.message || null;
+    const code = safeDiagnosticProperty(this, "code");
+    const method = safeDiagnosticProperty(this, "method");
+    const url = safeDiagnosticProperty(this, "url");
+    const finalUrl = safeDiagnosticProperty(this, "finalUrl");
+    const status = safeDiagnosticProperty(this, "status");
+    const statusText = safeDiagnosticProperty(this, "statusText");
+    const urls = safeDiagnosticProperty(this, "urls");
+    const cause = safeDiagnosticProperty(this, "cause");
+    if (code !== undefined)
+      result.code = sanitizeDiagnosticText(code);
+    if (method !== undefined)
+      result.method = sanitizeDiagnosticText(method);
+    if (url !== undefined)
+      result.url = sanitizeDiagnosticUrl(url);
+    if (finalUrl !== undefined)
+      result.finalUrl = sanitizeDiagnosticUrl(finalUrl);
+    if (status !== undefined) {
+      result.status = typeof status === "number" ? status : sanitizeDiagnosticText(status);
+    }
+    if (statusText !== undefined)
+      result.statusText = sanitizeDiagnosticText(statusText);
+    if (urls !== undefined)
+      result.urls = sanitizeDiagnosticUrlList(urls);
+    if (cause) {
+      const causeMessage = typeof cause === "string" ? cause : safeDiagnosticProperty(cause, "message");
+      result.cause = causeMessage ? sanitizeDiagnosticText(causeMessage) : null;
+    }
     return result;
   }
   toString() {
-    let result = `${this.name}: ${this.message}`;
-    if (this.code) {
-      result += ` [${this.code}]`;
+    const name = safeDiagnosticProperty(this, "name");
+    const message = safeDiagnosticProperty(this, "message");
+    const code = safeDiagnosticProperty(this, "code");
+    let result = `${sanitizeDiagnosticText(name ?? "RezoError")}: ${sanitizeDiagnosticText(message)}`;
+    if (code) {
+      result += ` [${sanitizeDiagnosticText(code)}]`;
     }
     return result;
   }
   getFullDetails() {
-    let result = `${this.name}: ${this.message}
+    const name = safeDiagnosticProperty(this, "name");
+    const message = safeDiagnosticProperty(this, "message");
+    const code = safeDiagnosticProperty(this, "code");
+    const method = safeDiagnosticProperty(this, "method");
+    const url = safeDiagnosticProperty(this, "url");
+    const finalUrl = safeDiagnosticProperty(this, "finalUrl");
+    const status = safeDiagnosticProperty(this, "status");
+    const statusText = safeDiagnosticProperty(this, "statusText");
+    const urls = safeDiagnosticProperty(this, "urls");
+    const errno = safeDiagnosticProperty(this, "errno");
+    const hostname = safeDiagnosticProperty(this, "hostname");
+    const port = safeDiagnosticProperty(this, "port");
+    const suggestion = safeDiagnosticProperty(this, "suggestion");
+    const config = safeDiagnosticProperty(this, "config");
+    const request = safeDiagnosticProperty(this, "request");
+    const response = safeDiagnosticProperty(this, "response");
+    const rawUrl = safeDiagnosticProperty(config, "fullUrl") ?? safeDiagnosticProperty(config, "url") ?? safeDiagnosticProperty(request, "url") ?? url;
+    const responseFinalUrl = safeDiagnosticProperty(response, "finalUrl");
+    const configFinalUrl = safeDiagnosticProperty(config, "finalUrl");
+    const explicitRawFinalUrl = responseFinalUrl ?? configFinalUrl;
+    const sanitizedUrl = url ? sanitizeDiagnosticUrl(url) : "";
+    const sanitizedFinalUrl = finalUrl ? sanitizeDiagnosticUrl(finalUrl) : "";
+    const finalUrlDiffers = explicitRawFinalUrl !== undefined && explicitRawFinalUrl !== null ? explicitRawFinalUrl !== rawUrl || sanitizedFinalUrl !== sanitizedUrl : sanitizedFinalUrl !== sanitizedUrl;
+    let result = `${sanitizeDiagnosticText(name ?? "RezoError")}: ${sanitizeDiagnosticText(message)}
 `;
-    if (this.code)
-      result += `Code: ${this.code}
+    if (code)
+      result += `Code: ${sanitizeDiagnosticText(code)}
 `;
-    if (this.method)
-      result += `Method: ${this.method}
+    if (method)
+      result += `Method: ${sanitizeDiagnosticText(method)}
 `;
-    if (this.url)
-      result += `URL: ${this.url}
+    if (sanitizedUrl)
+      result += `URL: ${sanitizedUrl}
 `;
-    if (this.finalUrl && this.finalUrl !== this.url) {
-      result += `Final URL: ${this.finalUrl}
+    if (sanitizedFinalUrl && finalUrlDiffers) {
+      result += `Final URL: ${sanitizedFinalUrl}
 `;
     }
-    if (this.status)
-      result += `HTTP Status: ${this.status} ${this.statusText || ""}
-`;
-    if (this.urls && this.urls.length > 1) {
-      result += `Redirect Chain: ${this.urls.join(" -> ")}
+    if (status) {
+      result += `HTTP Status: ${sanitizeDiagnosticText(status)} ${sanitizeDiagnosticText(statusText || "")}
 `;
     }
-    if (this.errno)
-      result += `Error Number: ${this.errno}
+    const sanitizedUrls = urls === undefined ? undefined : sanitizeDiagnosticUrlList(urls);
+    if (Array.isArray(sanitizedUrls) && sanitizedUrls.length > 1) {
+      result += `Redirect Chain: ${sanitizedUrls.join(" -> ")}
 `;
-    if (this.hostname)
-      result += `Host: ${this.hostname}
+    }
+    if (errno)
+      result += `Error Number: ${sanitizeDiagnosticText(errno)}
 `;
-    if (this.port)
-      result += `Port: ${this.port}
+    if (hostname)
+      result += `Host: ${sanitizeDiagnosticText(hostname)}
 `;
-    if (this.suggestion)
+    if (port)
+      result += `Port: ${sanitizeDiagnosticText(port)}
+`;
+    if (suggestion)
       result += `
-Suggestion: ${this.suggestion}
+Suggestion: ${sanitizeDiagnosticText(suggestion)}
 `;
     return result;
   }
 }
+function inspectRezoError() {
+  try {
+    return Reflect.apply(RezoError.prototype.toJSON, this, []);
+  } catch {
+    return { name: "RezoError", message: "[REDACTED]" };
+  }
+}
+function inspectRezoErrorForDeno() {
+  try {
+    return JSON.stringify(inspectRezoError.call(this));
+  } catch {
+    return '{"name":"RezoError","message":"[REDACTED]"}';
+  }
+}
+Object.defineProperty(RezoError.prototype, Symbol.for("nodejs.util.inspect.custom"), {
+  value: inspectRezoError
+});
+Object.defineProperty(RezoError.prototype, Symbol.for("Deno.customInspect"), {
+  value: inspectRezoErrorForDeno
+});
 
 exports.getHttpErrorMessage = getHttpErrorMessage;
 exports.getHttpStatusText = getHttpStatusText;

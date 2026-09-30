@@ -1,6 +1,7 @@
 const net = require("node:net");
 const tls = require("node:tls");
 const { Agent } = require('./base.cjs');
+const { releasePendingProxyHandshake, trackPendingProxyHandshake } = require('./pending-proxy-handshake.cjs');
 function omit(obj, ...keys) {
   const ret = {};
   for (const key in obj) {
@@ -30,11 +31,16 @@ function parseProxyResponse(socket) {
     function cleanup() {
       socket.removeListener("end", onend);
       socket.removeListener("error", onerror);
+      socket.removeListener("close", onclose);
       socket.removeListener("readable", read);
     }
     function onend() {
       cleanup();
       reject(new Error("Proxy connection ended before receiving CONNECT response"));
+    }
+    function onclose() {
+      cleanup();
+      reject(new Error("Proxy connection closed before receiving CONNECT response"));
     }
     function onerror(err) {
       cleanup();
@@ -89,6 +95,7 @@ function parseProxyResponse(socket) {
     }
     socket.once("error", onerror);
     socket.once("end", onend);
+    socket.once("close", onclose);
     read();
   });
 }
@@ -127,6 +134,7 @@ class HttpsProxyAgent extends Agent {
     } else {
       socket = net.connect(this.connectOpts);
     }
+    trackPendingProxyHandshake(req, socket);
     const headers = typeof this.proxyHeaders === "function" ? this.proxyHeaders() : { ...this.proxyHeaders };
     const host = net.isIPv6(opts.host) ? `[${opts.host}]` : opts.host;
     let payload = `CONNECT ${host}:${opts.port} HTTP/1.1\r
@@ -146,7 +154,13 @@ class HttpsProxyAgent extends Agent {
     const proxyResponsePromise = parseProxyResponse(socket);
     socket.write(`${payload}\r
 `);
-    const { connect, buffered } = await proxyResponsePromise;
+    let connect;
+    let buffered;
+    try {
+      ({ connect, buffered } = await proxyResponsePromise);
+    } finally {
+      releasePendingProxyHandshake(req, socket);
+    }
     req.emit("proxyConnect", connect);
     this.emit("proxyConnect", connect, req);
     if (connect.statusCode === 200) {

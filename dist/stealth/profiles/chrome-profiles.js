@@ -1,5 +1,6 @@
 import {
   chromeTls,
+  chromiumGreaseBrands,
   CHROME_H2,
   CHROME_ACCEPT,
   CHROME_HEADER_ORDER
@@ -136,10 +137,65 @@ export const CHROME_131_ANDROID = {
   },
   navigator: { platform: "Linux armv81", hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 5 }
 };
+export const CHROME_151 = {
+  id: "chrome-151",
+  family: "chrome",
+  engine: "blink",
+  version: "151.0.7922.173",
+  majorVersion: 151,
+  device: "desktop",
+  tls: chromeTls(151),
+  h2Settings: CHROME_H2,
+  pseudoHeaderOrder: "masp",
+  headerOrder: CHROME_HEADER_ORDER,
+  userAgents: {
+    windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    macos: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    linux: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+  },
+  accept: CHROME_ACCEPT,
+  acceptEncoding: "gzip, deflate, br, zstd",
+  acceptLanguage: "en-US,en;q=0.9",
+  clientHints: {
+    secChUa: chromiumGreaseBrands(151, "Google Chrome"),
+    secChUaMobile: "?0",
+    secChUaPlatform: '"Windows"'
+  },
+  navigator: NAV
+};
+export const CHROME_151_ANDROID = {
+  id: "chrome-151-android",
+  family: "chrome",
+  engine: "blink",
+  version: "151.0.7922.173",
+  majorVersion: 151,
+  device: "mobile",
+  tls: chromeTls(151),
+  h2Settings: CHROME_H2,
+  pseudoHeaderOrder: "masp",
+  headerOrder: CHROME_HEADER_ORDER,
+  userAgents: {
+    windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    macos: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    linux: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    android: "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36"
+  },
+  accept: CHROME_ACCEPT,
+  acceptEncoding: "gzip, deflate, br, zstd",
+  acceptLanguage: "en-US,en;q=0.9",
+  clientHints: {
+    secChUa: chromiumGreaseBrands(151, "Google Chrome"),
+    secChUaMobile: "?1",
+    secChUaPlatform: '"Android"'
+  },
+  navigator: { platform: "Linux armv81", hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 5 }
+};
 export const CHROME_PROFILES = {
   "chrome-120": CHROME_120,
   "chrome-124": CHROME_124,
   "chrome-128": CHROME_128,
   "chrome-131": CHROME_131,
-  "chrome-131-android": CHROME_131_ANDROID
+  "chrome-131-android": CHROME_131_ANDROID,
+  "chrome-151": CHROME_151,
+  "chrome-151-android": CHROME_151_ANDROID
 };

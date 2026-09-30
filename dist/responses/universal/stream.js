@@ -1,4 +1,8 @@
-import { UniversalEventEmitter } from './event-emitter.js';
+import {
+  UniversalEventEmitter,
+  invokeUniversalEventListener
+} from './event-emitter.js';
+import { RezoError } from '../../errors/rezo-error.js';
 import { requireNodeModule } from '../../utils/node-runtime.js';
 
 export class UniversalStreamResponse extends UniversalEventEmitter {
@@ -30,14 +34,17 @@ export class UniversalStreamResponse extends UniversalEventEmitter {
     this.emit("data", chunk);
   }
   end() {
-    this._finished = true;
     this.emit("close");
   }
   pipe(destination, options) {
     const shouldEnd = options?.end !== false;
     this._pipeTargets.push(destination);
     if (shouldEnd) {
+      let destinationEnded = false;
       const onFinish = () => {
+        if (destinationEnded)
+          return;
+        destinationEnded = true;
         if (typeof destination.end === "function")
           destination.end();
       };
@@ -56,7 +63,7 @@ export class UniversalStreamResponse extends UniversalEventEmitter {
     const fs = requireNodeModule("node:fs");
     const createWriteStream = fs?.createWriteStream;
     if (!path || !fs || !createWriteStream) {
-      return this;
+      throw new RezoError(`Cannot pipe this stream to "${filePath}": no filesystem is available on this runtime.`, { adapterUsed: null }, "REZ_UNSUPPORTED_CAPABILITY");
     }
     const dir = path.dirname(filePath);
     if (dir && dir !== ".")
@@ -81,8 +88,20 @@ export class UniversalStreamResponse extends UniversalEventEmitter {
       if (toReplay.length > 0) {
         this._earlyEvents = this._earlyEvents.filter((e) => e.event !== event);
         for (const { args } of toReplay) {
-          listener(...args);
+          invokeUniversalEventListener(listener, args);
         }
+      }
+    }
+    return this;
+  }
+  once(event, listener) {
+    super.once(event, listener);
+    if (typeof event === "string" && this._earlyEvents.length > 0) {
+      const first = this._earlyEvents.find((entry) => entry.event === event);
+      if (first) {
+        this._earlyEvents = this._earlyEvents.filter((entry) => entry.event !== event);
+        this.off(event, listener);
+        invokeUniversalEventListener(listener, first.args, "once listener");
       }
     }
     return this;

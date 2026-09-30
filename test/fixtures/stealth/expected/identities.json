@@ -1,0 +1,674 @@
+{
+ "schema": "rezo.stealth.identity-oracles/v4",
+ "note": "Independent per-identity wire expectations for the stealth carriers. Values are what the REAL browser puts on the wire for a top-level navigation; they are never read back from product profile objects. Extension order, GREASE placement and padding are outside what node:tls can express and are recorded as boundaries, not asserted. OpenSSL names are used for ciphers, sigalgs and groups (prime256v1 = secp256r1).",
+ "boundaries": {
+  "clientHelloExtensionOrder": "not expressible through node:tls / Bun BoringSSL; recorded, not asserted",
+  "greaseValues": "browser GREASE placeholders are not emitted by node:tls; parsers strip GREASE before comparison"
+ },
+ "identities": {
+  "chrome-131": {
+   "sources": [
+    "tls.peet.ws JA4/akamai database entries for Chrome 131 (Windows/macOS)",
+    "Chromium net/ssl/ssl_config and BoringSSL kDefaultGroups (X25519MLKEM768 enabled by default from Chrome 131)",
+    "Chromium net/http/http_request_headers.cc navigation header order"
+   ],
+   "tls": {
+    "ciphers": [
+     "TLS_AES_128_GCM_SHA256",
+     "TLS_AES_256_GCM_SHA384",
+     "TLS_CHACHA20_POLY1305_SHA256",
+     "ECDHE-ECDSA-AES128-GCM-SHA256",
+     "ECDHE-RSA-AES128-GCM-SHA256",
+     "ECDHE-ECDSA-AES256-GCM-SHA384",
+     "ECDHE-RSA-AES256-GCM-SHA384",
+     "ECDHE-ECDSA-CHACHA20-POLY1305",
+     "ECDHE-RSA-CHACHA20-POLY1305",
+     "ECDHE-RSA-AES128-SHA",
+     "ECDHE-RSA-AES256-SHA",
+     "AES128-GCM-SHA256",
+     "AES256-GCM-SHA384",
+     "AES128-SHA",
+     "AES256-SHA"
+    ],
+    "sigalgs": [
+     "ecdsa_secp256r1_sha256",
+     "rsa_pss_rsae_sha256",
+     "rsa_pkcs1_sha256",
+     "ecdsa_secp384r1_sha384",
+     "rsa_pss_rsae_sha384",
+     "rsa_pkcs1_sha384",
+     "rsa_pss_rsae_sha512",
+     "rsa_pkcs1_sha512"
+    ],
+    "supportedGroups": [
+     "X25519MLKEM768",
+     "X25519",
+     "prime256v1",
+     "secp384r1"
+    ],
+    "keyShareGroups": [
+     "X25519MLKEM768",
+     "X25519"
+    ],
+    "supportedVersions": [
+     "TLSv1.3",
+     "TLSv1.2"
+    ],
+    "alpn": {
+     "h1": [
+      "http/1.1"
+     ],
+     "h2": [
+      "h2",
+      "http/1.1"
+     ]
+    }
+   },
+   "h1HeaderOrder": [
+    "host",
+    "connection",
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "upgrade-insecure-requests",
+    "user-agent",
+    "accept",
+    "sec-fetch-site",
+    "sec-fetch-mode",
+    "sec-fetch-user",
+    "sec-fetch-dest",
+    "accept-encoding",
+    "accept-language"
+   ],
+   "h2": {
+    "pseudoOrder": [
+     ":method",
+     ":authority",
+     ":scheme",
+     ":path"
+    ],
+    "headerOrder": [
+     "sec-ch-ua",
+     "sec-ch-ua-mobile",
+     "sec-ch-ua-platform",
+     "upgrade-insecure-requests",
+     "user-agent",
+     "accept",
+     "sec-fetch-site",
+     "sec-fetch-mode",
+     "sec-fetch-user",
+     "sec-fetch-dest",
+     "accept-encoding",
+     "accept-language",
+     "priority"
+    ],
+    "settings": [
+     [
+      1,
+      65536
+     ],
+     [
+      2,
+      0
+     ],
+     [
+      4,
+      6291456
+     ],
+     [
+      6,
+      262144
+     ]
+    ],
+    "windowUpdate": 15663105
+   },
+   "clientHints": {
+    "sec-ch-ua": "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+    "sec-ch-ua-mobile": "?0"
+   },
+   "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+   "acceptEncoding": "gzip, deflate, br, zstd",
+   "userAgentMajor": 131
+  },
+  "edge-131": {
+   "sources": [
+    "tls.peet.ws entries for Edge 131 (same BoringSSL build as Chrome 131)",
+    "Microsoft Edge release notes 131 (UA string)",
+    "Chromium navigation header order"
+   ],
+   "tls": {
+    "same": "chrome-131"
+   },
+   "h1HeaderOrder": {
+    "same": "chrome-131"
+   },
+   "h2": {
+    "same": "chrome-131"
+   },
+   "clientHints": {
+    "sec-ch-ua": "\"Microsoft Edge\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"",
+    "sec-ch-ua-mobile": "?0"
+   },
+   "accept": {
+    "same": "chrome-131"
+   },
+   "acceptEncoding": "gzip, deflate, br, zstd",
+   "userAgentMajor": 131
+  },
+  "firefox-133": {
+   "sources": [
+    "tls.peet.ws JA4/akamai entries for Firefox 133",
+    "Mozilla NSS cipher order (security/nss/lib/ssl/ssl3con.c) and Firefox 132 release notes (X25519MLKEM768 enabled by default)",
+    "Firefox network header order (netwerk/protocol/http/nsHttpHandler.cpp) incl. Priority header from Firefox 133"
+   ],
+   "tls": {
+    "ciphers": [
+     "TLS_AES_128_GCM_SHA256",
+     "TLS_CHACHA20_POLY1305_SHA256",
+     "TLS_AES_256_GCM_SHA384",
+     "ECDHE-ECDSA-AES128-GCM-SHA256",
+     "ECDHE-RSA-AES128-GCM-SHA256",
+     "ECDHE-ECDSA-CHACHA20-POLY1305",
+     "ECDHE-RSA-CHACHA20-POLY1305",
+     "ECDHE-ECDSA-AES256-GCM-SHA384",
+     "ECDHE-RSA-AES256-GCM-SHA384",
+     "ECDHE-ECDSA-AES256-SHA",
+     "ECDHE-ECDSA-AES128-SHA",
+     "ECDHE-RSA-AES128-SHA",
+     "ECDHE-RSA-AES256-SHA",
+     "AES128-GCM-SHA256",
+     "AES256-GCM-SHA384",
+     "AES128-SHA",
+     "AES256-SHA"
+    ],
+    "sigalgs": [
+     "ecdsa_secp256r1_sha256",
+     "ecdsa_secp384r1_sha384",
+     "ecdsa_secp521r1_sha512",
+     "rsa_pss_rsae_sha256",
+     "rsa_pss_rsae_sha384",
+     "rsa_pss_rsae_sha512",
+     "rsa_pkcs1_sha256",
+     "rsa_pkcs1_sha384",
+     "rsa_pkcs1_sha512",
+     "ecdsa_sha1",
+     "rsa_pkcs1_sha1"
+    ],
+    "supportedGroups": [
+     "X25519MLKEM768",
+     "X25519",
+     "prime256v1",
+     "secp384r1",
+     "secp521r1",
+     "ffdhe2048",
+     "ffdhe3072"
+    ],
+    "keyShareGroups": [
+     "X25519MLKEM768",
+     "X25519"
+    ],
+    "supportedVersions": [
+     "TLSv1.3",
+     "TLSv1.2"
+    ],
+    "alpn": {
+     "h1": [
+      "http/1.1"
+     ],
+     "h2": [
+      "h2",
+      "http/1.1"
+     ]
+    }
+   },
+   "h1HeaderOrder": [
+    "host",
+    "user-agent",
+    "accept",
+    "accept-language",
+    "accept-encoding",
+    "connection",
+    "upgrade-insecure-requests",
+    "sec-fetch-dest",
+    "sec-fetch-mode",
+    "sec-fetch-site",
+    "sec-fetch-user",
+    "priority"
+   ],
+   "h2": {
+    "pseudoOrder": [
+     ":method",
+     ":path",
+     ":authority",
+     ":scheme"
+    ],
+    "headerOrder": [
+     "user-agent",
+     "accept",
+     "accept-language",
+     "accept-encoding",
+     "upgrade-insecure-requests",
+     "sec-fetch-dest",
+     "sec-fetch-mode",
+     "sec-fetch-site",
+     "sec-fetch-user",
+     "priority",
+     "te"
+    ],
+    "settings": [
+     [
+      1,
+      65536
+     ],
+     [
+      2,
+      0
+     ],
+     [
+      4,
+      131072
+     ],
+     [
+      5,
+      16384
+     ]
+    ],
+    "windowUpdate": 12517377
+   },
+   "clientHints": null,
+   "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8",
+   "acceptEncoding": "gzip, deflate, br, zstd",
+   "userAgentMajor": 133
+  },
+  "safari-18.2": {
+   "sources": [
+    "tls.peet.ws JA4/akamai entries for Safari 18.2 macOS",
+    "Apple Network.framework TLS defaults (no post-quantum group before OS 26)",
+    "WebKit navigation request headers (Sec-Fetch-* since Safari 16.4; WebKit never sends Upgrade-Insecure-Requests)"
+   ],
+   "tls": {
+    "ciphers": [
+     "TLS_AES_128_GCM_SHA256",
+     "TLS_AES_256_GCM_SHA384",
+     "TLS_CHACHA20_POLY1305_SHA256",
+     "ECDHE-ECDSA-AES256-GCM-SHA384",
+     "ECDHE-ECDSA-AES128-GCM-SHA256",
+     "ECDHE-ECDSA-CHACHA20-POLY1305",
+     "ECDHE-RSA-AES256-GCM-SHA384",
+     "ECDHE-RSA-AES128-GCM-SHA256",
+     "ECDHE-RSA-CHACHA20-POLY1305",
+     "ECDHE-ECDSA-AES256-SHA",
+     "ECDHE-ECDSA-AES128-SHA",
+     "ECDHE-RSA-AES256-SHA",
+     "ECDHE-RSA-AES128-SHA",
+     "AES256-GCM-SHA384",
+     "AES128-GCM-SHA256",
+     "AES256-SHA",
+     "AES128-SHA"
+    ],
+    "sigalgs": [
+     "ecdsa_secp256r1_sha256",
+     "rsa_pss_rsae_sha256",
+     "rsa_pkcs1_sha256",
+     "ecdsa_secp384r1_sha384",
+     "ecdsa_secp521r1_sha512",
+     "rsa_pss_rsae_sha384",
+     "rsa_pss_rsae_sha512",
+     "rsa_pkcs1_sha384",
+     "rsa_pkcs1_sha512"
+    ],
+    "supportedGroups": [
+     "X25519",
+     "prime256v1",
+     "secp384r1",
+     "secp521r1"
+    ],
+    "keyShareGroups": [
+     "X25519"
+    ],
+    "supportedVersions": [
+     "TLSv1.3",
+     "TLSv1.2"
+    ],
+    "alpn": {
+     "h1": [
+      "http/1.1"
+     ],
+     "h2": [
+      "h2",
+      "http/1.1"
+     ]
+    }
+   },
+   "h1HeaderOrder": [
+    "host",
+    "accept",
+    "sec-fetch-site",
+    "sec-fetch-dest",
+    "accept-language",
+    "sec-fetch-mode",
+    "user-agent",
+    "accept-encoding",
+    "connection"
+   ],
+   "h2": {
+    "pseudoOrder": [
+     ":method",
+     ":scheme",
+     ":path",
+     ":authority"
+    ],
+    "headerOrder": [
+     "accept",
+     "sec-fetch-site",
+     "sec-fetch-dest",
+     "accept-language",
+     "sec-fetch-mode",
+     "user-agent",
+     "accept-encoding"
+    ],
+    "settings": [
+     [
+      2,
+      0
+     ],
+     [
+      4,
+      4194304
+     ],
+     [
+      3,
+      100
+     ]
+    ],
+    "windowUpdate": 10485760
+   },
+   "clientHints": null,
+   "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+   "acceptEncoding": "gzip, deflate, br",
+   "userAgentMajor": 18
+  },
+  "chrome-151": {
+   "sources": [
+    "Chrome Releases blog: Stable Channel Update 151.0.7922.173 (2026-08)",
+    "Chromium GetGreasedUserAgentBrandVersion (seed = major version) — validated on 120/124/128/131/146 in phase 3",
+    "tls.peet.ws Chrome 151 entries (cipher/sigalg/group sets unchanged since 131)",
+    "local Chrome 146 wire capture (2026-08-23) for H2 SETTINGS/priority/WINDOW_UPDATE — certifies the template, not the 151 brands"
+   ],
+   "tls": {
+    "same": "chrome-131"
+   },
+   "h1HeaderOrder": {
+    "same": "chrome-131"
+   },
+   "h2": {
+    "same": "chrome-131"
+   },
+   "clientHints": {
+    "sec-ch-ua": "algorithm:chromium-grease(151, \"Google Chrome\")",
+    "sec-ch-ua-mobile": "?0"
+   },
+   "accept": {
+    "same": "chrome-131"
+   },
+   "acceptEncoding": "gzip, deflate, br, zstd",
+   "userAgentMajor": 151
+  },
+  "edge-151": {
+   "sources": [
+    "Microsoft Edge release notes 151.0.4129.93 (2026-08)",
+    "Chromium GetGreasedUserAgentBrandVersion with brand \"Microsoft Edge\""
+   ],
+   "tls": {
+    "same": "chrome-131"
+   },
+   "h1HeaderOrder": {
+    "same": "chrome-131"
+   },
+   "h2": {
+    "same": "chrome-131"
+   },
+   "clientHints": {
+    "sec-ch-ua": "algorithm:chromium-grease(151, \"Microsoft Edge\")",
+    "sec-ch-ua-mobile": "?0"
+   },
+   "accept": {
+    "same": "chrome-131"
+   },
+   "acceptEncoding": "gzip, deflate, br, zstd",
+   "userAgentMajor": 151
+  },
+  "firefox-154": {
+   "sources": [
+    "Mozilla Firefox 154.0 release notes (2026-08)",
+    "NSS cipher/sigalg/group order unchanged since Firefox 132 (X25519MLKEM768 default)",
+    "Firefox header order incl. Priority (133+)"
+   ],
+   "tls": {
+    "same": "firefox-133"
+   },
+   "h1HeaderOrder": {
+    "same": "firefox-133"
+   },
+   "h2": {
+    "same": "firefox-133"
+   },
+   "clientHints": null,
+   "accept": {
+    "same": "firefox-133"
+   },
+   "acceptEncoding": "gzip, deflate, br, zstd",
+   "userAgentMajor": 154
+  },
+  "safari-26.6": {
+   "sources": [
+    "Apple Safari 26.6.1 release (2026-08-18)",
+    "Apple developer documentation: TLS 1.3 hybrid post-quantum key exchange (X25519MLKEM768) enabled by default in iOS 26 / macOS 26",
+    "WebKit navigation header order (unchanged from 18)"
+   ],
+   "tls": {
+    "ciphers": {
+     "same": "safari-18.2"
+    },
+    "sigalgs": {
+     "same": "safari-18.2"
+    },
+    "supportedGroups": [
+     "X25519MLKEM768",
+     "X25519",
+     "prime256v1",
+     "secp384r1",
+     "secp521r1"
+    ],
+    "keyShareGroups": [
+     "X25519MLKEM768",
+     "X25519"
+    ],
+    "supportedVersions": [
+     "TLSv1.3",
+     "TLSv1.2"
+    ],
+    "alpn": {
+     "h1": [
+      "http/1.1"
+     ],
+     "h2": [
+      "h2",
+      "http/1.1"
+     ]
+    }
+   },
+   "h1HeaderOrder": {
+    "same": "safari-18.2"
+   },
+   "h2": {
+    "same": "safari-18.2"
+   },
+   "clientHints": null,
+   "accept": {
+    "same": "safari-18.2"
+   },
+   "acceptEncoding": "gzip, deflate, br",
+   "userAgentMajor": 26
+  },
+  "opera-135": {
+   "sources": [
+    "Opera Desktop blog: Opera 135 Stable (2026-08-20) — Chromium 151.0.7922.138; Opera 135.0.5973.55 Stable update (2026-08-26) — Chromium 151.0.7922.170",
+    "Chromium GetGreasedUserAgentBrandVersion with brand \"Opera\" carrying Opera's own major (135) next to \"Chromium\";v=\"151\"",
+    "Opera UA convention: Chrome/<chromium> Safari/537.36 OPR/<opera>.0.0.0"
+   ],
+   "tls": {
+    "same": "chrome-131"
+   },
+   "h1HeaderOrder": {
+    "same": "chrome-131"
+   },
+   "h2": {
+    "same": "chrome-131"
+   },
+   "clientHints": {
+    "sec-ch-ua": "algorithm:chromium-grease(151, \"Opera\", 135)",
+    "sec-ch-ua-mobile": "?0"
+   },
+   "accept": {
+    "same": "chrome-131"
+   },
+   "acceptEncoding": "gzip, deflate, br, zstd",
+   "userAgentMajor": 151,
+   "productVersion": "135.0.5973.55"
+  },
+  "brave-1.93": {
+   "sources": [
+    "GitHub brave/brave-browser release v1.93.136 (Chromium 151.0.7922.137); brave.com/latest release channel 1.93.138 — Chromium 151.0.7922.173 (2026-08)",
+    "Chromium GetGreasedUserAgentBrandVersion with brand \"Brave\" carrying the Chromium major (Brave reports \"Brave\";v=<chromium major>)",
+    "Brave UA convention: identical to Chrome (no Brave token)"
+   ],
+   "tls": {
+    "same": "chrome-131"
+   },
+   "h1HeaderOrder": {
+    "same": "chrome-131"
+   },
+   "h2": {
+    "same": "chrome-131"
+   },
+   "clientHints": {
+    "sec-ch-ua": "algorithm:chromium-grease(151, \"Brave\")",
+    "sec-ch-ua-mobile": "?0"
+   },
+   "accept": {
+    "same": "chrome-131"
+   },
+   "acceptEncoding": "gzip, deflate, br, zstd",
+   "userAgentMajor": 151,
+   "productVersion": "1.93.136"
+  }
+ },
+ "runtimes": {
+  "bun": {
+   "version": "1.3.14",
+   "note": "Bun (BoringSSL) ignores the ciphers/sigalgs/ecdhCurve options of node:tls createSecureContext and emits one fixed ClientHello for every identity (captured 2026-08-29 through the same observer; only ALPN follows the profile). TLS shaping is therefore a runtime boundary on Bun: the product must record tlsBoundary.runtime = { name: \"bun\", tlsShaping: \"unavailable\" } and the wire rows assert exactly this fixed hello plus that record.",
+   "defaultHello": {
+    "h1": {
+     "ciphers": [
+      "TLS_AES_128_GCM_SHA256",
+      "TLS_AES_256_GCM_SHA384",
+      "TLS_CHACHA20_POLY1305_SHA256",
+      "ECDHE-ECDSA-AES128-GCM-SHA256",
+      "ECDHE-RSA-AES128-GCM-SHA256",
+      "ECDHE-ECDSA-AES256-GCM-SHA384",
+      "ECDHE-RSA-AES256-GCM-SHA384",
+      "ECDHE-ECDSA-CHACHA20-POLY1305",
+      "ECDHE-RSA-CHACHA20-POLY1305",
+      "ECDHE-ECDSA-AES128-SHA",
+      "ECDHE-RSA-AES128-SHA",
+      "ECDHE-ECDSA-AES256-SHA",
+      "ECDHE-RSA-AES256-SHA",
+      "AES128-GCM-SHA256",
+      "AES256-GCM-SHA384",
+      "AES128-SHA",
+      "AES256-SHA"
+     ],
+     "sigalgs": [
+      "ecdsa_secp256r1_sha256",
+      "rsa_pss_rsae_sha256",
+      "rsa_pkcs1_sha256",
+      "ecdsa_secp384r1_sha384",
+      "rsa_pss_rsae_sha384",
+      "rsa_pkcs1_sha384",
+      "rsa_pss_rsae_sha512",
+      "rsa_pkcs1_sha512",
+      "rsa_pkcs1_sha1"
+     ],
+     "supportedGroups": [
+      "X25519",
+      "prime256v1",
+      "secp384r1"
+     ],
+     "keyShareGroups": [
+      "X25519"
+     ],
+     "supportedVersions": [
+      "TLSv1.3",
+      "TLSv1.2"
+     ]
+    },
+    "h2": {
+     "ciphers": [
+      "TLS_AES_128_GCM_SHA256",
+      "TLS_AES_256_GCM_SHA384",
+      "TLS_CHACHA20_POLY1305_SHA256",
+      "ECDHE-ECDSA-AES256-GCM-SHA384",
+      "ECDHE-ECDSA-AES128-GCM-SHA256",
+      "ECDHE-ECDSA-CHACHA20-POLY1305",
+      "ECDHE-RSA-AES256-GCM-SHA384",
+      "ECDHE-RSA-AES128-GCM-SHA256",
+      "ECDHE-RSA-CHACHA20-POLY1305",
+      "ECDHE-ECDSA-AES256-SHA",
+      "ECDHE-ECDSA-AES128-SHA",
+      "ECDHE-RSA-AES256-SHA",
+      "ECDHE-RSA-AES128-SHA",
+      "AES256-GCM-SHA384",
+      "AES128-GCM-SHA256",
+      "AES256-SHA",
+      "AES128-SHA"
+     ],
+     "sigalgs": [
+      "ecdsa_secp256r1_sha256",
+      "rsa_pss_rsae_sha256",
+      "rsa_pkcs1_sha256",
+      "ecdsa_secp384r1_sha384",
+      "rsa_pss_rsae_sha384",
+      "rsa_pkcs1_sha384",
+      "rsa_pss_rsae_sha512",
+      "rsa_pkcs1_sha512",
+      "rsa_pkcs1_sha1"
+     ],
+     "supportedGroups": [
+      "X25519",
+      "prime256v1",
+      "secp384r1"
+     ],
+     "keyShareGroups": [
+      "X25519"
+     ],
+     "supportedVersions": [
+      "TLSv1.3",
+      "TLSv1.2"
+     ]
+    }
+   }
+  },
+  "node": {
+   "note": "Node (OpenSSL 3.6.2) honours ciphers, sigalgs and groups; extension order, GREASE and padding are not expressible."
+  }
+ },
+ "minimumRuntime": {
+  "advertised": "Node 22+",
+  "installed": [
+   "node 25.9.0 (/opt/homebrew/Cellar/node/25.9.0_2)",
+   "node@20 20.20.2 (below the advertised minimum)"
+  ],
+  "gap": "no supported runtime older than 25 is installed; the minimum-runtime leg is a named gap until the Engineer installs node@22 or node@24 (the /opt/homebrew/opt/node@24 path is a dangling alias to Node 25)"
+ }
+}

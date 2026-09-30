@@ -1,8 +1,9 @@
 const { CookieJar: TouchCookieJar } = require("tough-cookie");
 const { Cookie } = require('./cookie.cjs');
 const { requireNodeModule } = require('../utils/node-runtime.cjs');
-const _mod_lmu5b2 = require('./cookie.cjs');
-exports.Cookie = _mod_lmu5b2.Cookie;;
+const { RezoError } = require('../errors/rezo-error.cjs');
+const _mod_9syblq = require('./cookie.cjs');
+exports.Cookie = _mod_9syblq.Cookie;;
 const REZO_COOKIE_PREFIX_KEY = "Rezo_prx_";
 const HOST_PREFIX = "__Host-";
 const STORED_HOST_PREFIX = `${REZO_COOKIE_PREFIX_KEY}Host-`;
@@ -560,7 +561,7 @@ class RezoCookieJar extends TouchCookieJar {
   loadFromFile(filePath, _defaultUrl) {
     const fs = requireNodeModule("node:fs");
     if (!fs) {
-      throw new Error("loadFromFile() requires Node.js, Bun, or Deno. Not available in browsers or React Native.");
+      throw new RezoError("loadFromFile() needs synchronous filesystem access, which this runtime does not provide.", { adapterUsed: null }, "REZ_UNSUPPORTED_CAPABILITY");
     }
     if (!fs.existsSync(filePath)) {
       this._cookieFile = filePath;
@@ -612,7 +613,7 @@ class RezoCookieJar extends TouchCookieJar {
     }
     const fs = requireNodeModule("node:fs");
     if (!fs) {
-      throw new Error("saveToFile() requires Node.js, Bun, or Deno. Not available in browsers or React Native.");
+      throw new RezoError("saveToFile() needs synchronous filesystem access, which this runtime does not provide.", { adapterUsed: null }, "REZ_UNSUPPORTED_CAPABILITY");
     }
     const isJson = targetPath.toLowerCase().endsWith(".json");
     const cookies = this.cookies();
@@ -636,7 +637,7 @@ class RezoCookieJar extends TouchCookieJar {
   }
 }
 const CookieJar = exports.CookieJar = RezoCookieJar;
-const _mod_0x8k0x = require("tough-cookie");
-exports.Store = _mod_0x8k0x.Store;;
+const _mod_rgu1jy = require("tough-cookie");
+exports.Store = _mod_rgu1jy.Store;;
 
 exports.RezoCookieJar = RezoCookieJar;

@@ -114,10 +114,57 @@ export const SAFARI_18_IOS = {
   clientHints: NO_HINTS,
   navigator: NAV_IOS
 };
+export const SAFARI_26_6 = {
+  id: "safari-26.6",
+  family: "safari",
+  engine: "webkit",
+  version: "26.6.1",
+  majorVersion: 26,
+  device: "desktop",
+  tls: safariTls(26),
+  h2Settings: SAFARI_H2,
+  pseudoHeaderOrder: "mspa",
+  headerOrder: SAFARI_HEADER_ORDER,
+  userAgents: {
+    windows: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Safari/605.1.15",
+    macos: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Safari/605.1.15",
+    linux: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Safari/605.1.15"
+  },
+  accept: SAFARI_ACCEPT,
+  acceptEncoding: "gzip, deflate, br",
+  acceptLanguage: "en-US,en;q=0.9",
+  clientHints: NO_HINTS,
+  navigator: NAV_MAC
+};
+export const SAFARI_26_IOS = {
+  id: "safari-26-ios",
+  family: "safari",
+  engine: "webkit",
+  version: "26.6",
+  majorVersion: 26,
+  device: "mobile",
+  tls: safariTls(26),
+  h2Settings: SAFARI_H2,
+  pseudoHeaderOrder: "mspa",
+  headerOrder: SAFARI_HEADER_ORDER,
+  userAgents: {
+    windows: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Safari/605.1.15",
+    macos: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Safari/605.1.15",
+    linux: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Safari/605.1.15",
+    ios: "Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1"
+  },
+  accept: SAFARI_ACCEPT,
+  acceptEncoding: "gzip, deflate, br",
+  acceptLanguage: "en-US,en;q=0.9",
+  clientHints: NO_HINTS,
+  navigator: NAV_IOS
+};
 export const SAFARI_PROFILES = {
   "safari-16.6": SAFARI_16_6,
   "safari-17.4": SAFARI_17_4,
   "safari-18.2": SAFARI_18_2,
+  "safari-26.6": SAFARI_26_6,
   "safari-17-ios": SAFARI_17_IOS,
-  "safari-18-ios": SAFARI_18_IOS
+  "safari-18-ios": SAFARI_18_IOS,
+  "safari-26-ios": SAFARI_26_IOS
 };

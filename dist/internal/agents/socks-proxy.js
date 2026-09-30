@@ -2,6 +2,8 @@ import * as net from "node:net";
 import * as tls from "node:tls";
 import { Agent } from './base.js';
 import { SocksClient } from './socks-client.js';
+import { releasePendingProxyHandshake, trackPendingProxyHandshake } from './pending-proxy-handshake.js';
+import { waitForSocketConnection } from './wait-for-socket-connection.js';
 function parseSocksURL(url) {
   let type;
   switch (url.protocol.replace(":", "")) {
@@ -43,20 +45,29 @@ export class SocksProxyAgent extends Agent {
     this.timeout = opts?.timeout ?? null;
     this.tlsConnectionOptions = opts ?? {};
   }
-  async connect(_req, opts) {
+  async connect(req, opts) {
     const { host, port } = opts;
     if (!host) {
       throw new Error('No "host" provided');
     }
-    const socksOpts = {
-      proxy: this.proxy,
-      destination: { host, port },
-      command: "connect"
-    };
-    if (this.timeout !== null) {
-      socksOpts.timeout = this.timeout;
+    const proxySocket = net.connect({ host: this.proxy.host, port: this.proxy.port });
+    trackPendingProxyHandshake(req, proxySocket);
+    let socket;
+    try {
+      await waitForSocketConnection(proxySocket);
+      const socksOpts = {
+        proxy: this.proxy,
+        destination: { host, port },
+        command: "connect",
+        existing_socket: proxySocket
+      };
+      if (this.timeout !== null) {
+        socksOpts.timeout = this.timeout;
+      }
+      ({ socket } = await SocksClient.createConnection(socksOpts));
+    } finally {
+      releasePendingProxyHandshake(req, proxySocket);
     }
-    const { socket } = await SocksClient.createConnection(socksOpts);
     if (opts.secureEndpoint) {
       const servername = opts.servername ?? host;
       const tlsSocket = tls.connect({

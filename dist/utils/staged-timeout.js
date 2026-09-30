@@ -1,4 +1,4 @@
-import { RezoError } from '../errors/rezo-error.js';
+import { createStagedTimeoutError } from '../shared/create-staged-timeout-error.js';
 
 export class StagedTimeoutManager {
   phases = new Map;
@@ -84,7 +84,7 @@ export class StagedTimeoutManager {
     const phase = this.phases.get(phaseName);
     if (!phase)
       return;
-    const elapsed = Date.now() - phase.startTime;
+    const elapsed = Math.max(phase.timeout, Date.now() - phase.startTime);
     if (this.socket) {
       try {
         this.socket.destroy();
@@ -105,20 +105,24 @@ export class StagedTimeoutManager {
     }
   }
   createTimeoutError(phaseName, elapsed) {
-    const phaseMessages = {
-      connect: `Connection timeout: Failed to establish TCP connection within ${elapsed}ms`,
-      headers: `Headers timeout: Server did not send response headers within ${elapsed}ms`,
-      body: `Body timeout: Response body transfer stalled for ${elapsed}ms`,
-      total: `Total timeout: Request exceeded maximum duration of ${elapsed}ms`
-    };
-    const message = phaseMessages[phaseName] || `Timeout in ${phaseName} phase after ${elapsed}ms`;
-    const error = new RezoError(message, this.config || {}, phaseName === "connect" ? "ETIMEDOUT" : phaseName === "total" ? "ECONNABORTED" : "ESOCKETTIMEDOUT", this.requestConfig || undefined);
-    error.phase = phaseName;
-    error.elapsed = elapsed;
-    return error;
+    return createStagedTimeoutError(phaseName, elapsed, this.config || {}, this.requestConfig || undefined);
   }
   getPhaseTimeout(phaseName) {
     return this.phases.get(phaseName)?.timeout;
+  }
+  overduePhase() {
+    const now = Date.now();
+    let earliest;
+    for (const [name, phase] of this.phases) {
+      if (!phase.timer)
+        continue;
+      const dueAt = phase.startTime + phase.timeout;
+      if (now < dueAt)
+        continue;
+      if (!earliest || dueAt < earliest.dueAt)
+        earliest = { phase: name, elapsed: Math.max(phase.timeout, now - phase.startTime), dueAt };
+    }
+    return earliest;
   }
   hasPhase(phaseName) {
     return this.phases.has(phaseName);
@@ -129,11 +133,7 @@ export function parseStagedTimeouts(timeout) {
     return {};
   }
   if (typeof timeout === "number") {
-    return {
-      total: timeout,
-      connect: Math.min(timeout, 1e4),
-      headers: Math.min(timeout, 30000)
-    };
+    return timeout > 0 ? { total: timeout } : {};
   }
   return timeout;
 }

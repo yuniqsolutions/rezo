@@ -1,55 +1,103 @@
-export function debugErrorDump(config, error) {
-  if (!config?.debug) {
-    if (config?.trackUrl) {
-      console.log(`[Rezo Track] ✗ ${error?.code || error?.name || "Error"}: ${error?.message || ""}`);
-    }
+import { sanitizeDiagnosticText, sanitizeDiagnosticUrl } from './tools.js';
+function safeRead(value, key) {
+  if (value === null || value === undefined)
+    return;
+  try {
+    return Reflect.get(Object(value), key);
+  } catch {
     return;
   }
-  const p = (line) => console.log(`[Rezo Debug] ${line}`);
+}
+function safeHeaderValue(headers, name) {
   try {
+    const get = safeRead(headers, "get");
+    return typeof get === "function" ? Reflect.apply(get, headers, [name]) : safeRead(headers, name);
+  } catch {
+    return;
+  }
+}
+function sanitizeDiagnosticStack(value) {
+  if (typeof value !== "string")
+    return sanitizeDiagnosticText(value);
+  return value.split(/\r\n|\r|\n|\u2028|\u2029/).slice(0, 5).map((line) => sanitizeDiagnosticText(line)).join(" ");
+}
+export function debugErrorDump(config, error) {
+  try {
+    if (!safeRead(config, "debug")) {
+      if (safeRead(config, "trackUrl")) {
+        const code = safeRead(error, "code") || safeRead(error, "name") || "Error";
+        const message = sanitizeDiagnosticText(safeRead(error, "message") || "");
+        console.log(`[Rezo Track] ✗ ${sanitizeDiagnosticText(code)}: ${message}`);
+      }
+      return;
+    }
+    const p = (line) => console.log(`[Rezo Debug] ${line}`);
     p("─────────────────────────────────────");
-    p(`✗ ${error?.name || "Error"}${error?.code ? ` [${error.code}]` : ""}: ${error?.message || ""}`);
-    const method = (config.method || "GET").toUpperCase();
-    const url = config.fullUrl || config.url || "";
+    const name = sanitizeDiagnosticText(safeRead(error, "name") || "Error");
+    const code = safeRead(error, "code");
+    const message = sanitizeDiagnosticText(safeRead(error, "message") || "");
+    p(`✗ ${name}${code ? ` [${sanitizeDiagnosticText(code)}]` : ""}: ${message}`);
+    const method = sanitizeDiagnosticText(safeRead(config, "method") || "GET").toUpperCase();
+    const rawUrl = safeRead(config, "fullUrl") || safeRead(config, "url") || "";
+    const url = sanitizeDiagnosticUrl(rawUrl);
     p(`Request: ${method} ${url}`);
-    const finalUrl = error?.finalUrl || config.finalUrl;
-    if (finalUrl && finalUrl !== url)
-      p(`Final URL: ${finalUrl} (${config.redirectCount || 0} redirects)`);
-    const urls = error?.urls || (config.redirectHistory?.length ? [url, ...config.redirectHistory.map((r) => r.url)] : null);
+    const response = safeRead(error, "response");
+    const responseFinalUrl = safeRead(response, "finalUrl");
+    const configFinalUrl = safeRead(config, "finalUrl");
+    const explicitRawFinalUrl = responseFinalUrl ?? configFinalUrl;
+    const rawFinalUrl = explicitRawFinalUrl ?? safeRead(error, "finalUrl");
+    const finalUrl = rawFinalUrl ? sanitizeDiagnosticUrl(rawFinalUrl) : "";
+    const finalUrlDiffers = explicitRawFinalUrl !== undefined && explicitRawFinalUrl !== null ? explicitRawFinalUrl !== rawUrl || finalUrl !== url : finalUrl !== url;
+    if (finalUrl && finalUrlDiffers) {
+      p(`Final URL: ${finalUrl} (${sanitizeDiagnosticText(safeRead(config, "redirectCount") || 0)} redirects)`);
+    }
+    const errorUrls = safeRead(error, "urls");
+    const history = safeRead(config, "redirectHistory");
+    const urls = Array.isArray(errorUrls) ? errorUrls.map(sanitizeDiagnosticUrl) : Array.isArray(history) && history.length > 0 ? [url, ...history.map((entry) => sanitizeDiagnosticUrl(safeRead(entry, "url")))] : null;
     if (urls && urls.length > 1)
       p(`URL chain: ${urls.join(" → ")}`);
-    const res = error?.response;
+    const res = response;
     if (res) {
-      const enc = res.headers?.get?.("content-encoding") ?? res.headers?.["content-encoding"] ?? "";
-      const cl = res.headers?.get?.("content-length") ?? res.headers?.["content-length"] ?? "";
+      const headers = safeRead(res, "headers");
+      const enc = safeHeaderValue(headers, "content-encoding") ?? "";
+      const cl = safeHeaderValue(headers, "content-length") ?? "";
       let dataInfo = "none";
-      if (res.data !== undefined && res.data !== null) {
+      const data = safeRead(res, "data");
+      if (data !== undefined && data !== null) {
         try {
-          const s = typeof res.data === "string" ? res.data : JSON.stringify(res.data);
-          dataInfo = `${typeof res.data} (${s?.length ?? 0} chars)`;
+          const serialized = typeof data === "string" ? data : JSON.stringify(data);
+          dataInfo = `${typeof data} (${serialized?.length ?? 0} chars)`;
         } catch {
-          dataInfo = typeof res.data;
+          dataInfo = typeof data;
         }
       }
-      p(`Response: ${res.status} ${res.statusText || ""} | content-encoding: ${enc || "none"} | content-length: ${cl || "none"} | data: ${dataInfo}`);
+      p(`Response: ${sanitizeDiagnosticText(safeRead(res, "status") || "")} ` + `${sanitizeDiagnosticText(safeRead(res, "statusText") || "")} | ` + `content-encoding: ${sanitizeDiagnosticText(enc || "none")} | ` + `content-length: ${sanitizeDiagnosticText(cl || "none")} | data: ${dataInfo}`);
     } else {
       p("Response: none received");
     }
-    if (error?.phase)
-      p(`Timeout phase: ${error.phase}${error.elapsed ? ` (${error.elapsed}ms elapsed)` : ""}`);
-    p(`Flags: timeout=${!!error?.isTimeout} network=${!!error?.isNetworkError} retryable=${!!error?.isRetryable}`);
-    const attempts = config.errors;
-    if (attempts?.length) {
-      p(`Attempts (${attempts.length}):`);
-      attempts.forEach((a, i) => p(`  #${a.attempt ?? i + 1} ${a.error?.code || a.error?.name || "Error"}: ${a.error?.message || ""}`));
+    const phase = safeRead(error, "phase");
+    const elapsed = safeRead(error, "elapsed");
+    if (phase) {
+      p(`Timeout phase: ${sanitizeDiagnosticText(phase)}` + `${elapsed ? ` (${sanitizeDiagnosticText(elapsed)}ms elapsed)` : ""}`);
     }
-    if (error?.suggestion)
-      p(`Suggestion: ${error.suggestion}`);
-    if (error?.stack)
+    p(`Flags: timeout=${!!safeRead(error, "isTimeout")} ` + `network=${!!safeRead(error, "isNetworkError")} ` + `retryable=${!!safeRead(error, "isRetryable")}`);
+    const attempts = safeRead(config, "errors");
+    if (Array.isArray(attempts) && attempts.length > 0) {
+      p(`Attempts (${attempts.length}):`);
+      attempts.forEach((attempt, index) => {
+        const attemptError = safeRead(attempt, "error");
+        const attemptNumber = safeRead(attempt, "attempt") ?? index + 1;
+        const attemptCode = safeRead(attemptError, "code") || safeRead(attemptError, "name") || "Error";
+        p(`  #${sanitizeDiagnosticText(attemptNumber)} ${sanitizeDiagnosticText(attemptCode)}: ` + sanitizeDiagnosticText(safeRead(attemptError, "message") || ""));
+      });
+    }
+    const suggestion = safeRead(error, "suggestion");
+    if (suggestion)
+      p(`Suggestion: ${sanitizeDiagnosticText(suggestion)}`);
+    const stack = safeRead(error, "stack");
+    if (stack)
       p(`Stack:
-${String(error.stack).split(`
-`).slice(0, 5).join(`
-`)}`);
+${sanitizeDiagnosticStack(stack)}`);
     p("─────────────────────────────────────");
   } catch {}
 }

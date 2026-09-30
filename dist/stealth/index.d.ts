@@ -1,3 +1,5 @@
+import { ConnectionOptions, SecureContext } from 'node:tls';
+
 /**
  * Browser profile types for RezoStealth
  *
@@ -22,21 +24,34 @@ export interface TlsFingerprint {
 	/** TLS session timeout in seconds */
 	sessionTimeout: number;
 }
+/**
+ * HTTP/2 SETTINGS a browser sends on its connection preface. Every field is optional: a field that is absent is
+ * NOT sent (browsers omit most of them — Chrome sends 1/2/4/6 only, Firefox 1/2/4/5, Safari 2/4/3), so presence
+ * is part of the fingerprint. `connectionWindowSize` is the connection-level WINDOW_UPDATE increment sent right
+ * after SETTINGS (absent = no WINDOW_UPDATE).
+ */
 export interface Http2Settings {
 	/** SETTINGS_HEADER_TABLE_SIZE (0x01) */
-	headerTableSize: number;
+	headerTableSize?: number;
 	/** SETTINGS_ENABLE_PUSH (0x02) */
-	enablePush: boolean;
-	/** SETTINGS_MAX_CONCURRENT_STREAMS (0x03) — 0 = not sent (use server default) */
-	maxConcurrentStreams: number;
+	enablePush?: boolean;
+	/** SETTINGS_MAX_CONCURRENT_STREAMS (0x03) */
+	maxConcurrentStreams?: number;
 	/** SETTINGS_INITIAL_WINDOW_SIZE (0x04) */
-	initialWindowSize: number;
+	initialWindowSize?: number;
 	/** SETTINGS_MAX_FRAME_SIZE (0x05) */
-	maxFrameSize: number;
-	/** SETTINGS_MAX_HEADER_LIST_SIZE (0x06) — 0 = not sent */
-	maxHeaderListSize: number;
-	/** WINDOW_UPDATE on connection level sent after SETTINGS */
-	connectionWindowSize: number;
+	maxFrameSize?: number;
+	/** SETTINGS_MAX_HEADER_LIST_SIZE (0x06) */
+	maxHeaderListSize?: number;
+	/** Connection-level WINDOW_UPDATE increment sent after SETTINGS */
+	connectionWindowSize?: number;
+}
+/** Headers a browser adds only on one HTTP version (e.g. Chrome's `priority` and Firefox's `te: trailers` on HTTP/2). */
+export interface AdapterSpecificHeaders {
+	/** Sent on HTTP/1.1 requests only */
+	h1?: Record<string, string>;
+	/** Sent on HTTP/2 requests only */
+	h2?: Record<string, string>;
 }
 export interface ClientHints {
 	/** sec-ch-ua header value (brand list). null for non-Chromium browsers. */
@@ -109,12 +124,33 @@ export interface BrowserProfile {
 	clientHints: ClientHints;
 	/** Navigator properties */
 	navigator: NavigatorProperties;
+	/** Headers this browser adds only on one HTTP version; when absent the family default applies */
+	extraHeaders?: AdapterSpecificHeaders;
+	/** Extended-support release: stays in the random pools even when older than the family's current major − 2 */
+	esr?: boolean;
+}
+/**
+ * What the current runtime could and could not express of the profile's TLS material. Recorded on every
+ * resolved profile so that "stealth is configured" is never mistaken for "stealth is on the wire".
+ */
+export interface TlsBoundary {
+	/** The runtime that resolved the profile and whether its TLS stack honours cipher/group/sigalg shaping */
+	runtime: {
+		name: "node" | "bun" | "deno" | "browser" | "unknown";
+		tlsShaping: "available" | "unavailable";
+	};
+	/** Post-quantum hybrid group: expressible, rejected by the TLS stack (fallback list used), or not part of the profile */
+	hybridGroup: "supported" | "unsupported" | "not-requested";
+	/** The supported-group list actually configured after probing (OpenSSL names, key-share groups first) */
+	groups: string[];
+	/** ClientHello dimensions this runtime cannot express at all (documented, never hidden) */
+	notExpressible: string[];
 }
 /**
  * Union type of all built-in browser profile IDs.
  * Provides full autocomplete in IDEs.
  */
-export type BrowserProfileName = "chrome-120" | "chrome-124" | "chrome-128" | "chrome-131" | "chrome-131-android" | "firefox-115" | "firefox-121" | "firefox-128" | "firefox-133" | "safari-16.6" | "safari-17.4" | "safari-18.2" | "safari-17-ios" | "safari-18-ios" | "edge-120" | "edge-131" | "opera-115" | "brave-1.73";
+export type BrowserProfileName = "chrome-120" | "chrome-124" | "chrome-128" | "chrome-131" | "chrome-151" | "chrome-131-android" | "chrome-151-android" | "firefox-115" | "firefox-121" | "firefox-128" | "firefox-133" | "firefox-140-esr" | "firefox-154" | "safari-16.6" | "safari-17.4" | "safari-18.2" | "safari-26.6" | "safari-17-ios" | "safari-18-ios" | "safari-26-ios" | "edge-120" | "edge-131" | "edge-151" | "opera-115" | "opera-135" | "brave-1.73" | "brave-1.93";
 /**
  * Configuration options for RezoStealth.
  *
@@ -160,8 +196,17 @@ export interface ResolvedStealthProfile {
 	pseudoHeaderOrder: string[];
 	/** Default headers to apply (User-Agent, Accept, etc.) — lowercase keys */
 	defaultHeaders: Record<string, string>;
+	/** Headers added only on one HTTP version (Chrome `priority` on H2, Firefox `te: trailers` on H2, …) */
+	extraHeaders: AdapterSpecificHeaders;
 	/** Navigator properties for JS environment emulation */
 	navigator: BrowserProfile["navigator"];
+	/** What this runtime could express of the TLS material (probe results, fallbacks, boundaries) */
+	tlsBoundary: TlsBoundary;
+	/**
+	 * Deterministic digest of the transport fingerprint material (TLS ciphers, sigalgs, groups, versions, ALPN,
+	 * HTTP/2 settings and window). Two profiles with equal material share HTTP/2 sessions; different material never does.
+	 */
+	transportDigest: string;
 }
 export declare class RezoStealth {
 	private readonly _input;
@@ -229,29 +274,6 @@ export declare class RezoStealth {
 	static fromUserAgent(userAgent: string): RezoStealth;
 }
 /**
- * Create a `tls.SecureContext` that matches a browser's TLS fingerprint.
- *
- * Controls:
- * - Cipher suite order (major JA3 signal)
- * - Signature algorithms
- * - ECDH curves / supported groups
- * - TLS version range (min/max)
- *
- * @param fingerprint The browser's TLS fingerprint data
- * @returns A configured SecureContext ready for use with tls/https agents
- */
-export declare function createSecureContext(fingerprint: TlsFingerprint): tls.SecureContext;
-/**
- * Build TLS connection options from a fingerprint for use with `tls.connect()`.
- *
- * These options are passed directly to `tls.connect()` or `https.Agent` constructor.
- * Used by HTTP adapter for HTTPS requests and by HTTP/2 adapter for `http2.connect()`.
- *
- * @param fingerprint The browser's TLS fingerprint data
- * @returns Connection options compatible with `tls.ConnectionOptions`
- */
-export declare function buildTlsOptions(fingerprint: TlsFingerprint): tls.ConnectionOptions;
-/**
  * Resolve a profile input into a full ResolvedStealthProfile.
  *
  * @param input Profile name string, BrowserProfile object, or RezoStealthOptions
@@ -268,7 +290,30 @@ export declare function resolveProfile(input: BrowserProfileName | BrowserProfil
  * @returns The best matching BrowserProfile, or undefined if no match
  */
 export declare function detectProfileFromUserAgent(userAgent: string): BrowserProfile | undefined;
-/** Master registry of all browser profiles keyed by profile ID */
+/**
+ * Create a `tls.SecureContext` that matches a browser's TLS fingerprint.
+ *
+ * Controls:
+ * - Cipher suite order (major JA3 signal)
+ * - Signature algorithms (incl. SHA-1 ones via security level 0 when the profile advertises them)
+ * - ECDH curves / supported groups, with key shares for the first two as browsers send them
+ * - TLS version range (min/max)
+ *
+ * @param fingerprint The browser's TLS fingerprint data (already probed when it comes from a resolved profile)
+ * @returns A configured SecureContext ready for use with tls/https agents
+ */
+export declare function createSecureContext(fingerprint: TlsFingerprint): SecureContext;
+/**
+ * Build TLS connection options from a fingerprint for use with `tls.connect()`.
+ *
+ * These options are passed directly to `tls.connect()` or `https.Agent` constructor.
+ * Used by HTTP adapter for HTTPS requests and by HTTP/2 adapter for `http2.connect()`.
+ *
+ * @param fingerprint The browser's TLS fingerprint data
+ * @returns Connection options compatible with `tls.ConnectionOptions`
+ */
+export declare function buildTlsOptions(fingerprint: TlsFingerprint): ConnectionOptions;
+/** Master registry of all browser profiles keyed by profile ID (immutable; values are deep-frozen). */
 export declare const PROFILE_REGISTRY: ReadonlyMap<string, BrowserProfile>;
 /** Get a profile by its ID. Returns undefined if not found. */
 export declare function getProfile(id: string): BrowserProfile | undefined;
@@ -280,9 +325,9 @@ export declare function getProfilesByDevice(device: BrowserProfile["device"]): B
 export declare function listProfiles(): string[];
 /** List all available profile IDs for a given family. */
 export declare function listProfilesByFamily(family: BrowserProfile["family"]): string[];
-/** Get a random profile from the registry. */
+/** Get a random profile from the registry (retired identities excluded). */
 export declare function getRandomProfile(): BrowserProfile;
-/** Get a random profile from a specific family. */
+/** Get a random profile from a specific family (retired identities excluded). */
 export declare function getRandomProfileByFamily(family: BrowserProfile["family"]): BrowserProfile;
 
 export {};

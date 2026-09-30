@@ -148,21 +148,76 @@ function createRateLimitWaitEvent(status, waitTimeMs, attempt, maxAttempts, sour
   };
 }
 async function executeRateLimitWaitHooks(event, config) {
+  await executeControlledRateLimitWaitHooks(event, config, {});
+}
+function isRateLimitWaitActive(control) {
+  return control.signal?.aborted !== true && control.isActive?.() !== false;
+}
+async function executeControlledRateLimitWaitHooks(event, config, control) {
   const hooks = config.hooks?.onRateLimitWait;
   if (!hooks || hooks.length === 0)
-    return;
+    return isRateLimitWaitActive(control);
   for (const hook of hooks) {
+    if (!isRateLimitWaitActive(control))
+      return false;
     try {
-      await hook(event, config);
+      await awaitHookUnlessAborted(hook(event, control.hookConfig ?? config), control.signal);
     } catch (err) {
       if (config.debug) {
         console.log("[Rezo Debug] onRateLimitWait hook error:", err);
       }
     }
+    if (!isRateLimitWaitActive(control))
+      return false;
   }
+  return true;
+}
+function awaitHookUnlessAborted(hookResult, signal) {
+  if (!signal)
+    return Promise.resolve(hookResult).then(() => {
+      return;
+    });
+  if (signal.aborted)
+    return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(hookResult).then(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, (error) => {
+      signal.removeEventListener("abort", onAbort);
+      reject(error);
+    });
+  });
 }
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function sleepWhileRateLimitWaitActive(ms, control) {
+  if (!isRateLimitWaitActive(control))
+    return Promise.resolve(false);
+  if (ms <= 0)
+    return Promise.resolve(isRateLimitWaitActive(control));
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (completed) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      control.signal?.removeEventListener("abort", onAbort);
+      resolve(completed);
+    };
+    const onAbort = () => finish(false);
+    const timer = setTimeout(() => finish(isRateLimitWaitActive(control)), ms);
+    control.signal?.addEventListener("abort", onAbort, { once: true });
+    if (!isRateLimitWaitActive(control))
+      finish(false);
+  });
 }
 function normalizeHeaders(headers) {
   if (!headers)
@@ -178,7 +233,23 @@ function normalizeHeaders(headers) {
   }
 }
 async function handleRateLimitWait(ctx) {
-  const { status, headers, data, url, method, config, options, currentWaitAttempt } = ctx;
+  const {
+    status,
+    headers,
+    data,
+    url,
+    method,
+    config,
+    options,
+    currentWaitAttempt,
+    hookConfig,
+    signal,
+    isActive
+  } = ctx;
+  const control = { hookConfig, signal, isActive };
+  if (!isRateLimitWaitActive(control)) {
+    return { shouldRetry: false, waitAttempt: currentWaitAttempt, waitedMs: 0 };
+  }
   if (!shouldWaitOnStatus(status, options.waitOnStatus)) {
     return { shouldRetry: false, waitAttempt: currentWaitAttempt, waitedMs: 0 };
   }
@@ -195,11 +266,17 @@ async function handleRateLimitWait(ctx) {
     return { shouldRetry: false, waitAttempt: currentWaitAttempt, waitedMs: 0 };
   }
   const event = createRateLimitWaitEvent(status, waitTimeMs, nextAttempt, maxAttempts, extracted.source, extracted.sourcePath, url, method);
-  await executeRateLimitWaitHooks(event, config);
+  const hooksCompleted = await executeControlledRateLimitWaitHooks(event, config, control);
+  if (!hooksCompleted) {
+    return { shouldRetry: false, waitAttempt: currentWaitAttempt, waitedMs: 0 };
+  }
   if (config.debug) {
     console.log(`[Rezo Debug] Rate limit (${status}) - waiting ${waitTimeMs}ms (attempt ${nextAttempt}/${maxAttempts}, source: ${extracted.source}${extracted.sourcePath ? `:${extracted.sourcePath}` : ""})`);
   }
-  await sleep(waitTimeMs);
+  const waitCompleted = await sleepWhileRateLimitWaitActive(waitTimeMs, control);
+  if (!waitCompleted) {
+    return { shouldRetry: false, waitAttempt: currentWaitAttempt, waitedMs: 0 };
+  }
   return {
     shouldRetry: true,
     waitAttempt: nextAttempt,

@@ -1,11 +1,9 @@
 import { LRUCache } from './lru-cache.js';
-import { requireNodeModule } from '../utils/node-runtime.js';
-function getFsModule() {
-  return requireNodeModule("node:fs");
-}
-function getPathModule() {
-  return requireNodeModule("node:path");
-}
+import { createResponseCacheIdentity, identityMatchesTarget } from './response-cache-identity.js';
+import { ResponseCachePersistence } from './response-cache-persistence.js';
+import { registerCachePersistence } from './response-cache-readiness.js';
+import { registerResponseCacheBackend } from './bound-response-cache.js';
+import { RezoError } from '../errors/rezo-error.js';
 const DEFAULT_TTL = 3000000;
 const DEFAULT_MAX_ENTRIES = 500;
 const DEFAULT_METHODS = ["GET", "HEAD"];
@@ -13,8 +11,12 @@ const DEFAULT_METHODS = ["GET", "HEAD"];
 export class ResponseCache {
   memoryCache;
   config;
-  persistenceEnabled;
-  initialized = false;
+  persistence;
+  persistenceRefusalReported = false;
+  writeGeneration = 0;
+  lastWriteGeneration = new Map;
+  clearedBeforeHydration = false;
+  hydrationPending = false;
   constructor(options = true) {
     const config = options === true ? {} : options === false ? { enable: false } : options;
     this.config = {
@@ -26,92 +28,81 @@ export class ResponseCache {
       methods: config.methods ?? DEFAULT_METHODS,
       respectHeaders: config.respectHeaders ?? true
     };
-    this.persistenceEnabled = !!this.config.cacheDir && !!getFsModule() && !!getPathModule();
     this.memoryCache = new LRUCache({
       maxEntries: this.config.maxEntries,
-      ttl: this.config.ttl,
-      onEvict: this.persistenceEnabled ? (key, value) => this.persistToDisk(key, value) : undefined
+      ttl: this.config.ttl
     });
-    if (this.persistenceEnabled) {
-      this.initializePersistence();
+    this.persistence = new ResponseCachePersistence(this.config.cacheDir);
+    registerCachePersistence(this, this.persistence);
+    this.registerBoundBackend();
+    if (this.config.cacheDir) {
+      this.hydrationPending = true;
+      this.persistence.settled.then(() => this.hydrateFromDisk());
     }
   }
-  initializePersistence() {
-    if (!this.config.cacheDir || this.initialized)
-      return;
-    this.initializePersistenceAsync().catch(() => {
-      this.persistenceEnabled = false;
+  registerBoundBackend() {
+    const guard = (operation) => {
+      this.assertPersistenceHonoured();
+      return operation();
+    };
+    registerResponseCacheBackend(this, {
+      getByIdentity: (identity) => guard(() => this.getByIdentity(identity)),
+      setByIdentity: (identity, method, url, response, headers) => guard(() => this.setByIdentity(identity, method, url, response, headers)),
+      conditionalHeadersByIdentity: (identity) => guard(() => this.conditionalHeadersByIdentity(identity)),
+      updateRevalidatedByIdentity: (identity, responseHeaders) => guard(() => this.updateRevalidatedByIdentity(identity, responseHeaders))
     });
   }
-  async initializePersistenceAsync() {
-    if (!this.config.cacheDir)
+  assertPersistenceHonoured() {
+    if (this.persistence.state !== "unavailable" || this.persistenceRefusalReported)
       return;
-    const fs = getFsModule();
-    if (!fs?.promises) {
-      this.persistenceEnabled = false;
+    this.persistenceRefusalReported = true;
+    throw new RezoError("Cache Persistence Unavailable", { adapterUsed: null }, "REZ_CACHE_PERSISTENCE_UNAVAILABLE");
+  }
+  async hydrateFromDisk() {
+    const entries = await this.persistence.hydrate();
+    if (this.clearedBeforeHydration) {
+      this.hydrationPending = false;
       return;
     }
-    try {
-      await fs.promises.mkdir(this.config.cacheDir, { recursive: true });
-      await this.loadFromDiskAsync();
-      this.initialized = true;
-    } catch {
-      this.persistenceEnabled = false;
+    this.hydrationPending = false;
+    const now = Date.now();
+    for (const [identity, envelope] of entries) {
+      if (this.memoryCache.get(identity))
+        continue;
+      const remainingTTL = envelope.timestamp + envelope.ttl - now;
+      if (remainingTTL <= 0)
+        continue;
+      this.memoryCache.set(identity, this.toCachedResponse(envelope), remainingTTL);
     }
   }
-  getCacheFilePath(key) {
-    const path = getPathModule();
-    const safeKey = Buffer.from(key).toString("base64url");
-    return path && this.config.cacheDir ? path.join(this.config.cacheDir, `${safeKey}.json`) : `${this.config.cacheDir || ""}/${safeKey}.json`;
+  toCachedResponse(envelope) {
+    return {
+      status: envelope.status,
+      statusText: envelope.statusText,
+      headers: envelope.headers,
+      data: envelope.data,
+      url: "",
+      timestamp: envelope.timestamp,
+      ttl: envelope.ttl,
+      etag: envelope.etag,
+      lastModified: envelope.lastModified
+    };
   }
-  persistToDisk(key, entry) {
-    if (!this.persistenceEnabled || !this.config.cacheDir)
-      return;
-    const fs = getFsModule();
-    if (!fs?.promises)
-      return;
-    const filePath = this.getCacheFilePath(key);
-    fs.promises.writeFile(filePath, JSON.stringify(entry), "utf-8").catch(() => {});
-  }
-  async loadFromDiskAsync() {
-    if (!this.persistenceEnabled || !this.config.cacheDir)
-      return;
-    const fs = getFsModule();
-    const path = getPathModule();
-    if (!fs?.promises || !path)
-      return;
-    try {
-      const files = await fs.promises.readdir(this.config.cacheDir);
-      const now = Date.now();
-      for (const file of files) {
-        if (!file.endsWith(".json"))
-          continue;
-        try {
-          const filePath = path.join(this.config.cacheDir, file);
-          const content = await fs.promises.readFile(filePath, "utf-8");
-          const entry = JSON.parse(content);
-          if (entry.timestamp + entry.ttl > now) {
-            const key = Buffer.from(file.replace(".json", ""), "base64url").toString("utf-8");
-            const remainingTTL = entry.timestamp + entry.ttl - now;
-            this.memoryCache.set(key, entry, remainingTTL);
-          } else {
-            fs.promises.unlink(filePath).catch(() => {});
-          }
-        } catch {}
-      }
-    } catch {}
+  toEnvelope(identity, entry) {
+    return {
+      identity,
+      status: entry.status,
+      statusText: entry.statusText,
+      headers: entry.headers,
+      data: entry.data,
+      timestamp: entry.timestamp,
+      ttl: entry.ttl,
+      etag: entry.etag,
+      lastModified: entry.lastModified
+    };
   }
   generateKey(method, url, headers) {
-    let key = `${method.toUpperCase()}:${url}`;
-    if (headers) {
-      const accept = headers["accept"] || headers["Accept"];
-      const acceptEncoding = headers["accept-encoding"] || headers["Accept-Encoding"];
-      if (accept)
-        key += `:accept=${accept}`;
-      if (acceptEncoding)
-        key += `:encoding=${acceptEncoding}`;
-    }
-    return key;
+    return createResponseCacheIdentity({ method, url, mode: null, headers });
   }
   parseCacheControl(headers) {
     const cacheControl = headers["cache-control"] || headers["Cache-Control"] || "";
@@ -149,46 +140,42 @@ export class ResponseCache {
   get(method, url, headers) {
     if (!this.config.enable)
       return;
-    const key = this.generateKey(method, url, headers);
-    const cached = this.memoryCache.get(key);
-    if (!cached) {
-      if (this.persistenceEnabled) {
-        return this.loadSingleFromDisk(key);
-      }
-      return;
-    }
-    return cached;
+    const entry = this.getByIdentity(this.generateKey(method, url, headers));
+    if (entry && !entry.url)
+      entry.url = url;
+    return entry;
   }
-  loadSingleFromDisk(key) {
-    if (!this.persistenceEnabled || !this.config.cacheDir)
+  getByIdentity(identity) {
+    if (!this.config.enable)
       return;
-    const fs = getFsModule();
-    if (!fs)
+    const cached = this.memoryCache.get(identity);
+    if (cached)
+      return cached;
+    return this.loadSingleFromDisk(identity);
+  }
+  loadSingleFromDisk(identity) {
+    const envelope = this.persistence.readOne(identity);
+    if (!envelope)
       return;
-    try {
-      const filePath = this.getCacheFilePath(key);
-      if (!fs.existsSync(filePath))
-        return;
-      const content = fs.readFileSync(filePath, "utf-8");
-      const entry = JSON.parse(content);
-      const now = Date.now();
-      if (entry.timestamp + entry.ttl > now) {
-        const remainingTTL = entry.timestamp + entry.ttl - now;
-        this.memoryCache.set(key, entry, remainingTTL);
-        return entry;
-      } else {
-        fs.unlinkSync(filePath);
-        return;
-      }
-    } catch {
+    const remainingTTL = envelope.timestamp + envelope.ttl - Date.now();
+    if (remainingTTL <= 0) {
+      this.persistence.remove(identity);
       return;
     }
+    const entry = this.toCachedResponse(envelope);
+    this.memoryCache.set(identity, entry, remainingTTL);
+    return entry;
   }
   set(method, url, response, requestHeaders) {
+    this.storeEntry(method, url, response, requestHeaders);
+  }
+  storeEntry(method, url, response, requestHeaders, identity) {
     if (!this.config.enable)
       return;
     const responseHeaders = this.normalizeHeaders(response.headers);
     if (!this.isCacheable(method, response.status, responseHeaders))
+      return;
+    if ((responseHeaders["vary"] ?? "").trim() === "*")
       return;
     let ttl = this.config.ttl;
     if (this.config.respectHeaders) {
@@ -197,7 +184,7 @@ export class ResponseCache {
         ttl = cacheControl.maxAge;
       }
     }
-    const key = this.generateKey(method, url, requestHeaders);
+    const key = identity ?? this.generateKey(method, url, requestHeaders);
     const cached = {
       status: response.status,
       statusText: response.statusText,
@@ -210,9 +197,11 @@ export class ResponseCache {
       lastModified: responseHeaders["last-modified"]
     };
     this.memoryCache.set(key, cached, ttl);
-    if (this.persistenceEnabled) {
-      this.persistToDisk(key, cached);
-    }
+    this.lastWriteGeneration.set(key, ++this.writeGeneration);
+    this.persistence.write(key, this.toEnvelope(key, cached));
+  }
+  setByIdentity(identity, method, url, response, requestHeaders) {
+    this.storeEntry(method, url, response, requestHeaders, identity);
   }
   normalizeHeaders(headers) {
     const result = {};
@@ -234,7 +223,10 @@ export class ResponseCache {
     return result;
   }
   getConditionalHeaders(method, url, requestHeaders) {
-    const cached = this.get(method, url, requestHeaders);
+    return this.conditionalHeadersByIdentity(this.generateKey(method, url, requestHeaders));
+  }
+  conditionalHeadersByIdentity(identity) {
+    const cached = this.getByIdentity(identity);
     if (!cached)
       return;
     const headers = {};
@@ -247,10 +239,12 @@ export class ResponseCache {
     return Object.keys(headers).length > 0 ? headers : undefined;
   }
   updateRevalidated(method, url, newHeaders, requestHeaders) {
+    return this.updateRevalidatedByIdentity(this.generateKey(method, url, requestHeaders), newHeaders);
+  }
+  updateRevalidatedByIdentity(key, newHeaders) {
     if (!this.config.enable)
       return;
-    const key = this.generateKey(method, url, requestHeaders);
-    const cached = this.memoryCache.get(key) || this.loadSingleFromDisk(key);
+    const cached = this.getByIdentity(key);
     if (!cached)
       return;
     const normalizedHeaders = this.normalizeHeaders(newHeaders);
@@ -259,11 +253,7 @@ export class ResponseCache {
       const cacheControl = this.parseCacheControl(normalizedHeaders);
       if (cacheControl.noStore) {
         this.memoryCache.delete(key);
-        if (this.persistenceEnabled) {
-          const filePath = this.getCacheFilePath(key);
-          const fs = getFsModule();
-          fs?.promises?.unlink(filePath).catch(() => {});
-        }
+        this.persistence.remove(key);
         return;
       }
       if (cacheControl.maxAge !== undefined) {
@@ -279,39 +269,34 @@ export class ResponseCache {
       lastModified: normalizedHeaders["last-modified"] || cached.lastModified
     };
     this.memoryCache.set(key, updated, ttl);
-    if (this.persistenceEnabled) {
-      this.persistToDisk(key, updated);
-    }
+    this.lastWriteGeneration.set(key, ++this.writeGeneration);
+    this.persistence.write(key, this.toEnvelope(key, updated));
     return updated;
   }
   invalidate(url, method) {
-    const methods = method ? [method] : this.config.methods;
-    for (const m of methods) {
-      const key = this.generateKey(m, url);
+    const matches = (identity) => identityMatchesTarget(identity, method, url);
+    for (const key of this.memoryCache.keys()) {
+      if (!matches(key))
+        continue;
       this.memoryCache.delete(key);
-      if (this.persistenceEnabled) {
-        const filePath = this.getCacheFilePath(key);
-        const fs = getFsModule();
-        fs?.promises?.unlink(filePath).catch(() => {});
-      }
+      this.persistence.remove(key);
     }
+    const issuedAt = this.writeGeneration;
+    this.persistence.removeMatching(matches).then((removed) => {
+      for (const identity of removed) {
+        if ((this.lastWriteGeneration.get(identity) ?? 0) > issuedAt)
+          continue;
+        this.memoryCache.delete(identity);
+        this.lastWriteGeneration.delete(identity);
+      }
+    });
   }
   clear() {
     this.memoryCache.clear();
-    if (this.persistenceEnabled && this.config.cacheDir) {
-      const fs = getFsModule();
-      const path = getPathModule();
-      if (!fs?.promises || !path)
-        return;
-      const cacheDir = this.config.cacheDir;
-      fs.promises.readdir(cacheDir).then((files) => {
-        for (const file of files) {
-          if (file.endsWith(".json")) {
-            fs.promises.unlink(path.join(cacheDir, file)).catch(() => {});
-          }
-        }
-      }).catch(() => {});
-    }
+    this.lastWriteGeneration.clear();
+    if (this.hydrationPending)
+      this.clearedBeforeHydration = true;
+    this.persistence.removeAll();
   }
   get size() {
     return this.memoryCache.size;
@@ -320,7 +305,7 @@ export class ResponseCache {
     return this.config.enable;
   }
   get isPersistent() {
-    return this.persistenceEnabled;
+    return this.persistence.isReady;
   }
   getConfig() {
     return { ...this.config };

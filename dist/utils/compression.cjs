@@ -1,156 +1,95 @@
 const zlib = require("node:zlib");
 const { Transform } = require("node:stream");
-function looksCompressed(data, encoding) {
-  if (data.length < 2)
-    return false;
-  const enc = encoding.toLowerCase();
-  if (enc === "gzip" || enc === "x-gzip") {
-    return data[0] === 31 && data[1] === 139;
-  }
-  if (enc === "deflate" || enc === "x-deflate") {
-    return data[0] === 120;
-  }
-  if (enc === "zstd") {
-    return data[0] === 40 && data[1] === 181 && data[2] === 47 && data[3] === 253;
-  }
-  if (enc === "br" || enc === "brotli") {
-    let i = 0;
-    while (i < data.length && (data[i] === 32 || data[i] === 9 || data[i] === 10 || data[i] === 13)) {
-      i++;
-    }
-    if (i >= data.length) {
-      return false;
-    }
-    const firstNonWhitespace = data[i];
-    const textStarts = [
-      123,
-      91,
-      34,
-      39,
-      60,
-      48,
-      49,
-      50,
-      51,
-      52,
-      53,
-      54,
-      55,
-      56,
-      57,
-      45,
-      43,
-      46,
-      116,
-      102,
-      110,
-      84,
-      70,
-      78
-    ];
-    if (textStarts.includes(firstNonWhitespace)) {
-      return false;
-    }
-    if (data[0] === 239 && data.length >= 3 && data[1] === 187 && data[2] === 191) {
-      return false;
-    }
-    const checkLen = Math.min(16, data.length);
-    let printableCount = 0;
-    for (let j = 0;j < checkLen; j++) {
-      if (data[j] >= 32 && data[j] <= 126) {
-        printableCount++;
-      }
-    }
-    if (printableCount >= checkLen * 0.8) {
-      return false;
-    }
-    return true;
-  }
-  return true;
+const { ZstdFrameValidator } = require('./zstd-frame-validator.cjs');
+const ZSTD_UNAVAILABLE_MARKER = exports.ZSTD_UNAVAILABLE_MARKER = "REZ_INTERNAL_ZSTD_UNAVAILABLE";
+function zstdStreamsAvailable() {
+  return typeof zlib.createZstdDecompress === "function";
+}
+function createZstdUnavailableError() {
+  const error = new Error("zstd decompression is not available in this runtime (Node.js gained zlib zstd support in 22.15); the encoded body was not decoded");
+  error.code = ZSTD_UNAVAILABLE_MARKER;
+  return error;
 }
 
-class SmartDecompressStream extends Transform {
-  encoding;
-  decompressor = null;
-  isCompressed = null;
-  buffer = Buffer.alloc(0);
-  headerChecked = false;
-  passThrough = false;
+class StrictDecompressStream extends Transform {
+  decompressor;
+  zstdValidator;
+  unavailable;
+  flushSettled = false;
+  receivedBytes = 0;
   constructor(encoding) {
     super();
-    this.encoding = encoding.toLowerCase();
+    const normalized = encoding.toLowerCase();
+    this.zstdValidator = normalized === "zstd" ? new ZstdFrameValidator : null;
+    if (normalized === "zstd" && !zstdStreamsAvailable()) {
+      this.unavailable = createZstdUnavailableError();
+      this.decompressor = null;
+      return;
+    }
+    this.unavailable = null;
+    this.decompressor = StrictDecompressStream.createDecompressor(normalized);
+    if (this.decompressor) {
+      this.decompressor.on("data", (data) => this.push(data));
+      this.decompressor.on("error", (err) => {
+        if (this.flushSettled)
+          return;
+        this.flushSettled = true;
+        this.destroy(err);
+      });
+    }
   }
   _transform(chunk, _encoding, callback) {
-    if (!this.headerChecked) {
-      this.buffer = Buffer.concat([this.buffer, chunk]);
-      if (this.buffer.length >= 4) {
-        this.headerChecked = true;
-        this.isCompressed = looksCompressed(this.buffer, this.encoding);
-        if (this.isCompressed) {
-          this.decompressor = this.createDecompressor();
-          if (this.decompressor) {
-            this.decompressor.on("data", (data) => this.push(data));
-            this.decompressor.on("error", (err) => {
-              this.destroy(err);
-            });
-            this.decompressor.write(this.buffer);
-          } else {
-            this.passThrough = true;
-            this.push(this.buffer);
-          }
-        } else {
-          this.passThrough = true;
-          this.push(this.buffer);
-        }
-        this.buffer = Buffer.alloc(0);
-        callback();
+    this.receivedBytes += chunk.length;
+    if (this.unavailable) {
+      callback(this.unavailable);
+      return;
+    }
+    if (this.zstdValidator) {
+      this.zstdValidator.update(chunk);
+      const verdict = this.zstdValidator.finish();
+      if (verdict.fault) {
+        callback(new Error(`invalid zstd frame: ${verdict.fault}`));
         return;
       }
+    }
+    if (!this.decompressor) {
       callback();
       return;
     }
-    if (this.passThrough) {
-      this.push(chunk);
-      callback();
-    } else if (this.decompressor) {
-      this.decompressor.write(chunk, callback);
-    } else {
-      callback();
-    }
+    this.decompressor.write(chunk, callback);
   }
   _flush(callback) {
-    if (!this.headerChecked && this.buffer.length > 0) {
-      this.isCompressed = looksCompressed(this.buffer, this.encoding);
-      if (this.isCompressed && this.buffer.length > 0) {
-        const decompressor = this.createDecompressor();
-        if (decompressor) {
-          const chunks = [];
-          decompressor.on("data", (data) => chunks.push(data));
-          decompressor.on("end", () => {
-            this.push(Buffer.concat(chunks));
-            callback();
-          });
-          decompressor.on("error", () => {
-            this.push(this.buffer);
-            callback();
-          });
-          decompressor.end(this.buffer);
-          return;
-        }
-      }
-      this.push(this.buffer);
+    if (this.receivedBytes === 0) {
       callback();
       return;
     }
-    if (this.decompressor) {
-      this.decompressor.end();
-      this.decompressor.once("end", () => callback());
-    } else {
-      callback();
+    if (this.unavailable) {
+      callback(this.unavailable);
+      return;
     }
+    if (this.zstdValidator) {
+      const verdict = this.zstdValidator.finish();
+      if (!verdict.complete) {
+        callback(new Error(verdict.fault ? `invalid zstd frame: ${verdict.fault}` : "truncated zstd frame: the encoded body ended before the frame was structurally complete"));
+        return;
+      }
+    }
+    if (!this.decompressor) {
+      callback();
+      return;
+    }
+    const settle = (error) => {
+      if (this.flushSettled)
+        return;
+      this.flushSettled = true;
+      callback(error ?? null);
+    };
+    this.decompressor.once("end", () => settle());
+    this.decompressor.once("error", (err) => settle(err));
+    this.decompressor.end();
   }
-  createDecompressor() {
-    switch (this.encoding) {
+  static createDecompressor(encoding) {
+    switch (encoding) {
       case "gzip":
       case "x-gzip":
         return zlib.createGunzip();
@@ -158,7 +97,7 @@ class SmartDecompressStream extends Transform {
       case "x-deflate":
         return zlib.createInflate();
       case "gzip-raw":
-        return zlib.createInflate({ windowBits: 15 });
+        return zlib.createInflateRaw();
       case "br":
       case "brotli":
         return zlib.createBrotliDecompress();
@@ -179,8 +118,10 @@ class CompressionUtil {
       return response;
     }
     const encoding = contentEncoding.toLowerCase();
-    const smartStream = new SmartDecompressStream(encoding);
-    return response.pipe(smartStream);
+    if (!this.isSupported(encoding)) {
+      return response;
+    }
+    return response.pipe(new StrictDecompressStream(encoding));
   }
   static shouldDecompress(contentEncoding, config) {
     if (!config) {

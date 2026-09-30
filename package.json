@@ -1,6 +1,6 @@
 {
   "name": "rezo",
-  "version": "1.0.139",
+  "version": "1.0.140",
   "description": "Lightning-fast, enterprise-grade HTTP client for modern JavaScript. Full HTTP/2 support, intelligent cookie management, multiple adapters (HTTP, Fetch, cURL, XHR), streaming, proxy support (HTTP/HTTPS/SOCKS), and cross-environment compatibility.",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
@@ -143,7 +143,6 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
       "deno": "./dist/index.js",
       "bun": "./dist/index.js",
       "react-native": {
@@ -151,11 +150,22 @@
         "require": "./dist/platform/react-native.cjs",
         "default": "./dist/platform/react-native.js"
       },
+      "workerd": {
+        "types": "./dist/platform/worker.d.ts",
+        "require": "./dist/platform/worker.cjs",
+        "default": "./dist/platform/worker.js"
+      },
+      "edge-light": {
+        "types": "./dist/platform/worker.d.ts",
+        "require": "./dist/platform/worker.cjs",
+        "default": "./dist/platform/worker.js"
+      },
       "browser": {
         "types": "./dist/platform/browser.d.ts",
         "require": "./dist/platform/browser.cjs",
         "default": "./dist/platform/browser.js"
       },
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs",
       "default": "./dist/index.js"
@@ -236,6 +246,26 @@
       "require": "./dist/dom/index.cjs"
     },
     "./stealth": {
+      "react-native": {
+        "types": "./dist/stealth/universal.d.ts",
+        "require": "./dist/stealth/universal.cjs",
+        "default": "./dist/stealth/universal.js"
+      },
+      "browser": {
+        "types": "./dist/stealth/universal.d.ts",
+        "require": "./dist/stealth/universal.cjs",
+        "default": "./dist/stealth/universal.js"
+      },
+      "workerd": {
+        "types": "./dist/stealth/universal.d.ts",
+        "require": "./dist/stealth/universal.cjs",
+        "default": "./dist/stealth/universal.js"
+      },
+      "edge-light": {
+        "types": "./dist/stealth/universal.d.ts",
+        "require": "./dist/stealth/universal.cjs",
+        "default": "./dist/stealth/universal.js"
+      },
       "types": "./dist/stealth/index.d.ts",
       "import": "./dist/stealth/index.js",
       "require": "./dist/stealth/index.cjs"

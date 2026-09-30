@@ -1,28 +1,72 @@
+const { copyRequestFetchOptions, omitsRequestJar } = require('./request-fetch-options.cjs');
 const { RezoCookieJar } = require('../cookies/cookie-jar.cjs');
 const RezoFormData = require('./form-data.cjs');
-const { RezoHeaders } = require('./headers.cjs');
+const { prepareRedirectHeaders, RezoHeaders } = require('./headers.cjs');
 const { RezoURLSearchParams } = require('./data-operations.cjs');
 const { parseProxyString } = require('../proxy/parse.cjs');
 const { createDefaultHooks, mergeHooks, serializeHooks } = require('../core/hooks.cjs');
 const { importNodeModule } = require('./node-runtime.cjs');
+const { RezoError } = require('../errors/rezo-error.cjs');
+const { isRawBody: isBinaryBody } = require('./request-body.cjs');
 const hasBuffer = typeof Buffer !== "undefined";
+const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function encodeBase64Utf8(value) {
+  const bytes = [];
+  for (const character of value) {
+    let codePoint = character.codePointAt(0);
+    if (codePoint >= 55296 && codePoint <= 57343)
+      codePoint = 65533;
+    if (codePoint <= 127) {
+      bytes.push(codePoint);
+    } else if (codePoint <= 2047) {
+      bytes.push(192 | codePoint >> 6, 128 | codePoint & 63);
+    } else if (codePoint <= 65535) {
+      bytes.push(224 | codePoint >> 12, 128 | codePoint >> 6 & 63, 128 | codePoint & 63);
+    } else {
+      bytes.push(240 | codePoint >> 18, 128 | codePoint >> 12 & 63, 128 | codePoint >> 6 & 63, 128 | codePoint & 63);
+    }
+  }
+  let encoded = "";
+  for (let index = 0;index < bytes.length; index += 3) {
+    const first = bytes[index];
+    const second = bytes[index + 1];
+    const third = bytes[index + 2];
+    encoded += BASE64_ALPHABET[first >> 2];
+    encoded += BASE64_ALPHABET[(first & 3) << 4 | (second ?? 0) >> 4];
+    encoded += second === undefined ? "=" : BASE64_ALPHABET[(second & 15) << 2 | (third ?? 0) >> 6];
+    encoded += third === undefined ? "=" : BASE64_ALPHABET[third & 63];
+  }
+  return encoded;
+}
+function inspectRedirectHeaders(init) {
+  if (!init)
+    return { carrier: undefined, hasCookieDecision: false };
+  const knownIterable = init instanceof Headers || init instanceof RezoHeaders || Array.isArray(init);
+  const initObject = Object(init);
+  const genericIterator = Object.keys(initObject).length === 0 ? Reflect.get(initObject, Symbol.iterator) : undefined;
+  if (knownIterable || typeof genericIterator === "function") {
+    const entries = [];
+    let hasCookieDecision = false;
+    for (const [name, value] of init) {
+      const normalizedName = String(name);
+      if (normalizedName.toLowerCase() === "cookie")
+        hasCookieDecision = true;
+      entries.push([normalizedName, String(value)]);
+    }
+    return { carrier: entries, hasCookieDecision };
+  }
+  return {
+    carrier: init,
+    hasCookieDecision: Object.keys(initObject).some((name) => name.toLowerCase() === "cookie")
+  };
+}
+function parseOutgoingCookies(value, url) {
+  const outgoingJar = new RezoCookieJar;
+  outgoingJar.setCookiesSync(value, url);
+  return outgoingJar.getCookiesForRequest(url);
+}
 function isBuffer(value) {
   return hasBuffer && Buffer.isBuffer(value);
-}
-function isBinaryBody(value) {
-  if (value == null)
-    return false;
-  if (isBuffer(value))
-    return true;
-  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value))
-    return true;
-  if (typeof Blob !== "undefined" && value instanceof Blob)
-    return true;
-  if (typeof ReadableStream !== "undefined" && value instanceof ReadableStream)
-    return true;
-  if (typeof value.pipe === "function")
-    return true;
-  return false;
 }
 const ERROR_INFO = exports.ERROR_INFO = {
   ECONNREFUSED: {
@@ -200,6 +244,8 @@ async function getDefaultConfig(config = {}, proxyManager) {
   return {
     baseURL: config.baseURL,
     headers: config.headers,
+    beforeRedirect: config.beforeRedirect,
+    onRedirect: config.onRedirect,
     rejectUnauthorized: config.rejectUnauthorized,
     httpAgent: config.httpAgent,
     httpsAgent: config.httpsAgent,
@@ -210,6 +256,7 @@ async function getDefaultConfig(config = {}, proxyManager) {
     proxy: config.proxy,
     followRedirects: config.followRedirects,
     useCookies: config.disableJar === true ? false : true,
+    disableJar: config.disableJar,
     fs: await getFS(),
     timeout: config.timeout ?? config.requestTimeout,
     hooks: config.hooks,
@@ -236,6 +283,7 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
     isNew = true;
     const settions = createConfig(options, jar, addedOptions);
     config = { ...settions.config };
+    config.setSignal = setSignal.bind(config);
     options = settions.options;
   }
   options.headers = buildHeaders(options.headers);
@@ -243,7 +291,7 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
   let headers = optHeaders;
   if (optHeaders.has("Cookie")) {
     headers = new RezoHeaders(optHeaders.toObject());
-    if (!config.useCookies) {
+    if (!config.useCookies && !omitsRequestJar(options)) {
       config.useCookies = true;
     }
     optHeaders.delete("Cookie");
@@ -280,10 +328,17 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
     fetchOptions.url = options.url;
   }
   let contentType = options.contentType || headers.get("Content-Type") || undefined;
-  if (addedOptions && addedOptions.customHeaders) {
-    headers = addedOptions.customHeaders instanceof RezoHeaders ? addedOptions.customHeaders : new RezoHeaders(addedOptions.customHeaders);
+  const structuredAuth = options.auth;
+  if (structuredAuth?.username !== undefined && structuredAuth?.password !== undefined && !headers.has("Authorization")) {
+    const encoded = encodeBase64Utf8(`${structuredAuth.username}:${structuredAuth.password}`);
+    headers.set("Authorization", `Basic ${encoded}`);
   }
-  if (headers.has("Cookie")) {
+  const customHeaderInspection = inspectRedirectHeaders(addedOptions?.customHeaders);
+  const hasExplicitCookieDecision = omitsRequestJar(options) || addedOptions?.hookCookieDecision === true || customHeaderInspection.hasCookieDecision;
+  if (customHeaderInspection.carrier) {
+    headers = prepareRedirectHeaders(headers, "same-origin", customHeaderInspection.carrier);
+  }
+  if (headers.has("Cookie") && !hasExplicitCookieDecision) {
     const cookieString = headers.get("Cookie");
     if (config.useCookies && !addedOptions.redirectedUrl && !addedOptions.isRedirected) {
       cookieJar.setCookiesSync(cookieString, options.url instanceof URL ? options.url.href : options.url);
@@ -323,13 +378,19 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
     requestCookies = cookieJar.getCookiesForRequest(cookieUrl);
     cookiesString = cookieJar.getCookieHeader(cookieUrl);
   }
+  if (hasExplicitCookieDecision) {
+    const outgoingCookie = headers.get("Cookie");
+    requestCookies = outgoingCookie ? parseOutgoingCookies(outgoingCookie, cookieUrl) : [];
+  }
   if (options.xsrfCookieName && options.xsrfHeaderName && requestCookies.length > 0) {
     const xsrfCookie = requestCookies.find((c) => c.key === options.xsrfCookieName);
     if (xsrfCookie && xsrfCookie.value) {
       headers.set(options.xsrfHeaderName, xsrfCookie.value);
     }
   }
-  if (requestCookies.length > 0 && config) {
+  if (config && hasExplicitCookieDecision) {
+    config.requestCookies = [...requestCookies];
+  } else if (requestCookies.length > 0 && config) {
     if (!config.requestCookies) {
       config.requestCookies = requestCookies;
     } else {
@@ -339,7 +400,7 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
       }
     }
   }
-  if (cookiesString) {
+  if (cookiesString && !hasExplicitCookieDecision) {
     headers.set("Cookie", cookiesString);
   }
   if (options.body) {
@@ -347,12 +408,20 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
   }
   const isFormData = fetchOptions.body && (fetchOptions.body instanceof FormData || fetchOptions.body instanceof RezoFormData);
   const isURLEncoded = fetchOptions.body && (fetchOptions.body instanceof URLSearchParams || fetchOptions.body instanceof RezoURLSearchParams);
+  if (fetchOptions.body instanceof RezoFormData && contentType && contentType === fetchOptions.body.getHeaders()["content-type"]) {
+    headers.delete("Content-Type");
+    headers.delete("Content-Length");
+    contentType = undefined;
+  }
+  if (isFormData && contentType)
+    headers.set("Content-Type", contentType);
   if (isURLEncoded) {
     fetchOptions.body = fetchOptions.body.toString();
-    if (!contentType) {
+    if (!contentType && !headers.has("Content-Type")) {
       contentType = "application/x-www-form-urlencoded";
-      headers.set("Content-Type", contentType);
     }
+    if (contentType)
+      headers.set("Content-Type", contentType);
   }
   if (!isFormData && !isURLEncoded) {
     if (options.multipart || options.json || options.formData || options.form) {
@@ -401,10 +470,16 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
         }
         headers.set("Content-Type", contentType);
       } else if (options.json) {
-        fetchOptions.body = options.body;
+        fetchOptions.body = options.body !== undefined ? options.body : JSON.stringify(options.json);
+        if (isNew && options.body === undefined) {
+          config.originalBody = fetchOptions.body;
+        }
         contentType = "application/json";
         headers.set("Content-Type", contentType);
       }
+    } else if (isBinaryBody(fetchOptions.body)) {
+      if (contentType)
+        headers.set("Content-Type", contentType);
     } else if (contentType) {
       const type = contentType.toLowerCase();
       if (type.includes("json")) {
@@ -482,7 +557,7 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
       }
     }
   }
-  if (options.withoutContentType || isFormData) {
+  if (options.withoutContentType) {
     headers.delete("Content-Type");
   }
   if (options.withoutBodyOnRedirect && addedOptions.isRedirected) {
@@ -493,10 +568,10 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
     if (!addedOptions.customHeaders)
       headers.set("Referer", addedOptions.redirectedUrl);
   }
-  if (!config.useCookies) {
+  if (!config.useCookies && !hasExplicitCookieDecision) {
     headers.delete("Cookie");
   }
-  if (fetchOptions.body && (fetchOptions.body instanceof FormData || fetchOptions.body instanceof RezoFormData)) {
+  if (!isFormData && fetchOptions.body && (fetchOptions.body instanceof FormData || fetchOptions.body instanceof RezoFormData)) {
     headers.delete("Content-Type");
   }
   if (options.proxy) {
@@ -535,11 +610,19 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
     config.originalRequest = fetchOptions;
   }
   fetchOptions.rejectUnauthorized = options.rejectUnauthorized;
+  copyRequestFetchOptions(options, fetchOptions);
   fetchOptions.timeout = options.timeout;
+  fetchOptions.validateStatus = options.validateStatus;
   if (options.signal)
     fetchOptions.signal = options.signal;
   if (options.auth)
     fetchOptions.auth = options.auth;
+  if (options.xsrfCookieName !== undefined) {
+    fetchOptions.xsrfCookieName = options.xsrfCookieName;
+  }
+  if (options.xsrfHeaderName !== undefined) {
+    fetchOptions.xsrfHeaderName = options.xsrfHeaderName;
+  }
   const keepAliveOpt = options.keepAlive ?? addedOptions?.defaultOptions?.keepAlive;
   if (keepAliveOpt !== undefined)
     fetchOptions.keepAlive = keepAliveOpt;
@@ -549,6 +632,16 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
   const acceptPartialBodyOpt = options.acceptPartialBody ?? addedOptions?.defaultOptions?.acceptPartialBody;
   if (acceptPartialBodyOpt !== undefined)
     fetchOptions.acceptPartialBody = acceptPartialBodyOpt;
+  const instanceDefaults = addedOptions?.defaultOptions;
+  const dnsLookupOpt = options.dnsLookup ?? instanceDefaults?.dnsLookup;
+  if (dnsLookupOpt !== undefined)
+    fetchOptions.dnsLookup = dnsLookupOpt;
+  const dnsCacheOpt = options.dnsCache ?? instanceDefaults?.dnsCache;
+  if (dnsCacheOpt !== undefined)
+    fetchOptions.dnsCache = dnsCacheOpt;
+  const requestLocalDnsCache = options._dnsCache ?? instanceDefaults?._dnsCache;
+  if (requestLocalDnsCache)
+    fetchOptions._dnsCache = requestLocalDnsCache;
   if (options.sessionId) {
     fetchOptions.sessionId = options.sessionId;
   }
@@ -563,6 +656,9 @@ function prepareHTTPOptions(options, jar, addedOptions, config) {
   if (config.fileName) {
     fetchOptions.fileName = config.fileName;
   }
+  const resolvedRedirectPolicy = config;
+  fetchOptions.followRedirects = resolvedRedirectPolicy.followRedirects;
+  fetchOptions.maxRedirects = config.maxRedirects;
   return {
     fetchOptions,
     config,
@@ -585,7 +681,7 @@ function createConfig(options, jar, addedOptions) {
     httpAgent = defaultOptions.httpAgent,
     rejectUnauthorized = defaultOptions.rejectUnauthorized,
     httpsAgent = defaultOptions.httpsAgent,
-    followRedirects = true,
+    followRedirects,
     withCredentials = typeof defaultOptions.withCredentials === "boolean" ? defaultOptions.withCredentials : undefined,
     enableRedirectCycleDetection = typeof defaultOptions.enableRedirectCycleDetection === "boolean" ? defaultOptions.enableRedirectCycleDetection : false
   } = options;
@@ -604,29 +700,21 @@ function createConfig(options, jar, addedOptions) {
     requestOptions.treat302As303 = true;
   }
   requestOptions.useCookies = typeof useCookies === "boolean" ? useCookies : typeof withCredentials === "boolean" ? withCredentials : true;
-  requestOptions.proxy = requestOptions.proxy || defaultOptions.proxy;
-  const debug = requestOptions.debug !== undefined ? requestOptions.debug : false;
+  requestOptions.proxy = Reflect.get(options, "proxy") === false ? undefined : requestOptions.proxy ?? defaultOptions.proxy;
   const type = getEnvironment();
   if (type !== "node" && type !== "bun" && type !== "deno") {
     if (httpAgent || httpsAgent) {
       throw new Error(`Custom HTTP or HTTPS agents are not supported in '${type}' mode. Please remove 'httpAgent' or 'httpsAgent'.`);
     }
-    if (rejectUnauthorized && debug) {
-      console.warn(`[WARNING] 'rejectUnauthorized' is enabled in '${type}' mode.
-` + `The built-in fetch API does not support this option directly.
-` + `As a workaround, process.env.NODE_TLS_REJECT_UNAUTHORIZED is being set to '0'.
-` + `⚠️ This disables TLS certificate verification and can expose sensitive data.
-` + `⚠️ Avoid using 'rejectUnauthorized' in '${type}' environments unless absolutely necessary.`);
-      if (typeof process !== "undefined")
-        process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-    }
   }
-  const methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
-  const method = methods && methods.includes(options.method.toUpperCase()) ? options.method?.toUpperCase() : "GET";
+  const method = options.method.toUpperCase();
+  if (!/^[!#$%&'*+.^_`|~\da-z-]+$/iu.test(method)) {
+    throw new RezoError("Invalid HTTP method token.", requestOptions, "ERR_INVALID_ARG_TYPE");
+  }
   requestOptions.method = method;
   if (options.startNewRequest)
     jar?.removeAllCookiesSync();
-  const maxRedirects = requestOptions.maxRedirects || 10;
+  const maxRedirects = requestOptions.maxRedirects ?? defaultOptions.maxRedirects ?? 10;
   const saveTo = requestOptions.saveTo || requestOptions.fileName;
   let fileName = undefined;
   requestOptions.timeout = requestOptions.timeout ?? defaultOptions.timeout;
@@ -647,14 +735,25 @@ function createConfig(options, jar, addedOptions) {
     requestOptions.validateStatus = undefined;
   }
   const baseURL = requestOptions.baseURL && (requestOptions.baseURL.startsWith("http://") || requestOptions.baseURL.startsWith("https://")) ? requestOptions.baseURL : defaultOptions.baseURL && (defaultOptions.baseURL.startsWith("http://") || defaultOptions.baseURL.startsWith("https://")) ? defaultOptions.baseURL : undefined;
-  const url = new URL(options.url, baseURL);
+  let url;
+  try {
+    url = new URL(options.url, baseURL);
+  } catch (error) {
+    const requested = String(options.url);
+    const isRelative = !/^[a-z][a-z0-9+.-]*:/iu.test(requested);
+    if (isRelative && baseURL === undefined) {
+      throw new RezoError(`Invalid URL ${JSON.stringify(requested)}: a relative URL needs a baseURL (none configured)`, requestOptions, "ERR_INVALID_URL");
+    }
+    throw error;
+  }
   const paramsSerializer = requestOptions.paramsSerializer;
   if (options.params && paramsSerializer) {
     const serialized = paramsSerializer(options.params);
     if (serialized) {
       const searchParams = new URLSearchParams(serialized);
+      const existingKeys = new Set(url.searchParams.keys());
       searchParams.forEach((value, key) => {
-        if (!url.searchParams.has(key)) {
+        if (!existingKeys.has(key)) {
           url.searchParams.append(key, value);
         }
       });
@@ -685,9 +784,11 @@ function createConfig(options, jar, addedOptions) {
     method: requestOptions.method,
     headers: requestOptions.headers,
     maxRedirects,
+    followRedirects: requestOptions.followRedirects,
     retryAttempts: 0,
+    errors: [],
     timeout: typeof requestOptions.timeout === "number" ? requestOptions.timeout : null,
-    disableJar: typeof defaultOptions.disableJar === "boolean" ? defaultOptions.disableJar : false,
+    disableJar: omitsRequestJar(options) || (typeof defaultOptions.disableJar === "boolean" ? defaultOptions.disableJar : false),
     withCredentials: typeof withCredentials === "boolean" ? withCredentials : typeof defaultOptions.withCredentials === "boolean" ? defaultOptions.withCredentials : false,
     useCookies: typeof requestOptions.useCookies === "boolean" ? requestOptions.useCookies : true,
     jar: requestOptions.jar || jar,
@@ -713,11 +814,16 @@ function createConfig(options, jar, addedOptions) {
   if (requestOptions.encoding || defaultOptions.encoding) {
     config.encoding = requestOptions.encoding || defaultOptions.encoding;
   }
+  const canonicalRedirectCallback = requestOptions.beforeRedirect ?? requestOptions.onRedirect ?? defaultOptions.beforeRedirect ?? defaultOptions.onRedirect;
+  if (canonicalRedirectCallback) {
+    config.beforeRedirect = canonicalRedirectCallback;
+    config.onRedirect = canonicalRedirectCallback;
+  }
   if (requestOptions.beforeRedirect || defaultOptions.beforeRedirect) {
-    config.beforeRedirect = requestOptions.beforeRedirect || defaultOptions.beforeRedirect;
+    config.beforeRedirect = canonicalRedirectCallback;
   }
   if (requestOptions.onRedirect || defaultOptions.onRedirect) {
-    config.onRedirect = requestOptions.onRedirect || defaultOptions.onRedirect;
+    config.onRedirect = canonicalRedirectCallback;
   }
   config.requestCookies = [];
   config.responseCookies = {
@@ -748,9 +854,9 @@ function createConfig(options, jar, addedOptions) {
   const isSupportedRuntime = type === "node" || type === "bun" || type === "deno";
   if (saveTo) {
     if (!isSupportedRuntime) {
-      throw new Error(`You can only use this feature in Node.js, Deno or Bun and not available in Edge or Browser.`);
+      throw new RezoError("Saving a download to a file needs a filesystem: `saveTo`/`fileName` is not available in browser or edge runtimes (use Node.js, Bun or Deno)", config, "REZ_UNSUPPORTED_CAPABILITY");
     } else if (!fs) {
-      throw new Error(`You can only use this feature in nodejs module, not in Edge module.`);
+      throw new RezoError("Saving a download to a file needs the node:fs module, which this runtime or build could not load (a bundler that strips node:* modules, or a loader that does not service dynamic import)", config, "REZ_UNSUPPORTED_CAPABILITY");
     }
     const basename = (p) => p.split(/[/\\]/).pop() || "";
     const dirname = (p) => {

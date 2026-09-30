@@ -1,6 +1,9 @@
 const http = require("node:http");
 const https = require("node:https");
 const tls = require("node:tls");
+const { createHmac, randomBytes } = require("node:crypto");
+const { isNativeAgentPfxKnownUnsupported } = require('../platform/native-tls-capabilities.cjs');
+const { RezoError } = require('../errors/rezo-error.cjs');
 const { getGlobalDNSCache } = require('../cache/dns-cache.cjs');
 const DEFAULT_CONFIG = {
   keepAlive: true,
@@ -19,6 +22,7 @@ class AgentPool {
   config;
   dnsCache = null;
   evictionTimer = null;
+  identitySecret = randomBytes(32);
   constructor(config = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     if (this.config.dnsCache) {
@@ -30,29 +34,40 @@ class AgentPool {
     }
   }
   buildAgentKey(options = {}) {
-    const parts = [];
-    if (options.proxy) {
-      parts.push(`proxy:${options.proxy.protocol}://${options.proxy.host}:${options.proxy.port}`);
-      if (options.proxy.auth) {
-        parts.push(`auth:${options.proxy.auth.username}`);
+    const digest = createHmac("sha256", this.identitySecret);
+    const add = (value) => {
+      if (value === undefined) {
+        digest.update("N;");
+        return;
+      }
+      const bytes = Buffer.from(value);
+      digest.update(`B${bytes.length}:`).update(bytes);
+    };
+    const proxy = options.proxy;
+    digest.update(proxy ? "P1;" : "P0;");
+    if (proxy) {
+      add(proxy.protocol);
+      add(proxy.host);
+      add(String(proxy.port));
+      digest.update(proxy.auth ? "A1;" : "A0;");
+      if (proxy.auth) {
+        add(proxy.auth.username);
+        add(proxy.auth.password);
       }
     }
-    if (options.rejectUnauthorized === false) {
-      parts.push("insecure");
-    }
-    if (options.ca) {
-      parts.push(`ca:${typeof options.ca === "string" ? options.ca.slice(0, 32) : "buffer"}`);
-    }
-    if (options.cert) {
-      parts.push(`cert:${typeof options.cert === "string" ? options.cert.slice(0, 32) : "buffer"}`);
-    }
-    if (options.servername) {
-      parts.push(`sni:${options.servername}`);
-    }
-    if (options.localAddress) {
-      parts.push(`local:${options.localAddress}`);
-    }
-    return parts.length > 0 ? parts.join("|") : "default";
+    digest.update(options.rejectUnauthorized !== false ? "V1;" : "V0;");
+    const ca = options.ca === undefined ? undefined : Array.isArray(options.ca) ? options.ca : [options.ca];
+    digest.update(ca === undefined ? "C-;" : `C${ca.length};`);
+    if (ca)
+      for (const certificate of ca)
+        add(certificate);
+    add(options.cert);
+    add(options.key);
+    add(options.pfx);
+    add(options.passphrase);
+    add(options.servername);
+    add(options.localAddress);
+    return digest.digest("hex");
   }
   createLookupFunction() {
     return;
@@ -111,7 +126,12 @@ class AgentPool {
       ].join(":"),
       minVersion: "TLSv1.2",
       maxVersion: "TLSv1.3",
-      sessionTimeout: 3600
+      sessionTimeout: 3600,
+      ca: tlsOptions?.ca,
+      cert: tlsOptions?.cert,
+      key: tlsOptions?.key,
+      pfx: tlsOptions?.pfx,
+      passphrase: tlsOptions?.passphrase
     });
     const agentOptions = {
       keepAlive: this.config.keepAlive,
@@ -142,6 +162,39 @@ class AgentPool {
     return agent;
   }
   getHttpsAgent(options) {
+    const pfx = options?.pfx;
+    if (pfx !== undefined && isNativeAgentPfxKnownUnsupported()) {
+      const errorConfig = Object.freeze({ adapterUsed: null });
+      throw new RezoError("PFX is not supported by this native HTTPS agent provider", errorConfig, "REZ_UNSUPPORTED_CAPABILITY");
+    }
+    const copy = (value) => Buffer.isBuffer(value) ? Buffer.from(value) : value;
+    const {
+      ca,
+      cert,
+      key: privateKey,
+      passphrase,
+      servername,
+      localAddress,
+      rejectUnauthorized,
+      proxy
+    } = options ?? {};
+    const auth = proxy?.auth;
+    options = {
+      ca: Array.isArray(ca) ? ca.map((value) => copy(value)) : copy(ca),
+      cert: copy(cert),
+      key: copy(privateKey),
+      pfx: copy(pfx),
+      passphrase,
+      servername,
+      localAddress,
+      proxy: proxy ? {
+        protocol: proxy.protocol,
+        host: proxy.host,
+        port: proxy.port,
+        auth: auth ? { username: auth.username, password: auth.password } : undefined
+      } : undefined,
+      rejectUnauthorized: rejectUnauthorized !== false
+    };
     const key = this.buildAgentKey(options);
     let pooled = this.httpsAgents.get(key);
     if (pooled) {

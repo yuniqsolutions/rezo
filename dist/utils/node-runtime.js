@@ -1,3 +1,8 @@
+function getBuiltinModuleResolver() {
+  const host = globalThis.process;
+  const resolver = host?.getBuiltinModule;
+  return typeof resolver === "function" ? resolver.bind(host) : undefined;
+}
 function getDynamicRequire() {
   try {
     return Function('return typeof require !== "undefined" ? require : undefined;')();
@@ -7,15 +12,16 @@ function getDynamicRequire() {
 }
 const dynamicImport = Function("specifier", "return import(specifier);");
 export function requireNodeModule(specifier) {
-  const dynamicRequire = getDynamicRequire();
-  if (!dynamicRequire) {
-    return;
+  for (const resolve of [getBuiltinModuleResolver(), getDynamicRequire()]) {
+    if (!resolve)
+      continue;
+    try {
+      const resolved = resolve(specifier);
+      if (resolved)
+        return resolved;
+    } catch {}
   }
-  try {
-    return dynamicRequire(specifier);
-  } catch {
-    return;
-  }
+  return;
 }
 export async function importNodeModule(specifier) {
   try {

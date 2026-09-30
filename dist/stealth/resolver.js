@@ -1,6 +1,32 @@
 import { UAParser } from "ua-parser-js";
 import { getProfile, getProfilesByFamily, getRandomProfile, getRandomProfileByFamily, PROFILE_REGISTRY } from './profiles/index.js';
-import { expandPseudoOrder } from './profiles/constants.js';
+import { expandPseudoOrder, FAMILY_EXTRA_HEADERS, FAMILY_NAVIGATION_HEADERS } from './profiles/constants.js';
+import { RezoError, RezoErrorCode } from '../errors/rezo-error.js';
+const universalProbe = (fingerprint) => ({
+  tls: { ...fingerprint },
+  boundary: { runtime: { name: typeof globalThis.window !== "undefined" ? "browser" : "unknown", tlsShaping: "unavailable" }, hybridGroup: "not-requested", groups: [], notExpressible: ["ciphers", "sigalgs", "groups", "clientHelloExtensionOrder", "grease", "padding"] }
+});
+let tlsProbe = universalProbe;
+let rotationCounter = 0;
+export function setTlsProbe(probe) {
+  tlsProbe = probe;
+}
+const DESKTOP_PLATFORMS = ["windows", "macos", "linux"];
+const H2_SETTING_IDS = { headerTableSize: 1, enablePush: 2, maxConcurrentStreams: 3, initialWindowSize: 4, maxFrameSize: 5, maxHeaderListSize: 6 };
+function h2SettingsOrderAscending(settings) {
+  const ids = Object.keys(settings).filter((key) => (key in H2_SETTING_IDS) && settings[key] !== undefined).map((key) => H2_SETTING_IDS[key]);
+  return ids.every((id, index) => index === 0 || ids[index - 1] < id);
+}
+const clone = (value) => typeof structuredClone === "function" ? structuredClone(value) : JSON.parse(JSON.stringify(value));
+function digestOf(material) {
+  const text = JSON.stringify(material, (_key, value) => value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : value);
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0;index < text.length; index += 1) {
+    hash ^= BigInt(text.charCodeAt(index));
+    hash = hash * 0x100000001b3n & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
 export function resolveProfile(input) {
   let profile;
   let options = {};
@@ -29,22 +55,28 @@ export function resolveProfile(input) {
       profile = getRandomProfile();
     }
   }
-  const tls = options.tls ? { ...profile.tls, ...options.tls } : profile.tls;
-  const h2Settings = options.h2Settings ? { ...profile.h2Settings, ...options.h2Settings } : profile.h2Settings;
-  const headerOrder = options.headerOrder ?? profile.headerOrder;
+  profile = clone(profile);
+  const requestedTls = options.tls ? { ...profile.tls, ...options.tls } : { ...profile.tls };
+  const probed = tlsProbe(requestedTls);
+  const tls = probed.tls;
+  const tlsBoundary = probed.boundary;
+  const h2Settings = options.h2Settings ? { ...profile.h2Settings, ...options.h2Settings } : { ...profile.h2Settings };
+  if (!h2SettingsOrderAscending(h2Settings))
+    tlsBoundary.notExpressible = [...tlsBoundary.notExpressible, "h2SettingsOrder"];
+  const headerOrder = [...options.headerOrder ?? profile.headerOrder];
   const pseudoHeaderOrder = expandPseudoOrder(profile.pseudoHeaderOrder);
   const platform = options.platform ?? inferPlatformFromProfile(profile);
-  const userAgent = profile.userAgents[platform] ?? profile.userAgents.windows ?? profile.userAgents.macos;
+  const userAgent = profile.userAgents[platform];
+  if (userAgent === undefined || !platformSupported(profile, platform)) {
+    throw new RezoError(`Stealth profile "${profile.id}" has no identity for platform "${platform}" (available: ${supportedPlatforms(profile).join(", ")})`, {}, RezoErrorCode.STEALTH_PLATFORM_UNSUPPORTED);
+  }
+  const family = profile.family;
   const defaultHeaders = {
     "user-agent": userAgent,
     accept: profile.accept,
     "accept-encoding": profile.acceptEncoding,
     "accept-language": options.language ?? profile.acceptLanguage,
-    "sec-fetch-site": "none",
-    "sec-fetch-mode": "navigate",
-    "sec-fetch-user": "?1",
-    "sec-fetch-dest": "document",
-    "upgrade-insecure-requests": "1"
+    ...FAMILY_NAVIGATION_HEADERS[family]
   };
   const platformHints = getPlatformHints(platform);
   if (profile.clientHints.secChUa) {
@@ -53,15 +85,26 @@ export function resolveProfile(input) {
     defaultHeaders["sec-ch-ua-platform"] = platformHints.secChUaPlatform;
   }
   if (options.headers) {
-    for (const [key, value] of Object.entries(options.headers)) {
+    for (const [key, value] of Object.entries(options.headers))
       defaultHeaders[key.toLowerCase()] = value;
-    }
   }
+  const extraHeaders = clone(profile.extraHeaders ?? FAMILY_EXTRA_HEADERS[family] ?? {});
   const navigator = {
     ...profile.navigator,
     platform: platformHints.navigatorPlatform,
     maxTouchPoints: platformHints.maxTouchPoints
   };
+  const materialDigest = digestOf({
+    ciphers: tls.ciphers,
+    sigalgs: tls.sigalgs,
+    groups: tls.ecdhCurve,
+    minVersion: tls.minVersion,
+    maxVersion: tls.maxVersion,
+    alpn: tls.alpnProtocols,
+    h2Settings,
+    pseudoHeaderOrder
+  });
+  const transportDigest = options.rotate ? `${materialDigest}:rotation-${(rotationCounter += 1).toString(36)}` : materialDigest;
   return {
     profile,
     profileId: profile.id,
@@ -70,7 +113,10 @@ export function resolveProfile(input) {
     headerOrder,
     pseudoHeaderOrder,
     defaultHeaders,
-    navigator
+    extraHeaders,
+    navigator,
+    tlsBoundary,
+    transportDigest
   };
 }
 export function detectProfileFromUserAgent(userAgent) {
@@ -111,7 +157,11 @@ export function detectProfileFromUserAgent(userAgent) {
   }
   return closest;
 }
-const DESKTOP_PLATFORMS = ["windows", "macos", "linux"];
+function supportedPlatforms(profile) {
+  const shipped = Object.keys(profile.userAgents).filter((platform) => profile.userAgents[platform] !== undefined);
+  return profile.family === "safari" ? shipped.filter((platform) => platform === "macos" || platform === "ios") : shipped;
+}
+const platformSupported = (profile, platform) => supportedPlatforms(profile).includes(platform);
 function inferPlatformFromProfile(profile) {
   if (profile.device === "mobile") {
     if (profile.userAgents.android)

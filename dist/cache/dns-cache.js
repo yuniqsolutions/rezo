@@ -1,11 +1,13 @@
 import { LRUCache } from './lru-cache.js';
-import { requireNodeModule } from '../utils/node-runtime.js';
+import { importNodeModule } from '../utils/node-runtime.js';
 const DEFAULT_DNS_TTL = 60000;
 const DEFAULT_DNS_MAX_ENTRIES = 1000;
 
 export class DNSCache {
   cache;
   enabled;
+  pendingScalarLookups = new Map;
+  pendingAllLookups = new Map;
   constructor(options = {}) {
     this.enabled = options.enable !== false;
     this.cache = new LRUCache({
@@ -22,21 +24,19 @@ export class DNSCache {
     }
     const key = this.makeKey(hostname, family);
     const cached = this.cache.get(key);
-    if (cached && cached.addresses.length > 0) {
-      const address = cached.addresses[Math.floor(Math.random() * cached.addresses.length)];
-      if (address && typeof address === "string") {
-        return { address, family: cached.family };
+    if (cached && cached.entries.length > 0) {
+      const entry = cached.entries[Math.floor(Math.random() * cached.entries.length)];
+      if (entry) {
+        return { address: entry.address, family: entry.family };
       }
     }
-    const result = await this.resolveDNS(hostname, family);
-    if (result && result.address && typeof result.address === "string") {
-      this.cache.set(key, {
-        addresses: [result.address],
-        family: result.family,
-        timestamp: Date.now()
-      });
-    }
-    return result;
+    return this.coalesce(this.pendingScalarLookups, key, async () => {
+      const result = await this.resolveDNS(hostname, family);
+      if (result && typeof result.address === "string" && result.address.length > 0) {
+        this.store(key, [result]);
+      }
+      return result;
+    });
   }
   async lookupAll(hostname, family) {
     if (!this.enabled) {
@@ -44,50 +44,66 @@ export class DNSCache {
     }
     const key = this.makeKey(hostname, family);
     const cached = this.cache.get(key);
-    if (cached && cached.addresses.length > 0) {
-      return cached.addresses.map((address) => ({ address, family: cached.family }));
+    if (cached && cached.entries.length > 0) {
+      return cached.entries.map((entry) => ({ address: entry.address, family: entry.family }));
     }
-    const results = await this.resolveAllDNS(hostname, family);
-    if (results.length > 0) {
-      this.cache.set(key, {
-        addresses: results.map((r) => r.address),
-        family: results[0].family,
-        timestamp: Date.now()
-      });
-    }
-    return results;
-  }
-  resolveDNS(hostname, family) {
-    return new Promise((resolve) => {
-      const dns = requireNodeModule("node:dns");
-      if (!dns?.lookup) {
-        resolve(undefined);
-        return;
+    return this.coalesce(this.pendingAllLookups, key, async () => {
+      const results = await this.resolveAllDNS(hostname, family);
+      if (results.length > 0) {
+        this.store(key, results);
       }
-      const options = { family: family ?? 0 };
-      dns.lookup(hostname, options, (err, address, resultFamily) => {
-        if (err || !address || typeof address !== "string") {
+      return results;
+    });
+  }
+  coalesce(pending, key, resolve) {
+    const inFlight = pending.get(key);
+    if (inFlight) {
+      return inFlight;
+    }
+    const lookup = resolve().finally(() => {
+      if (pending.get(key) === lookup) {
+        pending.delete(key);
+      }
+    });
+    pending.set(key, lookup);
+    return lookup;
+  }
+  store(key, entries) {
+    const copies = entries.map((entry) => ({ address: entry.address, family: entry.family }));
+    this.cache.set(key, {
+      entries: copies,
+      addresses: copies.map((entry) => entry.address),
+      family: copies[0]?.family ?? 4,
+      timestamp: Date.now()
+    });
+  }
+  async resolveDNS(hostname, family) {
+    const dns = await importNodeModule("node:dns");
+    if (!dns?.lookup) {
+      return;
+    }
+    return new Promise((resolve) => {
+      dns.lookup(hostname, { family: family ?? 0 }, (error, address, resultFamily) => {
+        if (error || typeof address !== "string" || address.length === 0) {
           resolve(undefined);
-        } else {
-          resolve({ address, family: resultFamily });
+          return;
         }
+        resolve({ address, family: resultFamily === 6 ? 6 : 4 });
       });
     });
   }
-  resolveAllDNS(hostname, family) {
+  async resolveAllDNS(hostname, family) {
+    const dns = await importNodeModule("node:dns");
+    if (!dns?.lookup) {
+      return [];
+    }
     return new Promise((resolve) => {
-      const dns = requireNodeModule("node:dns");
-      if (!dns?.lookup) {
-        resolve([]);
-        return;
-      }
-      const options = { family: family ?? 0, all: true };
-      dns.lookup(hostname, options, (err, addresses) => {
-        if (err || !addresses || !Array.isArray(addresses)) {
+      dns.lookup(hostname, { family: family ?? 0, all: true }, (error, addresses) => {
+        if (error || !Array.isArray(addresses)) {
           resolve([]);
-        } else {
-          resolve(addresses.map((a) => ({ address: a.address, family: a.family })));
+          return;
         }
+        resolve(addresses.map((entry) => ({ address: entry.address, family: entry.family === 6 ? 6 : 4 })));
       });
     });
   }

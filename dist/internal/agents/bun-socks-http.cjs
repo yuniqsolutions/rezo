@@ -3,6 +3,8 @@ const { Readable } = require("node:stream");
 const net = require("node:net");
 const tls = require("node:tls");
 const { SocksClient } = require('./socks-client.cjs');
+const { destroyPendingProxyHandshake, releasePendingProxyHandshake, trackPendingProxyHandshake } = require('./pending-proxy-handshake.cjs');
+const { waitForSocketConnection } = require('./wait-for-socket-connection.cjs');
 const { parseProxyString } = require('../../proxy/parse.cjs');
 function isBunRuntime() {
   return typeof globalThis.Bun !== "undefined";
@@ -165,6 +167,7 @@ class BunSocksClientRequest extends EventEmitter {
   abort() {
     this._aborted = true;
     this.destroyed = true;
+    destroyPendingProxyHandshake(this);
     if (this._socket) {
       this._socket.destroy();
     }
@@ -173,6 +176,7 @@ class BunSocksClientRequest extends EventEmitter {
   destroy(error) {
     this._aborted = true;
     this.destroyed = true;
+    destroyPendingProxyHandshake(this, error);
     if (this._socket) {
       this._socket.destroy(error);
     }
@@ -233,12 +237,21 @@ class BunSocksClientRequest extends EventEmitter {
       }, this._timeout);
     }
     try {
-      const socksOpts = {
-        proxy: this._proxy,
-        destination: { host: this.host, port },
-        command: "connect"
-      };
-      const { socket } = await SocksClient.createConnection(socksOpts);
+      const proxySocket = net.connect({ host: this._proxy.host, port: this._proxy.port });
+      trackPendingProxyHandshake(this, proxySocket);
+      let socket;
+      try {
+        await waitForSocketConnection(proxySocket);
+        const socksOpts = {
+          proxy: this._proxy,
+          destination: { host: this.host, port },
+          command: "connect",
+          existing_socket: proxySocket
+        };
+        ({ socket } = await SocksClient.createConnection(socksOpts));
+      } finally {
+        releasePendingProxyHandshake(this, proxySocket);
+      }
       if (this._aborted) {
         socket.destroy();
         return;
@@ -248,7 +261,10 @@ class BunSocksClientRequest extends EventEmitter {
           throw new Error("Socket was destroyed before TLS upgrade");
         }
         const rejectUnauthorized = this._options.rejectUnauthorized;
+        const targetTlsOptions = this._options.targetTlsOptions;
         const tlsSocket = tls.connect({
+          ...targetTlsOptions ?? {},
+          ALPNProtocols: ["http/1.1"],
           socket,
           servername: !net.isIP(this.host) ? this.host : undefined,
           rejectUnauthorized: rejectUnauthorized !== false

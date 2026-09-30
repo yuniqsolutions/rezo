@@ -89,9 +89,56 @@ const FIREFOX_133 = exports.FIREFOX_133 = {
   clientHints: NO_HINTS,
   navigator: NAV
 };
+const FIREFOX_140_ESR = exports.FIREFOX_140_ESR = {
+  id: "firefox-140-esr",
+  family: "firefox",
+  engine: "gecko",
+  version: "140.0",
+  majorVersion: 140,
+  device: "desktop",
+  esr: true,
+  tls: firefoxTls(140),
+  h2Settings: FIREFOX_H2,
+  pseudoHeaderOrder: "mpas",
+  headerOrder: FIREFOX_133_HEADER_ORDER,
+  userAgents: {
+    windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0",
+    macos: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:140.0) Gecko/20100101 Firefox/140.0",
+    linux: "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
+  },
+  accept: FIREFOX_ACCEPT,
+  acceptEncoding: "gzip, deflate, br, zstd",
+  acceptLanguage: "en-US,en;q=0.5",
+  clientHints: NO_HINTS,
+  navigator: NAV
+};
+const FIREFOX_154 = exports.FIREFOX_154 = {
+  id: "firefox-154",
+  family: "firefox",
+  engine: "gecko",
+  version: "154.0",
+  majorVersion: 154,
+  device: "desktop",
+  tls: firefoxTls(154),
+  h2Settings: FIREFOX_H2,
+  pseudoHeaderOrder: "mpas",
+  headerOrder: FIREFOX_133_HEADER_ORDER,
+  userAgents: {
+    windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:154.0) Gecko/20100101 Firefox/154.0",
+    macos: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:154.0) Gecko/20100101 Firefox/154.0",
+    linux: "Mozilla/5.0 (X11; Linux x86_64; rv:154.0) Gecko/20100101 Firefox/154.0"
+  },
+  accept: FIREFOX_ACCEPT,
+  acceptEncoding: "gzip, deflate, br, zstd",
+  acceptLanguage: "en-US,en;q=0.5",
+  clientHints: NO_HINTS,
+  navigator: NAV
+};
 const FIREFOX_PROFILES = exports.FIREFOX_PROFILES = {
   "firefox-115": FIREFOX_115,
   "firefox-121": FIREFOX_121,
   "firefox-128": FIREFOX_128,
-  "firefox-133": FIREFOX_133
+  "firefox-133": FIREFOX_133,
+  "firefox-140-esr": FIREFOX_140_ESR,
+  "firefox-154": FIREFOX_154
 };

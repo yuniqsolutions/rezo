@@ -218,6 +218,57 @@ function sanitizeHttp2Headers(headers) {
   }
   return result;
 }
+function setRedirectHeader(target, name, value, replace) {
+  if (value === undefined) {
+    if (replace)
+      target.delete(name);
+    return;
+  }
+  const values = Array.isArray(value) ? value : [value];
+  if (values.length === 0) {
+    if (replace)
+      target.delete(name);
+    return;
+  }
+  if (replace)
+    target.set(name, String(values[0]));
+  else
+    target.append(name, String(values[0]));
+  for (const additional of values.slice(1))
+    target.append(name, String(additional));
+}
+function overlayRedirectHeaders(target, explicit) {
+  const applied = new Set;
+  const apply = (name, value) => {
+    const normalizedName = name.toLowerCase();
+    setRedirectHeader(target, name, value, !applied.has(normalizedName));
+    applied.add(normalizedName);
+  };
+  const knownIterable = explicit instanceof Headers || explicit instanceof RezoHeaders || Array.isArray(explicit);
+  const explicitObject = Object(explicit);
+  const genericIterator = Object.keys(explicitObject).length === 0 ? Reflect.get(explicitObject, Symbol.iterator) : undefined;
+  if (knownIterable || typeof genericIterator === "function") {
+    for (const [name, value] of explicit) {
+      apply(name, value);
+    }
+    return;
+  }
+  for (const [name, value] of Object.entries(explicit)) {
+    apply(name, value);
+  }
+}
+function prepareRedirectHeaders(inherited, relation, explicit) {
+  const prepared = new RezoHeaders(inherited);
+  prepared.delete("proxy-authorization");
+  if (relation !== "same-origin") {
+    prepared.delete("authorization");
+    prepared.delete("cookie");
+  }
+  if (explicit)
+    overlayRedirectHeaders(prepared, explicit);
+  prepared.delete("proxy-authorization");
+  return prepared;
+}
 
-export { RezoHeaders, sanitizeHttp2Headers };
+export { RezoHeaders, prepareRedirectHeaders, sanitizeHttp2Headers };
 export default RezoHeaders;

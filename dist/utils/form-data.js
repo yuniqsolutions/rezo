@@ -1,3 +1,4 @@
+import { FormDataEncodingCache } from './form-data-encoding.js';
 const hasBuffer = typeof Buffer !== "undefined";
 function isBuffer(value) {
   return hasBuffer && Buffer.isBuffer(value);
@@ -11,11 +12,11 @@ function toBlob(value, contentType) {
 
 export class RezoFormData {
   _fd;
-  _cachedContentType = null;
-  _cachedBuffer = null;
+  _encoding;
   _boundary;
   constructor() {
     this._fd = new FormData;
+    this._encoding = new FormDataEncodingCache(this._fd);
     this._boundary = "----RezoFormBoundary" + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
   }
   append(name, value, filename) {
@@ -80,71 +81,57 @@ export class RezoFormData {
     return this._fd;
   }
   _invalidateCache() {
-    this._cachedContentType = null;
-    this._cachedBuffer = null;
-  }
-  async _buildResponse() {
-    if (this._cachedBuffer === null || this._cachedContentType === null) {
-      const response = new Response(this._fd);
-      this._cachedContentType = response.headers.get("content-type") || "multipart/form-data";
-      this._cachedBuffer = await response.arrayBuffer();
-    }
-    return new Response(this._cachedBuffer, {
-      headers: { "content-type": this._cachedContentType }
-    });
+    this._encoding.invalidate();
   }
   getBoundary() {
-    if (!this._cachedContentType) {
+    const contentType = this._encoding.peek()?.contentType;
+    if (!contentType) {
       return "";
     }
-    const match = this._cachedContentType.match(/boundary=([^;]+)/);
+    const match = contentType.match(/boundary=([^;]+)/);
     return match ? match[1] : "";
   }
   getContentType() {
-    return this._cachedContentType || `multipart/form-data; boundary=${this._boundary}`;
+    return this._encoding.peek()?.contentType || `multipart/form-data; boundary=${this._boundary}`;
   }
   async getContentTypeAsync() {
-    await this._buildResponse();
-    return this._cachedContentType;
+    return (await this._encoding.read()).contentType;
   }
   getHeaders() {
-    if (this._cachedContentType) {
-      return { "content-type": this._cachedContentType };
+    const encoding = this._encoding.peek();
+    if (encoding) {
+      return { "content-type": encoding.contentType };
     }
     return {};
   }
   async getHeadersAsync() {
-    const contentType = await this.getContentTypeAsync();
-    const length = await this.getLength();
+    const { contentType, buffer } = await this._encoding.read();
     return {
       "content-type": contentType,
-      "content-length": String(length)
+      "content-length": String(buffer.byteLength)
     };
   }
   getLengthSync() {
-    return this._cachedBuffer?.byteLength;
+    return this._encoding.peek()?.buffer.byteLength;
   }
   async getLength() {
-    await this._buildResponse();
-    return this._cachedBuffer.byteLength;
+    return (await this._encoding.read()).buffer.byteLength;
   }
   getBuffer() {
-    if (!hasBuffer || !this._cachedBuffer) {
+    const encoding = this._encoding.peek();
+    if (!hasBuffer || !encoding) {
       return null;
     }
-    return Buffer.from(this._cachedBuffer);
+    return Buffer.from(encoding.buffer);
   }
   async toBuffer() {
-    await this._buildResponse();
-    return Buffer.from(this._cachedBuffer);
+    return Buffer.from((await this._encoding.read()).buffer);
   }
   async toArrayBuffer() {
-    await this._buildResponse();
-    return this._cachedBuffer;
+    return (await this._encoding.read()).buffer;
   }
   async toUint8Array() {
-    await this._buildResponse();
-    return new Uint8Array(this._cachedBuffer);
+    return new Uint8Array((await this._encoding.read()).buffer);
   }
   static fromObject(obj, options) {
     const fd = new RezoFormData;

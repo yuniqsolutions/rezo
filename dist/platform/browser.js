@@ -1,4 +1,4 @@
-import { executeRequest } from '../adapters/fetch.js';
+import { executeRequest } from '../adapters/xhr.js';
 import { setGlobalAdapter, createRezoInstance, Rezo } from '../core/rezo.js';
 import { RezoError, RezoErrorCode } from '../errors/rezo-error.js';
 import { RezoHeaders } from '../utils/headers.js';
@@ -26,5 +26,10 @@ export const spread = (callback) => (array) => callback(...array);
 
 export { VERSION };
 setGlobalAdapter(executeRequest);
-const rezo = createRezoInstance(executeRequest);
+const pageLocation = typeof location !== "undefined" && typeof location.href === "string" && /^https?:\/\//.test(location.href) ? location.href : undefined;
+const rezo = createRezoInstance(executeRequest, pageLocation ? { baseURL: pageLocation } : undefined);
+if (pageLocation) {
+  const createWithoutBase = rezo.create;
+  rezo.create = (config) => createWithoutBase({ baseURL: pageLocation, ...config ?? {} });
+}
 export default rezo;

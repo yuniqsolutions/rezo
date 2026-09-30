@@ -22,7 +22,7 @@ function parseProxyString(input) {
   let username;
   let password;
   const proto = input.includes("://") ? input.split("://")[0].toLowerCase() : "";
-  const protocol = proto.startsWith("http") ? "http" : proto.startsWith("https") ? "https" : proto.startsWith("socks4") ? "socks4" : "socks5";
+  const protocol = proto.startsWith("https") ? "https" : proto.startsWith("http") ? "http" : proto.startsWith("socks4") ? "socks4" : "socks5";
   if (protocol !== "socks5" || input.includes("://")) {
     input = input.split("://")[1];
   }

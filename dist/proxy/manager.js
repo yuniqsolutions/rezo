@@ -180,14 +180,20 @@ export class ProxyManager {
     return this.select(url).proxy;
   }
   select(url) {
-    const activeProxies = this.getActiveInternal();
+    return this.selectInternal(url, false, 0);
+  }
+  selectForRetryInternal(url, failedProxies, retryCount) {
+    return this.selectInternal(url, true, retryCount, new Set(failedProxies.map((proxy) => ensureId(proxy).id)));
+  }
+  selectInternal(url, isRetry, retryCount, excludedProxyIds = new Set) {
+    const activeProxies = this.getActiveInternal().filter((proxy) => !excludedProxyIds.has(proxy.id));
     const hookOverride = this.runBeforeProxySelectHooks({
       url,
       proxies: activeProxies,
-      isRetry: false,
-      retryCount: 0
+      isRetry,
+      retryCount
     });
-    if (hookOverride) {
+    if (hookOverride && !excludedProxyIds.has(ensureId(hookOverride).id)) {
       const identified = ensureId(hookOverride);
       this._totalRequests++;
       const overrideState = this.states.get(identified.id);
@@ -614,4 +620,8 @@ export class ProxyManager {
     this.runHooks("onNoProxiesAvailable", this.hooks.onNoProxiesAvailable, context);
     return context;
   }
+}
+export function selectProxyForRetry(manager, url, failedProxies, retryCount) {
+  const internalManager = manager;
+  return internalManager.selectForRetryInternal(url, failedProxies, retryCount).proxy;
 }

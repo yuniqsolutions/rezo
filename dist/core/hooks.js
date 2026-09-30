@@ -88,6 +88,31 @@ export async function runTransformHooks(hooks, initial, ...args) {
   }
   return result;
 }
+export async function settleFacadeError(hooks, facade, error) {
+  let finalError = error;
+  const beforeError = hooks?.beforeError;
+  if (beforeError && beforeError.length > 0) {
+    try {
+      finalError = await runTransformHooks(beforeError, error);
+    } catch (hookFailure) {
+      finalError = hookFailure;
+    }
+  }
+  facade.emit("error", finalError);
+}
+export function runAfterParseHooks(config, event) {
+  let data = event.data;
+  const afterParse = config.hooks?.afterParse;
+  if (!afterParse || afterParse.length === 0)
+    return data;
+  for (const hook of afterParse) {
+    const result = hook({ ...event, data }, config);
+    if (result !== undefined && result !== null) {
+      data = result;
+    }
+  }
+  return data;
+}
 export function runBooleanHooks(hooks, arg, ...args) {
   for (const hook of hooks) {
     const result = hook(arg, ...args);

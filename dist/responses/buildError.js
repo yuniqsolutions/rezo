@@ -1,4 +1,4 @@
-import { RezoError } from '../errors/rezo-error.js';
+import { ERROR_INFO, RezoError } from '../errors/rezo-error.js';
 import { buildResponse } from './buildResponse.js';
 function traverseCauseChain(error, detector, maxDepth = 10) {
   let current = error;
@@ -97,6 +97,9 @@ function detectErrorType(error) {
       return detectProxyError(errorMessage, errorCode);
     }
     return { type: "network", code: errorCode, message: errorMessage };
+  }
+  if (typeof errorCode === "string" && errorCode !== "" && errorCode in ERROR_INFO) {
+    return { type: "structured", code: errorCode, message: errorMessage };
   }
   return { type: "unknown", code: "REZ_UNKNOWN_ERROR", message: errorMessage };
 }
@@ -363,6 +366,9 @@ export function builErrorFromResponse(message, response, config, request) {
   }
   return new RezoError(message, config, "REZ_UNKNOWN_ERROR", request, response);
 }
+export function buildRedirectControlError(message, config, code, request, response) {
+  return new RezoError(message, config, code, request, response);
+}
 export function buildNetworkError(message, code, config, request) {
   return RezoError.createNetworkError(message, code, config, request);
 }
@@ -395,6 +401,9 @@ function hasProxyConfigured(config) {
 export function buildSmartError(config, request, cause) {
   if (!cause) {
     return new RezoError("Unknown error occurred", config, "REZ_UNKNOWN_ERROR", request);
+  }
+  if (cause instanceof RezoError && typeof cause.code === "string" && cause.code !== "REZ_UNKNOWN_ERROR") {
+    return cause;
   }
   let detected = detectErrorType(cause);
   if (detected.type === "network" || detected.type === "unknown") {
@@ -438,6 +447,9 @@ export function buildSmartError(config, request, cause) {
       break;
     case "network":
       error = RezoError.createNetworkError(detected.message, detected.code, config, request);
+      break;
+    case "structured":
+      error = new RezoError(detected.message || cause.message, config, detected.code, request);
       break;
     default:
       error = new RezoError(detected.message || "Unknown error occurred", config, "REZ_UNKNOWN_ERROR", request);

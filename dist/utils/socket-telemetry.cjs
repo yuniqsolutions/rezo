@@ -1,4 +1,14 @@
 const socketTelemetryMap = new WeakMap;
+function isSocketAlreadyOpen(socket) {
+  return socket.connecting === false && socket.readyState === "open" && socket.pending !== true;
+}
+function isTlsHandshakeComplete(socket) {
+  const tlsSocket = socket;
+  if (tlsSocket.encrypted !== true || typeof tlsSocket.getCipher !== "function")
+    return false;
+  const cipher = tlsSocket.getCipher();
+  return cipher !== null && cipher !== undefined && typeof cipher.name === "string" && cipher.name.length > 0;
+}
 let socketIdCounter = 0;
 function instrumentSocket(socket, isSecure = false) {
   const existing = socketTelemetryMap.get(socket);
@@ -32,7 +42,9 @@ function instrumentSocket(socket, isSecure = false) {
       telemetry.timings.family = typeof family === "number" ? family : family === "IPv6" ? 6 : 4;
     }
   });
-  socket.once("connect", () => {
+  const recordConnected = () => {
+    if (telemetry.connected)
+      return;
     telemetry.timings.connectEnd = Date.now();
     telemetry.timings.tcpDuration = telemetry.timings.connectEnd - (telemetry.timings.dnsEnd || telemetry.timings.created);
     telemetry.connected = true;
@@ -44,28 +56,37 @@ function instrumentSocket(socket, isSecure = false) {
       localPort: s.localPort,
       family: s.remoteFamily
     };
-  });
+  };
+  const recordSecureConnected = () => {
+    if (telemetry.timings.secureConnectEnd !== undefined)
+      return;
+    const tlsSocket = socket;
+    telemetry.timings.secureConnectEnd = Date.now();
+    telemetry.timings.tlsDuration = telemetry.timings.secureConnectEnd - (telemetry.timings.connectEnd || telemetry.timings.created);
+    const cipher = tlsSocket.getCipher?.();
+    const cert = tlsSocket.getPeerCertificate?.();
+    telemetry.tls = {
+      protocol: tlsSocket.getProtocol?.() || undefined,
+      cipher: cipher?.name,
+      authorized: tlsSocket.authorized,
+      authorizationError: tlsSocket.authorizationError,
+      certificate: cert ? {
+        subject: Array.isArray(cert.subject?.CN) ? cert.subject.CN[0] : cert.subject?.CN,
+        issuer: Array.isArray(cert.issuer?.CN) ? cert.issuer.CN[0] : cert.issuer?.CN,
+        validFrom: cert.valid_from,
+        validTo: cert.valid_to,
+        fingerprint: cert.fingerprint
+      } : undefined
+    };
+  };
+  socket.once("connect", recordConnected);
   if (isSecure) {
-    socket.once("secureConnect", () => {
-      const tlsSocket = socket;
-      telemetry.timings.secureConnectEnd = Date.now();
-      telemetry.timings.tlsDuration = telemetry.timings.secureConnectEnd - (telemetry.timings.connectEnd || telemetry.timings.created);
-      const cipher = tlsSocket.getCipher?.();
-      const cert = tlsSocket.getPeerCertificate?.();
-      telemetry.tls = {
-        protocol: tlsSocket.getProtocol?.() || undefined,
-        cipher: cipher?.name,
-        authorized: tlsSocket.authorized,
-        authorizationError: tlsSocket.authorizationError,
-        certificate: cert ? {
-          subject: Array.isArray(cert.subject?.CN) ? cert.subject.CN[0] : cert.subject?.CN,
-          issuer: Array.isArray(cert.issuer?.CN) ? cert.issuer.CN[0] : cert.issuer?.CN,
-          validFrom: cert.valid_from,
-          validTo: cert.valid_to,
-          fingerprint: cert.fingerprint
-        } : undefined
-      };
-    });
+    socket.once("secureConnect", recordSecureConnected);
+  }
+  if (isSocketAlreadyOpen(socket)) {
+    recordConnected();
+    if (isSecure && isTlsHandshakeComplete(socket))
+      recordSecureConnected();
   }
   socket.once("close", () => {
     telemetry.closed = true;
@@ -90,7 +111,7 @@ function beginRequestContext(socket, isSecure = false) {
     telemetry.reuse.lastUsed = startTime;
     telemetry.reuse.isReused = true;
   }
-  const connectionReused = wasInstrumented || telemetry.connected;
+  const connectionReused = wasInstrumented;
   return {
     startTime,
     connectionReused,
