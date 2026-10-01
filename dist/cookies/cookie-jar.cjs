@@ -2,8 +2,8 @@ const { CookieJar: TouchCookieJar } = require("tough-cookie");
 const { Cookie } = require('./cookie.cjs');
 const { requireNodeModule } = require('../utils/node-runtime.cjs');
 const { RezoError } = require('../errors/rezo-error.cjs');
-const _mod_9syblq = require('./cookie.cjs');
-exports.Cookie = _mod_9syblq.Cookie;;
+const _mod_jpx66k = require('./cookie.cjs');
+exports.Cookie = _mod_jpx66k.Cookie;;
 const REZO_COOKIE_PREFIX_KEY = "Rezo_prx_";
 const HOST_PREFIX = "__Host-";
 const STORED_HOST_PREFIX = `${REZO_COOKIE_PREFIX_KEY}Host-`;
@@ -637,7 +637,7 @@ class RezoCookieJar extends TouchCookieJar {
   }
 }
 const CookieJar = exports.CookieJar = RezoCookieJar;
-const _mod_rgu1jy = require("tough-cookie");
-exports.Store = _mod_rgu1jy.Store;;
+const _mod_dwa41s = require("tough-cookie");
+exports.Store = _mod_dwa41s.Store;;
 
 exports.RezoCookieJar = RezoCookieJar;

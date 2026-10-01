@@ -877,8 +877,10 @@ class Http2SessionPool {
         });
       }
     }
+    let proxyTunnel;
     if (proxy) {
       const establishedTunnel = await this.createProxyTunnel(url, proxy, establishmentDeadlineAt, options?.rejectUnauthorized, stealthProfile, creation);
+      proxyTunnel = establishedTunnel;
       creation?.markSupersededResourcesDisposable();
       sessionOptions.createConnection = () => establishedTunnel;
     }
@@ -921,6 +923,7 @@ class Http2SessionPool {
             reject(error);
             return;
           }
+          proxyTunnel?.resume();
           settled = true;
           if (timeoutId)
             clearTimeout(timeoutId);
@@ -1199,6 +1202,7 @@ class Http2SessionPool {
                     clearTimeout(tlsTimeoutId);
                   reject(new Error("TLS handshake closed before completion"));
                 });
+                proxySocket.resume();
               } else {
                 resolve(proxySocket);
               }

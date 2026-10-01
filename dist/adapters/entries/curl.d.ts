@@ -9012,7 +9012,7 @@ export interface RezoInstance<DefaultData = any> extends Rezo<DefaultData>, Rezo
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.140";
+export declare const VERSION = "1.0.141";
 export declare const isRezoError: typeof RezoError.isRezoError;
 export declare const Cancel: typeof RezoError;
 export declare const CancelToken: {

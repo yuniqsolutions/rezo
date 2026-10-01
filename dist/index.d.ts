@@ -6697,7 +6697,7 @@ export declare function getRandomProfileByFamily(family: BrowserProfile["family"
  *
  * IMPORTANT: Update these values when bumping package version.
  */
-export declare const VERSION = "1.0.140";
+export declare const VERSION = "1.0.141";
 export declare const PACKAGE_NAME = "rezo";
 export declare const isRezoError: typeof RezoError.isRezoError;
 export declare const Cancel: typeof RezoError;
